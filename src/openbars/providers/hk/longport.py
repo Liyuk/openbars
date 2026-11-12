@@ -19,7 +19,7 @@ https://github.com/Liyuk/openbars/discussions/68
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -93,13 +93,17 @@ def _candle_row(candle: Any) -> dict[str, Any]:
 
 
 def _session_day(stamp: Any) -> Any:
-    """Daily candle stamp -> HK session date. Aware stamps (UTC from the SDK) are converted to
-    ``Asia/Hong_Kong`` first, so a midnight-HKT bar stamped 16:00 UTC the day before maps to the
-    right session; naive stamps are taken as HK local time. Dates pass through."""
+    """Daily candle stamp -> HK session date.
+
+    The LongPort Python SDK turns the API's UTC unix timestamp into a **naive datetime in the
+    machine's local time zone** (``datetime.fromtimestamp(ts)``), so a naive stamp is read as
+    local time and converted to ``Asia/Hong_Kong`` (a midnight-HKT bar is the previous evening
+    on a US machine). Aware stamps are converted the same way; a raw unix timestamp is UTC.
+    Dates pass through."""
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        return datetime.fromtimestamp(stamp, UTC).astimezone(HK_TZ).date()
     if isinstance(stamp, datetime):
-        if stamp.tzinfo is not None:
-            return stamp.astimezone(HK_TZ).date()
-        return stamp.date()
+        return stamp.astimezone(HK_TZ).date()  # naive: interpreted as system local time
     return stamp
 
 

@@ -26,9 +26,21 @@ NOW = datetime(2026, 3, 10, tzinfo=UTC)
 FAKE_SECRET = "lp-" + "s3cr3t-value-0123456789"
 
 
+HKT = timezone(timedelta(hours=8))
+
+
+def sdk_naive(day):
+    """A daily candle stamped at HK midnight, as the SDK hands it over (naive local time)."""
+    return datetime.fromtimestamp(datetime.combine(day, datetime.min.time(), tzinfo=HKT).timestamp())
+
+
 def candle(day, close=Decimal("10.40"), tz=None):
     stamp = datetime.combine(day, datetime.min.time())
-    if tz == "utc":  # midnight HKT expressed in UTC: the previous calendar day, 16:00
+    if tz is None:  # what the SDK returns: datetime.fromtimestamp(ts) -> naive, machine-local
+        stamp = sdk_naive(day)
+    elif tz == "unix":
+        stamp = int(datetime.combine(day, datetime.min.time(), tzinfo=HKT).timestamp())
+    elif tz == "utc":  # midnight HKT expressed in UTC: the previous calendar day, 16:00
         stamp = (stamp - timedelta(hours=8)).replace(tzinfo=UTC)
     elif tz == "hkt":
         stamp = stamp.replace(tzinfo=timezone(timedelta(hours=8)))
@@ -66,7 +78,7 @@ def test_symbol_and_capabilities():
     assert limit.count <= 10 and limit.per == timedelta(seconds=1)
 
 
-@pytest.mark.parametrize("tz", [None, "utc", "hkt"])
+@pytest.mark.parametrize("tz", [None, "unix", "utc", "hkt"])
 def test_fetch_parses_exact_decimals_and_hk_session_dates(tz):
     days = [date(2026, 3, 2), date(2026, 3, 3)]
     hist = FakeHistory({"700.HK": [candle(d, tz=tz) for d in days]})
@@ -80,9 +92,9 @@ def test_fetch_parses_exact_decimals_and_hk_session_dates(tz):
 
 def test_mapping_candles_and_skips():
     data = [
-        {"timestamp": datetime(2026, 3, 1), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},  # Sunday
-        {"timestamp": datetime(2026, 3, 9), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},  # outside
-        {"timestamp": datetime(2026, 3, 4), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},
+        {"timestamp": sdk_naive(date(2026, 3, 1)), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},  # Sunday
+        {"timestamp": sdk_naive(date(2026, 3, 9)), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},  # outside
+        {"timestamp": sdk_naive(date(2026, 3, 4)), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5},
     ]
     result = make(FakeHistory({"700.HK": data})).fetch_bars_result(req())
     assert [b.session_date for b in result.batch.bars] == [date(2026, 3, 4)]
@@ -154,3 +166,20 @@ def test_registered_but_not_routed_by_planner():
     from openbars.providers.registry import discover
 
     assert discover()["longport"] is LongPortProvider and "longport" not in _PROVIDER_MARKETS
+
+
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", "UTC", "Asia/Hong_Kong", "Asia/Tokyo", "Pacific/Auckland"])
+def test_sdk_naive_local_stamps_map_to_the_hk_session_in_any_machine_zone(zone, monkeypatch):
+    """Review fix: the SDK's naive stamps are machine-local; reading them as HK local time shifted
+    sessions by a day on machines west of Hong Kong."""
+    import time as _time
+
+    monkeypatch.setenv("TZ", zone)
+    _time.tzset()
+    try:
+        days = [date(2026, 3, 2), date(2026, 3, 3), date(2026, 3, 6)]
+        batch = make(FakeHistory({"700.HK": [candle(d) for d in days]})).fetch_bars(req())
+        assert [b.session_date for b in batch.bars] == days
+    finally:
+        monkeypatch.undo()
+        _time.tzset()
