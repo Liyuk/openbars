@@ -17,10 +17,12 @@ from openbars.core.models import (
     CorporateAction,
     CorporateActionKind,
     Interval,
+    QualityFlag,
     Session,
 )
 from openbars.normalize.adjust import (
     AdjustmentError,
+    MISSING_CORPORATE_ACTIONS,
     QueryTimeAdjuster,
     adjust_rows,
     check_adjustment_as_of,
@@ -215,8 +217,47 @@ def test_duplicate_sources_are_not_double_counted_and_dispute_is_reported():
 
 def test_actions_only_touch_their_instrument():
     bars = series1() + [bar(PRE1, "20", iid="TEST2")]
-    out = adjust_rows(bars, [split(EX1, 4)], Adjustment.RAW).rows
-    assert out[0].close == D("500") and out[3].close == D("20")
+    # TEST2 has corporate-action rows (none are splits): attested, so RAW == stored, scale 1
+    acts = [split(EX1, 4), cash(date(2020, 1, 2), "1", iid="TEST2")]
+    out = adjust_rows(bars, acts, Adjustment.RAW).rows
+    assert out[0].close == D("500") and out[3].close == D("20") and out[3].adjustment is Adjustment.RAW
+
+
+def test_raw_without_any_actions_raises_instead_of_relabelling():
+    with pytest.raises(AdjustmentError) as exc:
+        adjust_rows(series1(), [], Adjustment.RAW)
+    assert exc.value.reason_code == MISSING_CORPORATE_ACTIONS == "missing_corporate_actions"
+    # actions of *another* instrument do not attest this one
+    with pytest.raises(AdjustmentError):
+        adjust_rows(series1(), [split(EX1, 4, iid="TEST2")], Adjustment.RAW)
+    # dividend modes need the actions too
+    with pytest.raises(AdjustmentError):
+        adjust_rows(series1(), [], Adjustment.SPLIT_DIVIDEND)
+    with pytest.raises(AdjustmentError):
+        adjust_rows([bar(PRE1, "500", stored=Adjustment.RAW)], [], Adjustment.SPLIT)
+    with pytest.raises(ValueError):
+        adjust_rows(series1(), [], Adjustment.RAW, on_missing_actions="ignore")
+
+
+def test_requests_that_need_no_derivation_do_not_need_actions():
+    bars = series1()
+    assert all(a is b for a, b in zip(adjust_rows(bars, [], Adjustment.SPLIT).rows, bars))
+    raw = [bar(PRE1, "500", stored=Adjustment.RAW)]
+    assert adjust_rows(raw, [], Adjustment.RAW).rows == raw
+
+
+def test_flag_mode_keeps_stored_basis_and_flags_only_unattested_instruments():
+    bars = series1() + [bar(PRE1, "20", iid="TEST2")]
+    res = adjust_rows(bars, [split(EX1, 4, iid="TEST2")], Adjustment.RAW, on_missing_actions="flag")
+    assert res.unverified == ("TEST1",)
+    t1, t2 = res.rows[:3], res.rows[3]
+    assert [b.close for b in t1] == [D("125"), D("130"), D("131")]  # stored values, not relabelled
+    assert all(b.adjustment is Adjustment.SPLIT for b in t1)
+    assert all(b.flags & QualityFlag.ADJUSTMENT_UNVERIFIED for b in t1)
+    assert t2.adjustment is Adjustment.RAW and t2.close == D("80") and not t2.flags
+    # the adjuster class carries the option
+    out = QueryTimeAdjuster(on_missing_actions="flag").adjust(series1(), [], Adjustment.RAW)
+    assert {b.adjustment for b in out} == {Adjustment.SPLIT}
 
 
 def test_adjustment_as_of_mixture_is_a_mismatch():

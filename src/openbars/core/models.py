@@ -87,9 +87,10 @@ class QualityFlag(Flag):
     VOLUME_MISSING = auto()
     SINGLE_SOURCE = auto()
     FILLED_FROM_FALLBACK = auto()
-    STALE = auto()
+    STALE = auto()  # fetched before a later split: the stored price basis may be stale
     GAP = auto()
     REVISED = auto()
+    ADJUSTMENT_UNVERIFIED = auto()  # no corporate-action rows: the stored basis could not be verified/derived
 
 
 @dataclass(frozen=True)

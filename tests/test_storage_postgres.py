@@ -3,7 +3,7 @@ the live tests (marker ``postgres_live``) need OPENBARS_TEST_PG_DSN and psycopg.
 
 import re
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -34,7 +34,9 @@ from openbars.storage.postgres import (
     check_upstream_compat,
     native_ddl,
 )
-from openbars.storage.schema import STATE_TABLES, TABLE_SCHEMAS
+from openbars.storage.schema import REF_IDENTITY_SCHEMAS, STATE_TABLES, TABLE_SCHEMAS
+
+ALL_SCHEMAS = {**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS}
 
 _PG_TYPE = {
     "int": "integer",
@@ -207,7 +209,8 @@ def test_native_readonly_backend_rejects_writes():
 
 def test_native_ddl_matches_parquet_schemas():
     ddl = {m.group(1): m.group(2) for s in native_ddl() if (m := re.match(r'CREATE TABLE IF NOT EXISTS "(\w+)" \(\n(.*)\n\)$', s, re.S))}
-    for name, schema in TABLE_SCHEMAS.items():
+    assert set(REF_IDENTITY_SCHEMAS) == {"unresolved", "symbol_observations", "upstream_ids"}
+    for name, schema in ALL_SCHEMAS.items():
         cols = re.findall(r'^\s*"(\w+)" ', ddl[name], re.M)
         assert cols == [f.name for f in schema], name
     assert '"open" NUMERIC(20,8) NOT NULL' in ddl["raw_bars"]
@@ -219,7 +222,15 @@ def test_native_ddl_matches_parquet_schemas():
         assert re.findall(r'^\s*"(\w+)" ', ddl[t.name], re.M) == [c.name for c in t.columns]
     assert not any("quota_" in s for s in native_ddl())
     idx = [s for s in native_ddl() if "UNIQUE INDEX" in s]
-    assert len(idx) == 4 and all("WHERE" in s for s in idx)
+    partial = [s for s in idx if "WHERE" in s]
+    assert len(idx) == 6 and len(partial) == 4  # raw + canonical daily/intraday, plus two identity indexes
+    # identity tables: keys mirror the Parquet merge keys / UnresolvedRecord.key
+    assert 'PRIMARY KEY ("instrument_id", "symbol", "provider")' in ddl["symbol_observations"]
+    assert 'PRIMARY KEY ("instrument_id")' in ddl["upstream_ids"]
+    assert any('"ux_upstream_ids_upstream_id" ON "upstream_ids" ("upstream_id")' in s for s in idx)
+    (unresolved_idx,) = [s for s in idx if '"ux_unresolved_key"' in s]
+    assert "kind, provider, market, symbol" in unresolved_idx and "corporate_action" in unresolved_idx
+    assert "PRIMARY KEY" not in ddl["unresolved"]  # nullable key parts: expression index instead
 
 
 def test_state_columns_match_between_sqlite_and_postgres_ddl(tmp_path):
@@ -233,7 +244,7 @@ def test_state_columns_match_between_sqlite_and_postgres_ddl(tmp_path):
 
 
 def test_native_requirements_cover_every_arrow_column():
-    for name, schema in TABLE_SCHEMAS.items():
+    for name, schema in ALL_SCHEMAS.items():
         assert set(NATIVE_REQUIRED[name]) == {f.name for f in schema}
     check_native(fake_catalog(NATIVE_REQUIRED))
 
@@ -311,6 +322,155 @@ def test_live_native_roundtrip(pg_dsn):
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_native_identity_tables_ingest_and_resolve(pg_dsn):
+    from pg_helpers import throwaway_schema
+
+    from openbars.core.models import CorporateAction, CorporateActionKind
+    from openbars.normalize.instruments import (
+        CORPORATE_ACTION_KIND,
+        UnresolvedRecord,
+        ingest_corporate_actions,
+    )
+
+    a, b = "us:eq:ZZA1", "us:eq:ZZB1"
+    with throwaway_schema(pg_dsn) as schema:
+        rw = PostgresBackend(pg_dsn, mode="native", write=True, schema=schema)
+        PostgresBackend(pg_dsn, mode="native", write=True, schema=schema)  # DDL is idempotent
+        m = rw.instruments
+        m.upsert(
+            [Instrument(a, Market.US, AssetClass.EQUITY, "USD"), Instrument(b, Market.US, AssetClass.EQUITY, "USD")],
+            [
+                SymbolMapping(a, "ZZZA", date(2020, 1, 1), date(2020, 1, 10)),
+                SymbolMapping(b, "ZZZA", date(2020, 1, 15)),
+                SymbolMapping(a, "ZZZA", date(2019, 1, 1), date(2019, 12, 31), provider="prov_special"),
+            ],
+        )
+        kw = dict(provider="prov_x", market=Market.US)
+        assert m.resolve("ZZZA", on=date(2020, 1, 10), **kw) == a  # valid_to inclusive
+        assert m.resolve("ZZZA", on=date(2020, 1, 13), **kw) is None  # gap between holders: reused, no fallback
+        assert m.resolve_detailed("ZZZA", on=date(2020, 1, 13), **kw).reason_code == "symbol_reused_uncovered_date"
+        assert m.resolve("ZZZA", on=date(2020, 1, 20), **kw) == b
+        assert m.resolve("ZZZA", on=date(2019, 6, 1), provider="prov_special", market=Market.US) == a
+        assert m.resolve("NOPE", on=date(2020, 1, 1), **kw) is None
+        # unique-history fallback now works on Postgres too (before: window-only SQL)
+        m.upsert([Instrument("us:eq:U1", Market.US, AssetClass.EQUITY, "USD")],
+                 [SymbolMapping("us:eq:U1", "TEST1", date(2020, 1, 1), date(2020, 6, 30))])
+        assert m.resolve("TEST1", on=date(2019, 12, 1), **kw) == "us:eq:U1"
+        assert m.resolve("TEST1", on=date(2020, 7, 1), **kw) is None
+        assert m.resolve_windows("TEST1", start=None, end=None, market=Market.US) == [("us:eq:U1", None, date(2020, 6, 30))]
+        gap_windows = m.resolve_windows("ZZZA", start=date(2020, 1, 6), end=date(2020, 1, 20), market=Market.US)
+        assert gap_windows == [(a, date(2020, 1, 6), date(2020, 1, 10)), (b, date(2020, 1, 15), date(2020, 1, 20))]
+        assert {i.instrument_id for i in m.instruments()} == {a, b, "us:eq:U1"} and len(m.mappings()) == 4
+        assert m.resolve_any("ZZZA", on=date(2020, 1, 20)) == b and m.resolve_any(a, on=date(2020, 1, 20)) == a
+
+        # ingest: ticker -> stable id by ex-date, gap unresolved and not written
+        third = Decimal("1") / Decimal("3")
+        summary = ingest_corporate_actions(
+            [
+                CorporateAction("ZZZA", date(2020, 1, 8), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("4")),
+                CorporateAction("ZZZA", date(2020, 1, 20), CorporateActionKind.DIVIDEND, "prov_x", amount=Decimal("0.25")),
+                CorporateAction("ZZZA", date(2020, 1, 21), CorporateActionKind.SPLIT, "prov_x", ratio=third),
+                CorporateAction("ZZZA", date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("2")),
+                CorporateAction(a, date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("5")),  # id kept
+            ],
+            m,
+        )
+        assert (summary.resolved, summary.unresolved, summary.already_mapped) == (4, 1, 1)
+        got = m.corporate_actions()
+        assert {(x.instrument_id, x.ex_date) for x in got} == {
+            (a, date(2020, 1, 8)), (a, date(2020, 1, 13)), (b, date(2020, 1, 20)), (b, date(2020, 1, 21))
+        }
+        assert all(isinstance(x.ratio, Decimal) or x.ratio is None for x in got)
+        assert not any(isinstance(v, float) for x in got for v in (x.ratio, x.amount))
+        assert {x.ratio for x in got if x.ex_date == date(2020, 1, 21)} == {Decimal("0.33333333")}  # as in Parquet
+        assert [x.amount for x in m.corporate_actions([b]) if x.amount] == [Decimal("0.25")]
+        for _ in range(2):  # re-ingest: the unresolved row does not multiply
+            ingest_corporate_actions(
+                [CorporateAction("ZZZA", date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("2"))], m
+            )
+        (q,) = m.unresolved(CORPORATE_ACTION_KIND)
+        assert (q.symbol, q.session_date, q.detail) == ("ZZZA", date(2020, 1, 13), "split")
+        assert m.unresolved_count() == 1
+        # keys: listings dedupe per provider+symbol (no date), bars per day, actions per kind
+        m.record_unresolved([
+            UnresolvedRecord("listing", "no_mapping", "ZZZA", "p", date(2020, 1, 1)),
+            UnresolvedRecord("listing", "no_mapping", "ZZZA", "p", date(2020, 1, 2)),
+            UnresolvedRecord("bar", "no_mapping", "ZZZA", "p", date(2020, 1, 1)),
+            UnresolvedRecord("bar", "no_mapping", "ZZZA", "p", date(2020, 1, 2)),
+            UnresolvedRecord("corporate_action", "no_mapping", "ZZZA", "prov_x", date(2020, 1, 13), detail="dividend"),
+        ])
+        assert (m.unresolved_count("listing"), m.unresolved_count("bar"), m.unresolved_count(CORPORATE_ACTION_KIND)) == (1, 2, 2)
+        m.discard_unresolved([UnresolvedRecord("listing", "x", "ZZZA", "p", date(2030, 1, 1))])  # date is not part of the key
+        m.discard_unresolved([UnresolvedRecord("bar", "x", "ZZZA", "p", date(2020, 1, 1))])
+        assert (m.unresolved_count("listing"), m.unresolved_count("bar")) == (0, 1)
+
+        # sightings keep the latest date; upstream ids are 1:1
+        m.observe([(a, "ZZZA", "p", date(2020, 1, 5)), (a, "ZZZA", "p", date(2020, 1, 3)), (b, "ZZZA", "p", date(2020, 2, 1))])
+        assert sorted(m.observations()) == [(a, "ZZZA", "p", date(2020, 1, 5)), (b, "ZZZA", "p", date(2020, 2, 1))]
+        m.set_upstream_id(a, 101)
+        m.set_upstream_id(a, 101)
+        assert m.upstream_ids() == {a: 101}
+        with pytest.raises(ValueError):
+            m.set_upstream_id(a, 102)
+        with pytest.raises(ValueError):
+            m.set_upstream_id(b, 101)
+        assert m.upstream_ids() == {a: 101}
+
+        # remove_mappings: the holder's window disappears and resolution follows
+        m.remove_mappings([SymbolMapping(a, "ZZZA", date(2020, 1, 1), date(2020, 1, 10))])
+        assert m.resolve("ZZZA", on=date(2020, 1, 20), **kw) == b
+        # b is now the symbol's only generic holder, so the unique-history fallback covers the past
+        assert m.resolve_detailed("ZZZA", on=date(2020, 1, 8), **kw).via == "unique_history"
+
+        ro = PostgresBackend(pg_dsn, mode="native", write=False, schema=schema).instruments
+        assert ro.unresolved_count() == 3 and ro.upstream_ids() == {a: 101} and len(ro.observations()) == 2
+        for call in (
+            lambda: ro.record_unresolved([UnresolvedRecord("bar", "x", "S", "p", date(2020, 1, 1))]),
+            lambda: ro.discard_unresolved([]),
+            lambda: ro.observe([]),
+            lambda: ro.set_upstream_id(a, 1),
+            lambda: ro.remove_mappings([]),
+        ):
+            with pytest.raises(ReadOnlyError):
+                call()
+
+
+@pytest.mark.postgres_live
+def test_live_quota_native_store_reserve_commit_and_penalize(pg_dsn):
+    from pg_helpers import throwaway_schema
+
+    from openbars.quota.postgres import PostgresQuotaStore
+
+    now = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    with throwaway_schema(pg_dsn) as schema:
+        store = PostgresQuotaStore.from_dsn(pg_dsn, mode="native", schema=schema)
+        store.ensure_schema()
+        store.ensure_schema()  # idempotent
+        with store.transaction("prov_a", "default") as tx:
+            gate, usage = tx.load(now - timedelta(hours=1))
+            assert gate.next_request_at is None and gate.penalized_until is None and list(usage) == []
+            tx.record(now, 3, now + timedelta(seconds=2), now - timedelta(hours=1))
+        gate, usage = store.read("prov_a", "default", now - timedelta(hours=1))
+        assert gate.next_request_at == now + timedelta(seconds=2)
+        assert [(u.reserved_at, u.weight) for u in usage] == [(now, 3)]
+        with pytest.raises(RuntimeError):  # a rolled-back block leaves nothing behind
+            with store.transaction("prov_a", "default") as tx:
+                tx.record(now + timedelta(seconds=5), 1, now + timedelta(seconds=9), now - timedelta(hours=1))
+                raise RuntimeError("boom")
+        _, usage = store.read("prov_a", "default", now - timedelta(hours=1))
+        assert [u.weight for u in usage] == [3]
+        until = now + timedelta(minutes=5)
+        store.penalize("prov_a", until)
+        store.penalize("prov_a", now + timedelta(minutes=1))  # shorter penalty never shortens
+        gate, _ = store.read("prov_a", "default", now)
+        assert gate.penalized_until == until
+        assert list(store.scopes("prov_a")) == ["default"]
+        # the quota tables live next to, not inside, the storage native schema
+        with pytest.raises(StorageError):
+            PostgresBackend(pg_dsn, mode="native", write=False, schema=schema)  # storage tables were never created
 
 
 @pytest.mark.postgres_live

@@ -345,6 +345,25 @@ def test_corporate_actions_map_and_paginate():
     assert all(a.source == "alpaca" for a in actions)
 
 
+def test_parsed_actions_are_mapped_to_stable_ids_by_the_ingest_helper():
+    from openbars.core.models import AssetClass, Instrument, Market, SymbolMapping
+    from openbars.normalize.instruments import MemoryInstrumentMaster, ingest_corporate_actions
+
+    server = Server(ok("corporate_actions_page1.json"), ok("corporate_actions_page2.json"))
+    actions = list(provider(server).fetch_corporate_actions(request_for("TEST1", "ZZZA")))
+    assert {a.instrument_id for a in actions} == {"TEST1", "ZZZA"}  # as returned at the boundary
+    master = MemoryInstrumentMaster()
+    master.upsert(
+        [Instrument("us:eq:T1", Market.US, AssetClass.EQUITY, "USD")],
+        [SymbolMapping("us:eq:T1", "TEST1", date(2020, 1, 1))],  # ZZZA is unknown
+    )
+    summary = ingest_corporate_actions(actions, master)
+    assert summary.resolved == sum(a.instrument_id == "TEST1" for a in actions) > 0
+    assert summary.unresolved == sum(a.instrument_id == "ZZZA" for a in actions) > 0
+    assert {a.instrument_id for a in master.corporate_actions()} == {"us:eq:T1"}
+    assert {r.symbol for r in master.unresolved("corporate_action")} == {"ZZZA"}
+
+
 def test_corporate_actions_result_reports_skips_and_partials():
     server = Server(ok("corporate_actions_page1.json"), ok("corporate_actions_page2.json"))
     result = provider(server).fetch_corporate_actions_result(request_for("TEST1", "ZZZA"))

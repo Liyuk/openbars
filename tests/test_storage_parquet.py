@@ -353,11 +353,16 @@ def test_reader_resolves_symbols_and_filters(backend):
     assert backend.reader.bars(interval=Interval.D1, adjustment=None).num_rows == 10
     from openbars.core.models import Adjustment
 
-    # RAW is now derived at query time from the stored split-adjusted bars (no splits recorded
-    # here, so the prices equal the stored ones); before normalize.adjust it filtered the
-    # stored column and returned nothing.
-    raw = backend.reader.bars(adjustment=Adjustment.RAW)
-    assert raw.num_rows == 10 and set(raw.column("adjustment").to_pylist()) == {"raw"}
+    # RAW is derived at query time. With no corporate-action rows at all the stored (split-
+    # adjusted) prices must not be relabelled RAW: the read raises (or, opted in, flags them).
+    from openbars.normalize.adjust import AdjustmentError
+
+    with pytest.raises(AdjustmentError) as exc:
+        backend.reader.bars(adjustment=Adjustment.RAW)
+    assert exc.value.reason_code == "missing_corporate_actions"
+    flagged = backend.reader.bars(adjustment=Adjustment.RAW, on_missing_actions="flag")
+    assert flagged.num_rows == 10 and set(flagged.column("adjustment").to_pylist()) == {"split"}
+    assert all("ADJUSTMENT_UNVERIFIED" in f for f in flagged.column("flags").to_pylist())
     assert backend.reader.bars(as_of=date(2000, 1, 1)).num_rows == 0
     assert backend.reader.bars(policy_version="other-policy").num_rows == 0
 

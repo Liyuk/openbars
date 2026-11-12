@@ -78,10 +78,14 @@ class PostgresQuotaStore:
         self.usage_table = "provider_request_usage" if self.compat else "quota_usage"
 
     @classmethod
-    def from_dsn(cls, dsn: str, *, mode: SchemaMode = "native") -> "PostgresQuotaStore":
+    def from_dsn(
+        cls, dsn: str, *, mode: SchemaMode = "native", schema: str | None = None
+    ) -> "PostgresQuotaStore":
+        """Connect per operation with psycopg; ``schema`` (optional) is the ``search_path``."""
         import psycopg  # optional extra: openbars[postgres]
 
-        return cls(lambda: psycopg.connect(dsn), mode=mode)
+        options = None if schema is None else f"-c search_path={schema}"
+        return cls(lambda: psycopg.connect(dsn, options=options), mode=mode)
 
     def ensure_schema(self) -> None:
         if self.compat:

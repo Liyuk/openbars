@@ -23,11 +23,20 @@ from openbars.storage.parquet_duckdb import open_backend
 D = date
 
 
-@pytest.fixture(params=["memory", "parquet"])
+@pytest.fixture(params=["memory", "parquet", pytest.param("postgres", marks=pytest.mark.postgres_live)])
 def store(request, tmp_path):
     if request.param == "memory":
-        return MemoryInstrumentMaster()
-    return open_backend(tmp_path / "data").instruments
+        yield MemoryInstrumentMaster()
+    elif request.param == "parquet":
+        yield open_backend(tmp_path / "data").instruments
+    else:  # native Postgres in a throwaway schema (skipped without OPENBARS_TEST_PG_DSN)
+        from pg_helpers import throwaway_schema
+
+        from openbars.storage.postgres import PostgresBackend
+
+        dsn = request.getfixturevalue("pg_dsn")
+        with throwaway_schema(dsn) as schema:
+            yield PostgresBackend(dsn, mode="native", write=True, schema=schema).instruments
 
 
 @pytest.fixture

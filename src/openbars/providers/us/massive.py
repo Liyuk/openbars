@@ -642,7 +642,10 @@ class MassiveProvider(HttpProviderAdapter):
 
     # -- corporate actions -------------------------------------------------------------------
     def fetch_corporate_actions(self, request: FetchRequest) -> Iterable[CorporateAction]:
-        """Splits by default; ``request.feed == "ticker_events"`` selects ticker events."""
+        """Splits by default; ``request.feed == "ticker_events"`` selects ticker events.
+
+        As returned (ticker in ``instrument_id``); map with ``ingest_corporate_actions``.
+        """
         return self._corporate_actions(request, allow_partial=False).actions
 
     def fetch_corporate_actions_result(self, request: FetchRequest) -> CorporateActionsResult:
