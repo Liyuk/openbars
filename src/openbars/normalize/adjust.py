@@ -41,6 +41,23 @@ Conventions
 * Several sources' rows for one event are first merged by ``merge_corporate_actions``
   (disputed events use the chosen row and are listed in ``AdjustResult.disputed``).
 
+Missing corporate actions
+-------------------------
+Stored split-adjusted bars cannot be turned into another basis without the corporate-action
+rows, and *no rows* cannot be told apart from *a name that never split*. So deriving a basis
+other than the stored one (``RAW``, ``SPLIT_DIVIDEND`` / ``ALL`` from stored ``SPLIT``, or
+``SPLIT`` / ... from stored ``RAW``) for an instrument that has **no** corporate-action row
+at all never relabels the stored prices:
+
+* ``on_missing_actions="raise"`` (default): ``AdjustmentError`` with reason code
+  ``missing_corporate_actions``.
+* ``on_missing_actions="flag"``: those bars are returned on the *stored* basis (their
+  ``adjustment`` is unchanged) with ``QualityFlag.ADJUSTMENT_UNVERIFIED``, and the
+  instruments are listed in ``AdjustResult.unverified``. Other instruments are derived.
+
+An instrument that *has* rows but none after a given bar is attested ("we looked"): the
+split scale is 1 and ``RAW`` is exact. Requests that need no derivation are unaffected.
+
 ``adjustment_as_of`` consistency: a call whose rows carry differing ``adjustment_as_of``
 values (``RawBarRow``) is an ``adjustment_cutoff_mismatch`` and raises ``AdjustmentError``.
 """
@@ -55,7 +72,7 @@ from datetime import date
 from decimal import ROUND_HALF_EVEN, Context, Decimal
 from typing import Any, Generic, Iterable, Protocol, Sequence, TypeVar
 
-from openbars.core.models import Adjustment, Bar, CorporateAction, CorporateActionKind
+from openbars.core.models import Adjustment, Bar, CorporateAction, CorporateActionKind, QualityFlag
 from openbars.normalize.actions import MergedAction, merge_corporate_actions
 from openbars.reconcile.compatibility import ADJUSTMENT_CUTOFF_MISMATCH, SeriesCompatibility
 
@@ -64,11 +81,15 @@ __all__ = [
     "Adjuster",
     "AdjustmentError",
     "QueryTimeAdjuster",
+    "MISSING_CORPORATE_ACTIONS",
     "SkippedAction",
     "adjust_rows",
     "check_adjustment_as_of",
     "requires_derivation",
+    "with_flags",
 ]
+
+MISSING_CORPORATE_ACTIONS = "missing_corporate_actions"
 
 _CTX = Context(prec=60)
 _PRICE_Q = Decimal(1).scaleb(-8)
@@ -103,6 +124,7 @@ class AdjustResult(Generic[Row]):
     rows: list[Row]
     skipped: tuple[SkippedAction, ...] = ()
     disputed: tuple[MergedAction, ...] = ()  # events whose sources disagreed (chosen row used)
+    unverified: tuple[str, ...] = ()  # instruments left on the stored basis (no corporate-action rows)
 
 
 def check_adjustment_as_of(values: Iterable[date | None]) -> SeriesCompatibility:
@@ -110,6 +132,26 @@ def check_adjustment_as_of(values: Iterable[date | None]) -> SeriesCompatibility
     if len(set(values)) > 1:
         return SeriesCompatibility(False, ADJUSTMENT_CUTOFF_MISMATCH)
     return SeriesCompatibility(True, None)
+
+
+def with_flags(row: Any, flags: QualityFlag) -> Any:
+    """``row`` with ``flags`` OR-ed in (``flags`` may be a tuple of names or a ``QualityFlag``).
+
+    Rows without a ``flags`` field are returned unchanged.
+    """
+    current = getattr(row, "flags", None)
+    if current is None:
+        return row
+    if isinstance(current, QualityFlag):
+        merged = current | flags
+        return row if merged == current else dataclasses.replace(row, flags=merged)
+    have = QualityFlag.NONE
+    for name in current:
+        have |= QualityFlag[name]
+    merged = have | flags
+    if merged == have:
+        return row
+    return dataclasses.replace(row, flags=tuple(f.name for f in QualityFlag if f is not QualityFlag.NONE and f in merged))
 
 
 def _prod(values: Iterable[Decimal]) -> Decimal:
@@ -214,14 +256,19 @@ def adjust_rows(
     as_of: date | None = None,
     include_stock_dividends: bool = False,
     source_priority: Sequence[str] = (),
+    on_missing_actions: str = "raise",
 ) -> AdjustResult[Row]:
     """Derive ``mode`` (at ``as_of``) for ``Bar`` / ``CanonicalBarRow`` / ``RawBarRow`` rows.
 
     Rows may span instruments and need not be sorted; the output keeps the input order.
     Rows already on the requested basis (nothing to undo/apply) are returned as the same
-    object. See the module docstring for the arithmetic.
+    object. ``on_missing_actions`` (``"raise"`` | ``"flag"``) decides what happens to an
+    instrument with no corporate-action rows when a different basis is requested. See the
+    module docstring for the arithmetic and that rule.
     """
     mode = Adjustment(mode)
+    if on_missing_actions not in ("raise", "flag"):
+        raise ValueError(f"on_missing_actions must be 'raise' or 'flag', got {on_missing_actions!r}")
     rows = list(rows)
     mismatch = check_adjustment_as_of(getattr(r, "adjustment_as_of", None) for r in rows)
     if not mismatch.comparable:
@@ -236,6 +283,22 @@ def adjust_rows(
     acts: dict[str, list[CorporateAction]] = defaultdict(list)
     for m in merged:
         acts[m.action.instrument_id].append(m.action)
+
+    unverified: set[str] = set()
+    for iid, rs in by_instrument.items():
+        if iid in acts:
+            continue
+        if any(
+            Adjustment(r.adjustment) not in (mode, Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) for r in rs
+        ):  # (stored dividend-adjusted series are rejected below)
+            unverified.add(iid)
+    if unverified and on_missing_actions == "raise":
+        shown = ", ".join(sorted(unverified)[:5]) + (" ..." if len(unverified) > 5 else "")
+        raise AdjustmentError(
+            f"cannot derive {mode.value} bars: no corporate-action rows for {shown} "
+            "(no rows is not the same as no splits; ingest actions or pass on_missing_actions='flag')",
+            MISSING_CORPORATE_ACTIONS,
+        )
 
     skipped: list[SkippedAction] = []
     dividend_mode = mode in (Adjustment.SPLIT_DIVIDEND, Adjustment.ALL)
@@ -273,6 +336,9 @@ def adjust_rows(
                 out.append(r)
                 continue
             raise AdjustmentError(f"cannot derive {mode.value} from stored {stored.value} bars")
+        if r.instrument_id in unverified and stored is not mode:
+            out.append(with_flags(r, QualityFlag.ADJUSTMENT_UNVERIFIED))  # stored basis, never relabelled
+            continue
         scale, invert = _split_scale(stored, mode, r.session_date, as_of, insts[r.instrument_id])
         div = _prod(f for ex, f in div_factors[r.instrument_id] if ex > r.session_date)
         if stored is mode and scale == _ONE and div == _ONE:
@@ -289,7 +355,7 @@ def adjust_rows(
             changes["volume"] = _quant(v)
         changes["adjustment"] = mode if isinstance(r.adjustment, Adjustment) else mode.value
         out.append(dataclasses.replace(r, **changes))
-    return AdjustResult(out, tuple(skipped), tuple(m for m in merged if m.disputed))
+    return AdjustResult(out, tuple(skipped), tuple(m for m in merged if m.disputed), tuple(sorted(unverified)))
 
 
 class QueryTimeAdjuster:
@@ -305,10 +371,12 @@ class QueryTimeAdjuster:
         as_of: date | None = None,
         include_stock_dividends: bool = False,
         source_priority: Sequence[str] = (),
+        on_missing_actions: str = "raise",
     ) -> None:
         self.as_of = as_of
         self.include_stock_dividends = include_stock_dividends
         self.source_priority = tuple(source_priority)
+        self.on_missing_actions = on_missing_actions
 
     def adjust_with_report(
         self, bars: Sequence[Bar], actions: Iterable[CorporateAction], mode: Adjustment
@@ -320,6 +388,7 @@ class QueryTimeAdjuster:
             as_of=self.as_of,
             include_stock_dividends=self.include_stock_dividends,
             source_priority=self.source_priority,
+            on_missing_actions=self.on_missing_actions,
         )
 
     def adjust(

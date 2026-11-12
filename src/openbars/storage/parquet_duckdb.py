@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
 import duckdb
 import pyarrow as pa
@@ -53,10 +53,12 @@ from openbars.core.models import (
     Instrument,
     Interval,
     Market,
+    QualityFlag,
     RawBar,
     SymbolMapping,
 )
-from openbars.normalize.adjust import adjust_rows, requires_derivation
+from openbars.normalize.actions import stale_bar_indexes
+from openbars.normalize.adjust import adjust_rows, requires_derivation, with_flags
 from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
@@ -627,7 +629,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
         self._by_symbol = dict(by_symbol)
         self._cache_sig = sig
 
-    def _resolution_view(self):
+    def _resolution_view(self, symbol: str | None = None):
         self._load()
         return self._instruments, self._by_symbol
 
@@ -704,7 +706,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
                 "kind": r.kind, "reason_code": r.reason_code, "symbol": r.symbol, "provider": r.provider,
                 "market": Market(r.market).value, "session_date": r.session_date, "detail": r.detail,
             }
-            for r in sorted(records, key=lambda r: (r.kind, r.provider, r.symbol, r.session_date or date.min))
+            for r in sorted(records, key=lambda r: (r.kind, r.provider, r.symbol, r.session_date or date.min, r.detail or ""))
         ]
         self._write_records("unresolved", UNRESOLVED_SCHEMA, rows)
 
@@ -844,6 +846,15 @@ def _action_record(a: CorporateAction) -> dict[str, Any]:
 # --- reader ------------------------------------------------------------------------------
 
 
+class _StaleProbe(NamedTuple):
+    """The four columns ``find_stale_after_split`` looks at, lifted from a canonical Arrow table."""
+
+    instrument_id: str
+    session_date: date
+    adjustment: str
+    generated_at: datetime
+
+
 class DuckDbBarReader:
     """``BarReader`` over the DuckDB catalog views; returns ``pyarrow.Table`` (exact decimals).
 
@@ -864,6 +875,16 @@ class DuckDbBarReader:
     window overlaps ``[start, end]`` (generic ``"*"`` mappings, same market/ambiguity/
     unique-history rules as ``resolve``), so a recycled ticker yields each company's bars
     only on the days it held the ticker and nothing on days it pointed elsewhere.
+
+    **Missing corporate actions.** Deriving a basis other than the stored one for an
+    instrument with no corporate-action rows cannot be done honestly (no rows is not "never
+    split"): by default ``AdjustmentError`` (``missing_corporate_actions``) is raised;
+    ``on_missing_actions="flag"`` returns those bars on the stored basis with
+    ``QualityFlag.ADJUSTMENT_UNVERIFIED`` instead. The plain stored read never needs actions.
+
+    **Stale flag.** When the instrument has splits, stored bars that predate a split's
+    ``ex_date`` but were generated before it (``find_stale_after_split``) get
+    ``QualityFlag.STALE`` OR-ed on. Nothing is refetched.
     """
 
     def __init__(self, backend: "ParquetDuckDbBackend") -> None:
@@ -883,6 +904,21 @@ class DuckDbBarReader:
                 out += master.resolve_windows(item, start=start, end=end, provider="*", market=m)
         return list(dict.fromkeys(out))
 
+    @staticmethod
+    def _stale_positions(table: pa.Table, actions: Sequence[CorporateAction]) -> set[int]:
+        if not any(a.kind is CorporateActionKind.SPLIT for a in actions):
+            return set()
+        probes = [
+            _StaleProbe(*values)
+            for values in zip(
+                table.column("instrument_id").to_pylist(),
+                table.column("session_date").to_pylist(),
+                table.column("adjustment").to_pylist(),
+                table.column("generated_at").to_pylist(),
+            )
+        ]
+        return stale_bar_indexes(probes, actions)
+
     def bars(
         self,
         symbols_or_ids: Sequence[str] | None = None,
@@ -895,6 +931,7 @@ class DuckDbBarReader:
         market: Market | None = None,
         policy_version: str = DEFAULT_POLICY_VERSION,
         stored_adjustment: Adjustment = Adjustment.SPLIT,
+        on_missing_actions: str = "raise",
     ) -> pa.Table:
         mode = None if adjustment is None else Adjustment(adjustment)
         stored = Adjustment(stored_adjustment)
@@ -940,17 +977,21 @@ class DuckDbBarReader:
             "ORDER BY session_date, instrument_id, ts_start"
         )
         table = self.backend.query(sql, params)
-        if mode is None or table.num_rows == 0:
+        if table.num_rows == 0:
             return table
 
         ids = sorted(set(table.column("instrument_id").to_pylist()))
-        if not derive and not (mode is Adjustment.SPLIT and as_of is not None):
-            return table  # stored basis verbatim (research-daily-v2 default)
+        must_derive = derive or (mode is Adjustment.SPLIT and as_of is not None)
         actions = self.backend.instruments.corporate_actions(ids)
-        if not derive and not requires_derivation(mode, stored=stored, as_of=as_of, actions=actions):
-            return table  # no split after ``as_of``: the stored series is already as-of
+        if must_derive and not derive and not requires_derivation(mode, stored=stored, as_of=as_of, actions=actions):
+            must_derive = False  # no split after ``as_of``: the stored series is already as-of
+        stale = self._stale_positions(table, actions)
+        if not must_derive and not stale:
+            return table  # stored basis verbatim (research-daily-v2 default)
         rows = table_to_rows(table, CanonicalBarRow)
-        adjusted = adjust_rows(rows, actions, mode, as_of=as_of).rows
+        if must_derive:
+            rows = adjust_rows(rows, actions, mode, as_of=as_of, on_missing_actions=on_missing_actions).rows
+        adjusted = [with_flags(r, QualityFlag.STALE) if i in stale else r for i, r in enumerate(rows)]
         if past_end:
             by_id: dict[str, list[tuple[date | None, date | None]]] = defaultdict(list)
             for iid, lo, hi in segments:

@@ -35,17 +35,22 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
-from openbars.core.models import Instrument, Market, RawBar, SymbolMapping
+from openbars.core.models import CorporateAction, CorporateActionKind, Instrument, Market, RawBar, SymbolMapping
 
 __all__ = [
+    "AssignedActions",
     "AssignedBars",
+    "CORPORATE_ACTION_KIND",
     "InstrumentMaster",
+    "IngestSummary",
     "InstrumentStore",
     "MemoryInstrumentMaster",
     "SymbolResolution",
     "UnresolvedRecord",
+    "assign_corporate_actions",
     "assign_instrument",
     "assign_instruments",
+    "ingest_corporate_actions",
     "figi_instrument_id",
     "new_instrument_id",
     "resolve_symbol",
@@ -60,6 +65,8 @@ AMBIGUOUS_MAPPING = "ambiguous_mapping"
 SYMBOL_REUSED_UNCOVERED = "symbol_reused_uncovered_date"
 OUTSIDE_MAPPING_WINDOW = "outside_mapping_window"
 
+CORPORATE_ACTION_KIND = "corporate_action"  # ``UnresolvedRecord.kind`` of a ticker-keyed action
+
 
 class InstrumentMaster(Protocol):
     def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
@@ -71,9 +78,9 @@ class InstrumentMaster(Protocol):
 
 @dataclass(frozen=True)
 class UnresolvedRecord:
-    """A bar or listing row that could not be mapped to exactly one instrument."""
+    """A bar, listing row or corporate action that could not be mapped to exactly one instrument."""
 
-    kind: str  # "bar" | "listing"
+    kind: str  # "bar" | "listing" | "corporate_action"
     reason_code: str
     symbol: str
     provider: str
@@ -84,9 +91,15 @@ class UnresolvedRecord:
     @property
     def key(self) -> tuple:
         """Bars queue once per (provider, symbol, day); a listing row once per (provider,
-        symbol), so a daily snapshot that keeps failing does not grow the queue."""
-        day = self.session_date if self.kind == "bar" else None
-        return (self.kind, self.provider, Market(self.market).value, self.symbol, day)
+        symbol), so a daily snapshot that keeps failing does not grow the queue; a corporate
+        action once per (provider, symbol, ex-date, action kind) -- ``session_date`` is the
+        ex-date and ``detail`` the action kind (``split`` / ``dividend`` ...)."""
+        is_action = self.kind == CORPORATE_ACTION_KIND
+        day = self.session_date if self.kind == "bar" or is_action else None
+        return (
+            self.kind, self.provider, Market(self.market).value, self.symbol, day,
+            (self.detail or "") if is_action else None,
+        )
 
 
 @runtime_checkable
@@ -244,13 +257,17 @@ def resolve_symbol_windows(
 class _ResolveMixin:
     """Shared ``resolve`` over a ``(instruments, mappings-by-symbol)`` view."""
 
-    def _resolution_view(self) -> tuple[Mapping[str, Instrument], Mapping[str, Sequence[SymbolMapping]]]:
+    def _resolution_view(
+        self, symbol: str | None = None
+    ) -> tuple[Mapping[str, Instrument], Mapping[str, Sequence[SymbolMapping]]]:
+        """``(instruments by id, mappings by symbol)``; a backend that queries lazily may
+        load only ``symbol``'s mappings (and the instruments they point to) when it is given."""
         raise NotImplementedError
 
     def resolve_detailed(
         self, symbol: str, *, on: date, provider: str, market: Market, unique_history_fallback: bool = True
     ) -> SymbolResolution:
-        instruments, by_symbol = self._resolution_view()
+        instruments, by_symbol = self._resolution_view(symbol)
         return resolve_symbol(
             by_symbol.get(symbol, ()),
             lambda iid: instruments[iid].market if iid in instruments else None,
@@ -274,7 +291,7 @@ class _ResolveMixin:
         market: Market,
     ) -> list[tuple[str, date | None, date | None]]:
         """Point-in-time ``resolve`` across a window: ``(instrument_id, from, to)`` segments."""
-        instruments, by_symbol = self._resolution_view()
+        instruments, by_symbol = self._resolution_view(symbol)
         return resolve_symbol_windows(
             by_symbol.get(symbol, ()),
             lambda iid: instruments[iid].market if iid in instruments else None,
@@ -301,8 +318,9 @@ class MemoryInstrumentMaster(_ResolveMixin):
         self._unresolved: dict[tuple, UnresolvedRecord] = {}
         self._observed: dict[tuple[str, str, str], date] = {}
         self._upstream: dict[str, int] = {}
+        self._actions: dict[tuple, CorporateAction] = {}
 
-    def _resolution_view(self):
+    def _resolution_view(self, symbol: str | None = None):
         by_symbol: dict[str, list[SymbolMapping]] = defaultdict(list)
         for m in self._mappings.values():
             by_symbol[m.symbol].append(m)
@@ -317,6 +335,14 @@ class MemoryInstrumentMaster(_ResolveMixin):
     def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None:
         for m in mappings:
             self._mappings.pop(_mapping_key(m), None)
+
+    def upsert_corporate_actions(self, actions: Iterable[CorporateAction]) -> None:
+        for a in actions:
+            self._actions[(a.instrument_id, a.ex_date, CorporateActionKind(a.kind).value, a.source)] = a
+
+    def corporate_actions(self, instrument_ids: Sequence[str] | None = None) -> list[CorporateAction]:
+        wanted = None if instrument_ids is None else set(instrument_ids)
+        return [a for k, a in sorted(self._actions.items()) if wanted is None or a.instrument_id in wanted]
 
     def get(self, instrument_id: str) -> Instrument | None:
         return self._instruments.get(instrument_id)
@@ -436,3 +462,123 @@ def assign_instruments(
     if record and records and sink is not None:
         sink(records)
     return AssignedBars(tuple(resolved), tuple(missed), tuple(records))
+
+
+# --- corporate-action assignment (ingest boundary) -----------------------------------------
+
+
+@dataclass(frozen=True)
+class AssignedActions:
+    """Corporate actions split into those with a stable ``instrument_id`` and those without."""
+
+    resolved: tuple[CorporateAction, ...]  # instrument_id is a known stable id
+    unresolved: tuple[CorporateAction, ...]  # instrument_id still the provider's ticker; never write
+    records: tuple[UnresolvedRecord, ...]  # one per unresolved action (queue rows)
+    mapped: tuple[UnresolvedRecord, ...] = ()  # queue rows the ticker-mapped actions would have had
+
+    @property
+    def reasons(self) -> dict[str, int]:
+        out: dict[str, int] = defaultdict(int)
+        for r in self.records:
+            out[r.reason_code] += 1
+        return dict(sorted(out.items()))
+
+
+@dataclass(frozen=True)
+class IngestSummary:
+    resolved: int  # written to the corporate-action table
+    unresolved: int  # queued, not written
+    already_mapped: int  # resolved actions whose id was already a known instrument
+    mapped_from_ticker: int  # resolved actions mapped through ``resolve`` (ticker + ex_date)
+    reasons: dict[str, int]  # unresolved reason code -> count
+    cleared: int = 0  # previously queued actions that resolved this time and left the queue
+
+
+def _assign_action(
+    action: CorporateAction, master: InstrumentMaster, market: Market
+) -> tuple[CorporateAction, UnresolvedRecord | None, UnresolvedRecord | None]:
+    """``(action, queue row if unresolved, queue row it would have had if mapped from a ticker)``."""
+    known = getattr(master, "get", None)
+    if known is not None and known(action.instrument_id) is not None:
+        return action, None, None
+    detailed = getattr(master, "resolve_detailed", None)
+    kwargs = dict(on=action.ex_date, provider=action.source, market=market)
+    if detailed is not None:
+        res = detailed(action.instrument_id, **kwargs)
+        found, reason = res.instrument_id, res.reason_code
+    else:
+        found, reason = master.resolve(action.instrument_id, **kwargs), None
+    record = UnresolvedRecord(
+        CORPORATE_ACTION_KIND, reason or "unresolved_symbol", action.instrument_id, action.source,
+        action.ex_date, Market(market), CorporateActionKind(action.kind).value,
+    )
+    if found is None:
+        return action, record, None
+    return dataclasses.replace(action, instrument_id=found), None, record
+
+
+def assign_corporate_actions(
+    actions: Iterable[CorporateAction],
+    master: InstrumentMaster,
+    *,
+    market: Market = Market.US,
+    record: bool = True,
+) -> AssignedActions:
+    """Map provider-returned corporate actions to stable instrument ids (the ingest step).
+
+    Providers return the ticker in ``CorporateAction.instrument_id`` (as returned). Here an id
+    that ``master.get`` already knows is kept as is; anything else is a ticker resolved on the
+    action's ``ex_date`` for ``provider=action.source`` with the same rules as bars (a
+    provider-specific mapping beats ``"*"``, ambiguity is unresolved, the unique-history
+    fallback applies only where it would for that date). Unresolved actions keep the ticker,
+    are never meant to be written, and (``record=True``, master with a queue) are queued as
+    ``kind="corporate_action"`` rows, one per (provider, symbol, ex-date, action kind).
+    """
+    resolved: list[CorporateAction] = []
+    missed: list[CorporateAction] = []
+    records: list[UnresolvedRecord] = []
+    mapped: list[UnresolvedRecord] = []
+    for a in actions:
+        out, miss, was_ticker = _assign_action(a, master, market)
+        if miss is None:
+            resolved.append(out)
+            if was_ticker is not None:
+                mapped.append(was_ticker)
+        else:
+            missed.append(a)
+            records.append(miss)
+    sink = getattr(master, "record_unresolved", None)
+    if record and records and sink is not None:
+        sink(records)
+    return AssignedActions(tuple(resolved), tuple(missed), tuple(records), tuple(mapped))
+
+
+def ingest_corporate_actions(
+    actions: Iterable[CorporateAction], master: InstrumentMaster, *, market: Market = Market.US
+) -> IngestSummary:
+    """The call ingest paths use: map, upsert the resolved actions, queue the rest.
+
+    ``master`` needs ``upsert_corporate_actions`` (every master in this package has it).
+    Re-ingesting an unresolved event does not grow the queue (the queue key includes the
+    ex-date and action kind); an event that resolves later is written and removed from the
+    queue. Returns counts and reason codes; nothing unresolved reaches the action table.
+    """
+    assigned = assign_corporate_actions(actions, master, market=market)
+    if assigned.resolved:
+        master.upsert_corporate_actions(assigned.resolved)  # type: ignore[attr-defined]
+    cleared = 0
+    queue, drop = getattr(master, "unresolved", None), getattr(master, "discard_unresolved", None)
+    if queue is not None and drop is not None and assigned.mapped:
+        queued = {r.key for r in queue(CORPORATE_ACTION_KIND)}
+        done = [r for r in assigned.mapped if r.key in queued]
+        if done:
+            drop(done)
+            cleared = len(done)
+    return IngestSummary(
+        resolved=len(assigned.resolved),
+        unresolved=len(assigned.unresolved),
+        already_mapped=len(assigned.resolved) - len(assigned.mapped),
+        mapped_from_ticker=len(assigned.mapped),
+        reasons=assigned.reasons,
+        cleared=cleared,
+    )

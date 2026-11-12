@@ -6,7 +6,9 @@ Two schema modes (docs/architecture.md section 11.3):
     openbars owns the DDL, which is generated from the same schema definitions as the
     Parquet layout (``schema.py``) - one table per Parquet table, same column names,
     ``NUMERIC(20,8)`` / ``NUMERIC(28,8)`` for prices / volumes, ``TEXT[]`` for list
-    columns, ``JSONB`` for ``external_ids``. Tables are created (``CREATE ... IF NOT
+    columns, ``JSONB`` for ``external_ids``. That includes the identity side tables
+    ``unresolved`` / ``symbol_observations`` / ``upstream_ids`` (``PgInstrumentMaster`` is a
+    full ``InstrumentStore``). Quota tables are not part of this schema. Tables are created (``CREATE ... IF NOT
     EXISTS``) only when ``write=True``; a read-only connection merely verifies them.
 
 ``upstream_compat``
@@ -31,6 +33,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import ROUND_HALF_EVEN, Context, Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -49,6 +52,7 @@ from openbars.core.models import (
     RawBar,
     SymbolMapping,
 )
+from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
 from openbars.providers.base import RawBatch
 from openbars.storage.errors import (
     ReadOnlyError,
@@ -72,6 +76,7 @@ from openbars.storage.schema import (
     DEFAULT_POLICY_VERSION,
     INSTRUMENTS_SCHEMA,
     RAW_BARS_SCHEMA,
+    REF_IDENTITY_SCHEMAS,
     STATE_TABLES,
     SYMBOL_MAPPINGS_SCHEMA,
     SCHEMA_VERSION,
@@ -221,6 +226,7 @@ NATIVE_REQUIRED: Requirements = {
             ("instruments", INSTRUMENTS_SCHEMA),
             ("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA),
             ("corporate_actions", CORPORATE_ACTIONS_SCHEMA),
+            *REF_IDENTITY_SCHEMAS.items(),
         )
     },
     **{t.name: {c.name: _STATE_FAMILY[c.kind] for c in t.columns} for t in STATE_TABLES},
@@ -285,7 +291,16 @@ _REF_KEYS = {
     "instruments": ("instrument_id",),
     "symbol_mappings": ("instrument_id", "provider", "symbol", "valid_from"),
     "corporate_actions": ("instrument_id", "ex_date", "kind", "source"),
+    # identity side tables (same keys as the Parquet merge logic)
+    "symbol_observations": ("instrument_id", "symbol", "provider"),
+    "upstream_ids": ("instrument_id",),  # plus a unique index on upstream_id: the link is 1:1
+    # ``UnresolvedRecord.key``. Not a PRIMARY KEY: session_date / detail are nullable and only
+    # part of the key for some kinds, so it is the expression unique index ``_UNRESOLVED_KEY``.
+    "unresolved": ("kind", "provider", "market", "symbol", "session_date", "detail"),
 }
+_UNRESOLVED_DAY = "coalesce(CASE WHEN kind IN ('bar', 'corporate_action') THEN session_date END, DATE '0001-01-01')"
+_UNRESOLVED_DETAIL = "(CASE WHEN kind = 'corporate_action' THEN coalesce(detail, '') ELSE '' END)"
+_UNRESOLVED_KEY = f'kind, provider, market, symbol, {_UNRESOLVED_DAY}, {_UNRESOLVED_DETAIL}'
 _RAW_KEY_COLS = ("market", "interval", "provider", "feed", "adjustment", "revision")
 _RAW_ENTITY = "(coalesce(instrument_id, symbol_as_returned))"
 _CANON_KEY_COLS = ("instrument_id", "interval", "policy_version")
@@ -321,6 +336,11 @@ def native_ddl() -> list[str]:
         _table_ddl("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, _REF_KEYS["symbol_mappings"]),
         'CREATE INDEX IF NOT EXISTS "ix_symbol_mappings_symbol" ON "symbol_mappings" ("symbol")',
         _table_ddl("corporate_actions", CORPORATE_ACTIONS_SCHEMA, _REF_KEYS["corporate_actions"]),
+        _table_ddl("unresolved", REF_IDENTITY_SCHEMAS["unresolved"]),
+        f'CREATE UNIQUE INDEX IF NOT EXISTS "ux_unresolved_key" ON "unresolved" ({_UNRESOLVED_KEY})',
+        _table_ddl("symbol_observations", REF_IDENTITY_SCHEMAS["symbol_observations"], _REF_KEYS["symbol_observations"]),
+        _table_ddl("upstream_ids", REF_IDENTITY_SCHEMAS["upstream_ids"], _REF_KEYS["upstream_ids"]),
+        'CREATE UNIQUE INDEX IF NOT EXISTS "ux_upstream_ids_upstream_id" ON "upstream_ids" ("upstream_id")',
         *state_ddl("postgres"),
     ]
     return stmts
@@ -570,18 +590,34 @@ class PgCanonicalStore(_Guard):
             yield row.to_canonical_bar()
 
 
-def _precedence_pick(rows: Iterable[Mapping[str, Any]], provider: str) -> str | None:
-    specific = {r["instrument_id"] for r in rows if r["provider"] == provider}
-    generic = {r["instrument_id"] for r in rows if r["provider"] == "*" and r["provider"] != provider}
-    for ids in (specific, generic):
-        if ids:
-            return next(iter(ids)) if len(ids) == 1 else None
-    return None
+def _round_action_value(value: Any) -> Any:
+    """Same single rounding as the Parquet master: more than 8 fractional digits -> half-even."""
+    if isinstance(value, Decimal) and value.is_finite():
+        return value.quantize(Decimal(1).scaleb(-8), rounding=ROUND_HALF_EVEN, context=_ACTION_CTX)
+    return value
 
 
-class PgInstrumentMaster(_Guard):
+_ACTION_CTX = Context(prec=60)
+
+
+def _instrument_from_record(r: Mapping[str, Any]) -> Instrument:
+    ext = r["external_ids"]
+    return Instrument(
+        r["instrument_id"], Market(r["market"]), AssetClass(r["asset_class"]), r["currency"],
+        r["name"], r["exchange"], r["listed_on"], r["delisted_on"],
+        json.loads(ext) if isinstance(ext, str) else dict(ext or {}),
+    )
+
+
+class PgInstrumentMaster(_ResolveMixin, _Guard):
+    """Native ``instruments`` / ``symbol_mappings`` / ``corporate_actions`` plus the identity
+    side tables (``unresolved``, ``symbol_observations``, ``upstream_ids``): the full
+    ``InstrumentStore``. Resolution reuses ``resolve_symbol`` (windows, provider precedence,
+    ambiguity, unique-history fallback), so it answers exactly like the Parquet master;
+    only the rows of the requested symbol are read."""
+
     def __init__(self, session: _Session, write: bool) -> None:
-        super().__init__(write)
+        super().__init__(write)  # type: ignore[call-arg]
         self._session = session
 
     def upsert(self, instruments: Iterable[Instrument], mappings: Iterable[SymbolMapping]) -> None:
@@ -613,13 +649,26 @@ class PgInstrumentMaster(_Guard):
                     map_rows,
                 )
 
+    def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None:
+        self.require_write()
+        rows = [[m.instrument_id, m.provider, m.symbol, m.valid_from] for m in mappings]
+        if not rows:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "DELETE FROM symbol_mappings WHERE instrument_id = ? AND provider = ? AND symbol = ? "
+                "AND valid_from = ?",
+                rows,
+            )
+
     def upsert_corporate_actions(self, actions: Iterable[CorporateAction]) -> None:
+        """Plain write of already-mapped ids (ingest paths call ``ingest_corporate_actions``)."""
         self.require_write()
         rows = [
             [
                 a.instrument_id, a.ex_date, CorporateActionKind(a.kind).value, a.source,
-                None if a.ratio is None else to_decimal(a.ratio, precision=20, name="ratio"),
-                None if a.amount is None else to_decimal(a.amount, precision=20, name="amount"),
+                None if a.ratio is None else to_decimal(_round_action_value(a.ratio), precision=20, name="ratio"),
+                None if a.amount is None else to_decimal(_round_action_value(a.amount), precision=20, name="amount"),
             ]
             for a in actions
         ]
@@ -634,6 +683,7 @@ class PgInstrumentMaster(_Guard):
             )
 
     def corporate_actions(self, instrument_ids: Sequence[str] | None = None) -> list[CorporateAction]:
+        """Exact ``Decimal`` ratio/amount (``NUMERIC`` never goes through ``float``)."""
         sql, params = "SELECT * FROM corporate_actions", []
         if instrument_ids is not None:
             sql += " WHERE instrument_id = ANY(?)"
@@ -643,35 +693,47 @@ class PgInstrumentMaster(_Guard):
         return [
             CorporateAction(
                 r["instrument_id"], r["ex_date"], CorporateActionKind(r["kind"]), r["source"],
-                None if r["ratio"] is None else r["ratio"],
-                None if r["amount"] is None else r["amount"],
+                r["ratio"], r["amount"],
             )
             for r in records
         ]
 
-    def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
-        """Same rules as the Parquet master: inclusive ``valid_to``, provider beats ``*``."""
+    # -- reads --
+
+    def _resolution_view(self, symbol: str | None = None):
         with self._session() as conn:
-            records = conn.execute(
-                "SELECT m.instrument_id, m.provider FROM symbol_mappings m "
-                "JOIN instruments i ON i.instrument_id = m.instrument_id "
-                "WHERE m.symbol = ? AND m.valid_from <= ? AND (m.valid_to IS NULL OR m.valid_to >= ?) "
-                "AND i.market = ? AND m.provider IN (?, '*')",
-                [symbol, on, on, Market(market).value, provider],
-            ).fetchall()
-        return _precedence_pick(records, provider)
+            if symbol is None:
+                maps = conn.execute("SELECT * FROM symbol_mappings").fetchall()
+                insts = conn.execute("SELECT * FROM instruments").fetchall()
+            else:
+                maps = conn.execute("SELECT * FROM symbol_mappings WHERE symbol = ?", [symbol]).fetchall()
+                ids = sorted({m["instrument_id"] for m in maps})
+                insts = (
+                    conn.execute("SELECT * FROM instruments WHERE instrument_id = ANY(?)", [ids]).fetchall()
+                    if ids
+                    else []
+                )
+        by_symbol: dict[str, list[SymbolMapping]] = {}
+        for m in maps:
+            by_symbol.setdefault(m["symbol"], []).append(_mapping_from_record(m))
+        return {r["instrument_id"]: _instrument_from_record(r) for r in insts}, by_symbol
 
     def get(self, instrument_id: str) -> Instrument | None:
         with self._session() as conn:
             r = conn.execute("SELECT * FROM instruments WHERE instrument_id = ?", [instrument_id]).fetchone()
-        if r is None:
-            return None
-        ext = r["external_ids"]
-        return Instrument(
-            r["instrument_id"], Market(r["market"]), AssetClass(r["asset_class"]), r["currency"],
-            r["name"], r["exchange"], r["listed_on"], r["delisted_on"],
-            json.loads(ext) if isinstance(ext, str) else dict(ext or {}),
-        )
+        return None if r is None else _instrument_from_record(r)
+
+    def instruments(self) -> list[Instrument]:
+        with self._session() as conn:
+            records = conn.execute("SELECT * FROM instruments ORDER BY instrument_id").fetchall()
+        return [_instrument_from_record(r) for r in records]
+
+    def mappings(self) -> list[SymbolMapping]:
+        with self._session() as conn:
+            records = conn.execute(
+                "SELECT * FROM symbol_mappings ORDER BY symbol, valid_from, instrument_id, provider"
+            ).fetchall()
+        return [_mapping_from_record(r) for r in records]
 
     def resolve_any(self, item: str, *, on: date, market: Market | None = None) -> str:
         if self.get(item) is not None:
@@ -681,6 +743,111 @@ class PgInstrumentMaster(_Guard):
             if found is not None:
                 return found
         return item
+
+    # -- identity layer: unresolved queue, sightings, upstream ids --
+
+    def record_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self.require_write()
+        rows = [
+            [
+                r.kind, r.reason_code, r.symbol, r.provider, Market(r.market).value,
+                r.session_date, r.detail,
+            ]
+            for r in records
+        ]
+        if not rows:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "INSERT INTO unresolved (kind, reason_code, symbol, provider, market, session_date, detail) "
+                f"VALUES (?,?,?,?,?,?,?) ON CONFLICT ({_UNRESOLVED_KEY}) DO UPDATE SET "
+                "reason_code=EXCLUDED.reason_code, session_date=EXCLUDED.session_date, detail=EXCLUDED.detail",
+                rows,
+            )
+
+    def unresolved(self, kind: str | None = None) -> list[UnresolvedRecord]:
+        sql, params = "SELECT * FROM unresolved", []
+        if kind is not None:
+            sql += " WHERE kind = ?"
+            params.append(kind)
+        with self._session() as conn:
+            records = conn.execute(
+                sql + " ORDER BY kind, provider, symbol, session_date, detail", params
+            ).fetchall()
+        return [
+            UnresolvedRecord(
+                r["kind"], r["reason_code"], r["symbol"], r["provider"], r["session_date"],
+                Market(r["market"]), r["detail"],
+            )
+            for r in records
+        ]
+
+    def unresolved_count(self, kind: str | None = None) -> int:
+        sql, params = "SELECT count(*) AS n FROM unresolved", []
+        if kind is not None:
+            sql += " WHERE kind = ?"
+            params.append(kind)
+        with self._session() as conn:
+            return int(conn.execute(sql, params).fetchone()["n"])
+
+    def discard_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self.require_write()
+        rows = []
+        for r in records:
+            kind, provider, market, symbol, day, detail = r.key  # the dedupe key, as the index sees it
+            rows.append([kind, provider, market, symbol, day or date.min, detail or ""])
+        if not rows:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "DELETE FROM unresolved WHERE kind = ? AND provider = ? AND market = ? AND symbol = ? "
+                f"AND {_UNRESOLVED_DAY} = ? AND {_UNRESOLVED_DETAIL} = ?",
+                rows,
+            )
+
+    def observe(self, observations: Iterable[tuple[str, str, str, date]]) -> None:
+        self.require_write()
+        rows = [[i, s, p, on] for i, s, p, on in observations]
+        if not rows:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "INSERT INTO symbol_observations (instrument_id, symbol, provider, last_observed) "
+                "VALUES (?,?,?,?) ON CONFLICT (instrument_id, symbol, provider) DO UPDATE SET "
+                "last_observed = GREATEST(symbol_observations.last_observed, EXCLUDED.last_observed)",
+                rows,
+            )
+
+    def observations(self) -> list[tuple[str, str, str, date]]:
+        with self._session() as conn:
+            records = conn.execute(
+                "SELECT * FROM symbol_observations ORDER BY instrument_id, symbol, provider"
+            ).fetchall()
+        return [(r["instrument_id"], r["symbol"], r["provider"], r["last_observed"]) for r in records]
+
+    def set_upstream_id(self, instrument_id: str, upstream_id: int) -> None:
+        self.require_write()
+        with self._session() as conn:
+            conn.execute("LOCK TABLE upstream_ids IN SHARE ROW EXCLUSIVE MODE")
+            existing = {
+                r["instrument_id"]: r["upstream_id"]
+                for r in conn.execute("SELECT * FROM upstream_ids").fetchall()
+            }
+            _check_upstream(existing, instrument_id, upstream_id)
+            conn.execute(
+                "INSERT INTO upstream_ids (instrument_id, upstream_id) VALUES (?, ?) "
+                "ON CONFLICT (instrument_id) DO UPDATE SET upstream_id = EXCLUDED.upstream_id",
+                [instrument_id, int(upstream_id)],
+            )
+
+    def upstream_ids(self) -> dict[str, int]:
+        with self._session() as conn:
+            records = conn.execute("SELECT * FROM upstream_ids ORDER BY instrument_id").fetchall()
+        return {r["instrument_id"]: int(r["upstream_id"]) for r in records}
+
+
+def _mapping_from_record(r: Mapping[str, Any]) -> SymbolMapping:
+    return SymbolMapping(r["instrument_id"], r["symbol"], r["valid_from"], r["valid_to"], r["provider"])
 
 
 class PgStateStore(SqlStateStore, _Guard):

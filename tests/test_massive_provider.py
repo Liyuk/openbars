@@ -558,6 +558,24 @@ def test_splits_map_and_paginate():
     assert len(gate.calls) == 2
 
 
+def test_parsed_splits_are_mapped_to_stable_ids_by_the_ingest_helper():
+    from openbars.core.models import AssetClass, Instrument, Market, SymbolMapping
+    from openbars.normalize.instruments import MemoryInstrumentMaster, ingest_corporate_actions
+
+    actions = provider(Server(ok("splits_page1.json"), ok("splits_page2.json"))).fetch_corporate_actions_result(
+        request_for(start="2024-01-01", end="2024-01-31")
+    ).actions
+    master = MemoryInstrumentMaster()
+    master.upsert(
+        [Instrument("us:eq:T1", Market.US, AssetClass.EQUITY, "USD")],
+        [SymbolMapping("us:eq:T1", "TEST1", date(2020, 1, 1))],
+    )
+    summary = ingest_corporate_actions(actions, master)
+    assert (summary.resolved, summary.unresolved) == (2, 1)  # two TEST1 rows, one unknown ZZZA row
+    assert {a.instrument_id for a in master.corporate_actions()} == {"us:eq:T1"}
+    assert [r.symbol for r in master.unresolved("corporate_action")] == ["ZZZA"]
+
+
 def test_splits_per_symbol_and_missing_ratio():
     body = {
         "status": "OK",

@@ -82,6 +82,56 @@ def test_raw_read_undoes_the_later_split(backend):
     assert t.schema.field("close").type == backend.canonical.scan_table([T1], Interval.D1, _w()).schema.field("close").type
 
 
+def test_raw_without_action_rows_raises_or_flags_never_relabels(backend):
+    from openbars.normalize.adjust import AdjustmentError
+
+    backend.canonical.upsert_rows([row(T1, D27, "120"), row(T1, SEP1, "101")])  # no corporate-action rows
+    with pytest.raises(AdjustmentError) as exc:
+        backend.reader.bars([T1], adjustment=Adjustment.RAW)
+    assert exc.value.reason_code == "missing_corporate_actions"
+    with pytest.raises(AdjustmentError):
+        backend.reader.bars([T1], adjustment=Adjustment.SPLIT_DIVIDEND)
+    flagged = backend.reader.bars([T1], adjustment=Adjustment.RAW, on_missing_actions="flag")
+    assert closes(flagged) == [(D27, D("120")), (SEP1, D("101"))]  # the stored basis, untouched
+    assert set(flagged.column("adjustment").to_pylist()) == {"split"}
+    assert all("ADJUSTMENT_UNVERIFIED" in f for f in flagged.column("flags").to_pylist())
+    # the default stored read needs no actions and carries no flag
+    plain = backend.reader.bars([T1])
+    assert closes(plain) == closes(flagged) and not any(plain.column("flags").to_pylist())
+
+
+def test_raw_with_actions_but_no_later_split_is_attested(backend):
+    backend.canonical.upsert_rows([row(T1, D27, "120"), row(T1, SEP1, "101")])
+    backend.instruments.upsert_corporate_actions(  # we looked: a dividend, no split
+        [CorporateAction(T1, D28, CorporateActionKind.DIVIDEND, "prov_a", amount=D("1"))]
+    )
+    t = backend.reader.bars([T1], adjustment=Adjustment.RAW)
+    assert closes(t) == [(D27, D("120")), (SEP1, D("101"))]
+    assert set(t.column("adjustment").to_pylist()) == {"raw"}
+
+
+def test_stale_flag_marks_bars_fetched_before_a_later_split(backend):
+    fresh = datetime(2020, 9, 2, 21, tzinfo=UTC)  # re-fetched after the split
+    backend.canonical.upsert_rows([
+        row(T1, D27, "120"),  # generated 08-27, before the 08-31 ex-date -> stale
+        row(T1, D28, "125", generated_at=fresh),
+        row(T1, SEP1, "101"),
+    ])
+    backend.instruments.upsert_corporate_actions(
+        [CorporateAction(T1, SPLIT_EX, CorporateActionKind.SPLIT, "prov_a", ratio=D("4"))]
+    )
+    flags = dict(zip(backend.reader.bars([T1]).column("session_date").to_pylist(),
+                     backend.reader.bars([T1]).column("flags").to_pylist()))
+    assert flags == {D27: ["STALE"], D28: [], SEP1: []}
+    # a derivation keeps the flag on the same bars (row order is unchanged)
+    raw = backend.reader.bars([T1], adjustment=Adjustment.RAW)
+    assert raw.column("flags").to_pylist() == [["STALE"], [], []]
+    assert closes(backend.reader.bars([T1], adjustment=None)) == closes(backend.reader.bars([T1]))
+    # no actions for the instrument, no stale detection
+    backend.canonical.upsert_rows([row("us:eq:T2", D27, "10")])
+    assert backend.reader.bars(["us:eq:T2"]).column("flags").to_pylist() == [[]]
+
+
 def _w():
     from openbars.core.models import DateRange
 

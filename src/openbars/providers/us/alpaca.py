@@ -433,6 +433,7 @@ class AlpacaProvider(HttpProviderAdapter):
 
     # -- corporate actions ---------------------------------------------------------------
     def fetch_corporate_actions(self, request: FetchRequest) -> Iterable[CorporateAction]:
+        """As returned (ticker in ``instrument_id``); map with ``ingest_corporate_actions``."""
         result = self._fetch_corporate_actions(request, allow_partial=False)
         return result.actions
 

@@ -177,13 +177,13 @@ SYMBOL_MAPPINGS_FIELDS = [
 # not be mapped to exactly one instrument, per-(instrument, symbol, provider) last sighting,
 # and the optional link from an instrument id to an upstream integer id.
 UNRESOLVED_FIELDS = [
-    _f("kind", pa.string()),  # "bar" | "listing"
+    _f("kind", pa.string()),  # "bar" | "listing" | "corporate_action"
     _f("reason_code", pa.string()),
     _f("symbol", pa.string()),
     _f("provider", pa.string()),
     _f("market", pa.string()),
-    _f("session_date", pa.date32(), True),
-    _f("detail", pa.string(), True),
+    _f("session_date", pa.date32(), True),  # bar: the session; corporate_action: the ex-date
+    _f("detail", pa.string(), True),  # corporate_action: the action kind (part of the dedupe key)
 ]
 
 SYMBOL_OBSERVATIONS_FIELDS = [
@@ -235,8 +235,8 @@ TABLE_SCHEMAS: Mapping[str, pa.Schema] = {
     "corporate_actions": CORPORATE_ACTIONS_SCHEMA,
 }
 
-# Identity-layer side tables live in ref/ but are not part of the Postgres native
-# schema yet (Parquet + DuckDB catalog only).
+# Identity-layer side tables: ref/*.parquet in the Parquet layout and native tables in Postgres
+# (same columns; ``TABLE_SCHEMAS`` plus these are the whole native schema).
 REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
     "unresolved": UNRESOLVED_SCHEMA,
     "symbol_observations": SYMBOL_OBSERVATIONS_SCHEMA,
