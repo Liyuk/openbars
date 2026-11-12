@@ -119,3 +119,91 @@ def test_attempt_index_avoids_per_symbol_job_scans():
     for i in range(2000):
         assert coverage.covered('alpaca', Market.US, Interval.H1, window, symbol=f'TEST{i}') == {window.start}
     assert Instruments.checks < 4000
+
+
+# --- #144 review: coverage on the expected hourly grid ------------------------------------
+
+from dataclasses import replace as _replace
+
+from openbars.calendars import xnys as _xnys
+from openbars.core.models import HourlyAlignment
+from openbars.orchestrator.jobs import Job, JobKind, JobState
+from openbars.providers.base import FetchRequest, RawBatch
+
+MON, TUE = date(2026, 3, 2), date(2026, 3, 3)
+EARLY = date(2025, 11, 28)  # day after Thanksgiving: 13:00 close
+
+
+def _store(day, slots, symbol="TEST1", raw=None):
+    raw = raw or MemoryRawStore()
+    provider = FakeProvider("alpaca", interval=Interval.H1)
+    bars = tuple(_replace(provider.bar(symbol, day, "f"), interval=Interval.H1, ts_start=s.ts_start) for s in slots)
+    raw.append(RawBatch("alpaca", "f", FetchRequest(Market.US, Interval.H1, (symbol,), DateRange(day, day)), bars))
+    return raw
+
+
+def _covered(raw, day, state=None, symbol="TEST1"):
+    return RawStoreCoverage(raw, state=state).covered("alpaca", Market.US, Interval.H1, DateRange(day, day), symbol=symbol)
+
+
+def test_partial_hours_are_not_coverage_and_a_full_grid_is():
+    slots = _xnys.hourly_slots(MON)
+    assert len(slots) == 7
+    assert _covered(_store(MON, slots[:6]), MON) == set()
+    assert _covered(_store(MON, slots[1:]), MON) == set()
+    assert _covered(_store(MON, slots), MON) == {MON}
+
+
+def test_clock_hour_grid_and_early_close_count_as_complete():
+    clock = _xnys.hourly_slots(MON, alignment=HourlyAlignment.CLOCK_HOUR)
+    assert _covered(_store(MON, clock), MON) == {MON}
+    early = _xnys.hourly_slots(EARLY)
+    assert len(early) == 4
+    assert _covered(_store(EARLY, early), EARLY) == {EARLY}
+    assert _covered(_store(EARLY, early[:3]), EARLY) == set()
+
+
+def test_mixed_alignments_do_not_add_up_to_a_full_session():
+    so = _xnys.hourly_slots(MON)
+    ch = _xnys.hourly_slots(MON, alignment=HourlyAlignment.CLOCK_HOUR)
+    assert _covered(_store(MON, so[:4] + ch[4:]), MON) == set()
+
+
+def test_instrument_id_and_symbol_both_resolve_grid_coverage():
+    raw = MemoryRawStore()
+    provider = FakeProvider("alpaca", interval=Interval.H1)
+    bars = tuple(_replace(provider.bar("TEST1", MON, "f"), interval=Interval.H1, ts_start=s.ts_start,
+                          instrument_id="us:eq:TEST1") for s in _xnys.hourly_slots(MON))
+    raw.append(RawBatch("alpaca", "f", FetchRequest(Market.US, Interval.H1, ("TEST1",), DateRange(MON, MON)), bars))
+    assert _covered(raw, MON, symbol="us:eq:TEST1") == {MON} == _covered(raw, MON)
+
+
+def _done_job(state, job_id, day, status, started_at, job_state=JobState.DONE):
+    job = Job(job_id, JobKind.BACKFILL, "alpaca", Market.US, Interval.H1, ("TEST1",), DateRange(day, day), state=job_state)
+    state.save_job(job)
+    state.start_fetch(provider="alpaca", fetch_id=job_id, job_id=job_id, market=Market.US, interval=Interval.H1,
+                      window=job.window, started_at=started_at)
+    state.finish_fetch("alpaca", job_id, status, row_count=0)
+
+
+def test_partial_session_is_replanned_unless_a_successful_fetch_answered_it(tmp_path):
+    state = SqliteStateStore(tmp_path / "state.db")
+    raw = _store(MON, _xnys.hourly_slots(MON)[:3])
+    provider = FakeProvider("alpaca", interval=Interval.H1, max_symbols=200)
+    selection = Selection(frozenset({Market.US}), frozenset({Interval.H1}), MON, TUE)
+    kwargs = dict(now=datetime(2026, 3, 10, tzinfo=UTC), universe=["TEST1"], providers={"alpaca": provider})
+    # partial data (e.g. from an interrupted fetch whose job died): Monday is fetched again
+    _done_job(state, "dead", MON, "error", datetime(2026, 3, 4, tzinfo=UTC), JobState.DEAD)
+    plan = DefaultPlanner().plan(selection, RawStoreCoverage(raw, state=state), **kwargs)
+    assert [j.window for j in plan.jobs] == [DateRange(MON, TUE)]
+    # a successful fetch after the close answered Monday: missing hours are no-trade hours
+    _done_job(state, "ok", MON, "ok", datetime(2026, 3, 4, tzinfo=UTC))
+    plan = DefaultPlanner().plan(selection, RawStoreCoverage(raw, state=state), **kwargs)
+    assert [j.window for j in plan.jobs] == [DateRange(TUE, TUE)]
+
+
+def test_a_fetch_started_before_the_session_closed_does_not_cover_it(tmp_path):
+    state = SqliteStateStore(tmp_path / "state.db")
+    raw = _store(MON, _xnys.hourly_slots(MON)[:3])
+    _done_job(state, "early", MON, "ok", datetime(2026, 3, 2, 17, tzinfo=UTC))  # 12:00 New York, intraday
+    assert _covered(raw, MON, state=state) == set()

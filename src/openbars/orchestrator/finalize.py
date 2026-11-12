@@ -43,7 +43,7 @@ from openbars.reconcile.crypto import POLICY_VERSION_CN_DAILY_V1
 from openbars.raw.store import RawStore
 from openbars.reconcile.projection import SourceObservation
 from openbars.reconcile.reconciler import MemoryReconciler
-from openbars.storage.rows import hourly_adjustment
+from openbars.storage.rows import hourly_adjustment, raw_ingested_at
 
 CanonicalWriter = Callable[[Sequence[CanonicalDailyRow], Market], object]
 
@@ -59,6 +59,17 @@ def _session_date(bar: RawBar) -> date:
     if isinstance(extra, date) and not isinstance(extra, datetime):
         return extra
     return bar.ts_start.astimezone(UTC).date()
+
+
+def stamp_available_at(rows: Sequence[Any], now: datetime | None = None) -> list[Any]:
+    """Fill a missing canonical ``available_at`` (#154) with the write time.
+
+    A row selected from a bar fetched in this run has no stored ``ingested_at`` in memory. The
+    node writes raw before it calls the sink, so the write time is never earlier than the raw
+    row's ``ingested_at`` (conservative: no look-ahead). Rows that already carry one keep it.
+    """
+    stamp = now or datetime.now(UTC)
+    return [r if getattr(r, "available_at", None) is not None else replace(r, available_at=stamp) for r in rows]
 
 
 def observation_from_raw(bar: RawBar) -> SourceObservation | None:
@@ -84,6 +95,7 @@ def observation_from_raw(bar: RawBar) -> SourceObservation | None:
         feed=feed,
         adjustment=adjustment,
         series=bar.series,
+        available_at=raw_ingested_at(bar),
     )
 
 
@@ -307,7 +319,7 @@ class CnCanonicalSink:
             flags = flags_for_cn_series(group, listed_on=self._listed_on(iid))
             rows += [self._row(iid, b, f) for b, f in zip(group, flags, strict=True) if not is_suspended(b)]
         if rows:
-            self.writer(rows)
+            self.writer(stamp_available_at(rows))
         self._ingest_factors(job, by_id)
 
     def _resolve(self, job: Job, bars: Sequence[RawBar]) -> dict[str, str]:
@@ -357,6 +369,7 @@ class CnCanonicalSink:
             quality_status=quality_status_for(flags),  # limit / suspended marks stay "complete"
             volume_source=source,
             sources_seen=(bar.provider,),
+            available_at=raw_ingested_at(bar),
         )
 
     def _ingest_factors(self, job: Job, by_id: Mapping[str, Sequence[RawBar]]) -> None:
@@ -533,10 +546,11 @@ def parquet_canonical_writer(canonical_store: object) -> CanonicalWriter:
                 sources_seen=(r.provider,),
                 generated_at=r.generated_at,
                 currency=r.currency,
+                available_at=r.available_at,
             )
             for r in rows
         ]
-        return canonical_store.upsert_rows(mapped)  # type: ignore[attr-defined]
+        return canonical_store.upsert_rows(stamp_available_at(mapped))  # type: ignore[attr-defined]
 
     return write
 
