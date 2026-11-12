@@ -292,6 +292,62 @@ def test_yfinance_hourly_rejects_clock_hour_and_old_windows():
     assert err.value.code == "outside_free_window"
 
 
+@pytest.mark.parametrize("failure", [ProviderError("timeout", "timeout", retryable=True), TimeoutError()])
+def test_yfinance_hourly_first_retryable_failure_raises(failure):
+    download = FakeHourlyDownload()
+
+    def fail_first(ticker, **kwargs):
+        if ticker == "ZZZA":
+            raise failure
+        return download(ticker, **kwargs)
+
+    p = YFinanceProvider(fail_first, clock=lambda: NOW)
+    with pytest.raises(ProviderError) as err:
+        p.fetch_bars_result(req("ZZZA", "ZZZB"))
+    assert err.value.retryable
+    assert download.calls == []
+
+
+@pytest.mark.parametrize("failure", [ProviderError("timeout", "timeout", retryable=True), TimeoutError()])
+def test_yfinance_hourly_retryable_failure_resumes_failed_symbol(failure):
+    download = FakeHourlyDownload()
+
+    def fail_second(ticker, **kwargs):
+        if ticker == "ZZZB":
+            raise failure
+        return download(ticker, **kwargs)
+
+    p = YFinanceProvider(fail_second, clock=lambda: NOW)
+    result = p.fetch_bars_result(req("ZZZA", "ZZZB"))
+    assert {b.symbol_as_returned for b in result.batch.bars} == {"ZZZA"}
+    assert result.batch.next_cursor == "1"
+    assert result.symbol_errors["ZZZB"].retryable
+
+    resumed_download = FakeHourlyDownload()
+    resumed = YFinanceProvider(resumed_download, clock=lambda: NOW).fetch_bars_result(
+        req("ZZZA", "ZZZB", cursor=result.batch.next_cursor)
+    )
+    assert {b.symbol_as_returned for b in resumed.batch.bars} == {"ZZZB"}
+    assert [ticker for ticker, _ in resumed_download.calls] == ["ZZZB"]
+
+
+@pytest.mark.parametrize("failure", [None, ValueError("unavailable"), ProviderError("provider_unavailable", "unavailable", retryable=False)])
+def test_yfinance_hourly_nonretryable_failure_continues(failure):
+    download = FakeHourlyDownload()
+
+    def fail_first(ticker, **kwargs):
+        if ticker == "ZZZA":
+            if failure is not None:
+                raise failure
+            return []
+        return download(ticker, **kwargs)
+
+    result = YFinanceProvider(fail_first, clock=lambda: NOW).fetch_bars_result(req("ZZZA", "ZZZB"))
+    assert {b.symbol_as_returned for b in result.batch.bars} == {"ZZZB"}
+    assert not result.symbol_errors["ZZZA"].retryable
+    assert result.batch.next_cursor is None
+
+
 # -- Twelve Data --------------------------------------------------------------------------------
 class TwelveServer:
     def __init__(self, error=None):

@@ -542,9 +542,15 @@ class YFinanceProvider:
                 if exc.code == NOT_INSTALLED_CODE:
                     raise
                 errors[symbol] = exc
+                if exc.retryable:
+                    next_cursor = str(index)
+                    break
                 continue
             except Exception as exc:  # noqa: BLE001 - classified, never leaked raw
                 errors[symbol] = self._symbol_error(exc)
+                if errors[symbol].retryable:
+                    next_cursor = str(index)
+                    break
                 continue
             subs = self._hourly_sub_bars(rows, skipped)
             placed = place_on_grid(subs, grid, now=now, skipped=skipped)
