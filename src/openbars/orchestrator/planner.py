@@ -151,7 +151,10 @@ class RawStoreCoverage:
             whole: set[date] = set()
             per_symbol: dict[str, set[date]] = defaultdict(set)
             for bar in self._raw.scan(provider, market, interval, window):
-                day = bar.session_date or bar.ts_start.date()
+                day = bar.session_date or (
+                    bar.ts_start.astimezone(NEW_YORK).date()
+                    if market is Market.US and interval is Interval.H1 else bar.ts_start.date()
+                )
                 whole.add(day)
                 per_symbol[bar.symbol_as_returned].add(day)
                 if bar.instrument_id:
@@ -162,19 +165,6 @@ class RawStoreCoverage:
     def covered(self, provider, market, interval, window, *, symbol=None) -> set[date]:  # noqa: ANN001
         whole, per_symbol = self._load(provider, market, interval, window)
         return set(whole) if symbol is None else set(per_symbol.get(symbol, ()))
-
-    def covered_hourly(self, provider, window, symbol, alignment, extended):
-        timestamps: dict[date, set[datetime]] = defaultdict(set)
-        for bar in self._raw.scan(provider, Market.US, Interval.H1, window):
-            if symbol in (bar.symbol_as_returned, bar.instrument_id):
-                day = bar.session_date or bar.ts_start.astimezone(NEW_YORK).date()
-                timestamps[day].add(bar.ts_start)
-        return {
-            day for day, present in timestamps.items()
-            if {slot.ts_start for slot in xnys.hourly_slots(
-                day, alignment=alignment, include_extended_hours=extended
-            )} <= present
-        }
 
 
 # --- plan / budget ------------------------------------------------------------------------
@@ -693,12 +683,8 @@ class DefaultPlanner:
             eligible = [d for d in sessions if d >= floor]
             groups = defaultdict(list)
             for symbol in symbols:
-                if isinstance(coverage, RawStoreCoverage):
-                    have = coverage.covered_hourly(name, window, symbol, self.hourly_alignment,
-                                                    self.include_extended_hours)
-                else:
-                    have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
-                # A partially covered session is deliberately re-planned in full.
+                have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
+                # One stored bar covers the session; missing hours are a quality concern.
                 for day in eligible:
                     if day not in have:
                         groups[day].append(symbol)

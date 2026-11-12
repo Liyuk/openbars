@@ -655,7 +655,7 @@ def test_hourly_respects_rolling_history_and_session_readiness():
     assert {j.window.start for j in p.jobs} == {date(2026, 3, 9)}
 
 
-def test_partial_hourly_raw_session_is_not_complete():
+def test_sparse_hourly_raw_session_is_covered():
     from dataclasses import replace
     from openbars.calendars import xnys
     from openbars.providers.base import FetchRequest, RawBatch
@@ -668,7 +668,7 @@ def test_partial_hourly_raw_session_is_not_complete():
     raw = MemoryRawStore()
     raw.append(RawBatch("massive", "f1", req, (bar,)))
     p = plan(sel(day, day, frozenset({Interval.H1})), [provider], RawStoreCoverage(raw), universe=["TEST1"])
-    assert len(p.jobs) == 1
+    assert not p.jobs
 
 
 def test_mixed_daily_hourly_budget_combines_requests():
