@@ -11,7 +11,7 @@ from openbars.core.series import (ALPACA_SIP_SPLIT, MASSIVE_AGGS_SPLIT,
 from openbars.reconcile.overrides import SelectionOverride
 from openbars.reconcile.policy import DEFAULT_POLICY
 from openbars.reconcile.projection import SourceObservation, _difference_pct, project_canonical_bars
-from openbars.storage.rows import CanonicalBarRow
+from openbars.storage.rows import CanonicalBarRow, hourly_adjustment
 
 # Reversible default: retain the daily policy version; interval is part of the storage key.
 HOURLY_POLICY = replace(
@@ -30,7 +30,7 @@ def reconcile_hourly(
         if bar.interval != Interval.H1 or bar.volume is None or bar.session_date is None:
             continue
         feed = bar.series.feed if bar.series else (bar.feed or 'default').split(':')[-1]
-        adjustment = bar.series.legacy_adjustment if bar.series else str(bar.extra.get('adjustment') or 'split')
+        adjustment = hourly_adjustment(bar)
         from openbars.core.series import SourceIdentity
         series = bar.series or BarSeriesCatalog.resolve(SourceIdentity(bar.provider, feed, adjustment), interval=Interval.H1)
         obs = SourceObservation(bar.instrument_id or None, bar.symbol_as_returned, bar.session_date,

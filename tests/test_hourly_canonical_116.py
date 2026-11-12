@@ -1,6 +1,8 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal as D
 
+import pytest
+
 from openbars.core.models import Interval, Market, RawBar
 from openbars.orchestrator.finalize import ReconcilingSink, parquet_canonical_writer
 from openbars.orchestrator.jobs import Job
@@ -62,7 +64,8 @@ def test_secondary_fill_and_quality_rules():
     assert marked[0].quality_status == 'spike_suspect'
 
 
-def test_raw_store_cross_source_arrival_orders_and_interval_coexistence(tmp_path):
+@pytest.mark.parametrize("with_series", [True, False])
+def test_raw_store_cross_source_arrival_orders_and_interval_coexistence(tmp_path, with_series):
     from dataclasses import replace
     from openbars.core.models import DateRange
     from openbars.core.series import BarSeriesCatalog, SourceIdentity
@@ -80,7 +83,8 @@ def test_raw_store_cross_source_arrival_orders_and_interval_coexistence(tmp_path
         for provider in order:
             feed = 'aggs' if provider == 'massive' else 'sip'
             b = bar(15, provider, feed, '10' if provider == 'massive' else '15')
-            b = replace(b, series=BarSeriesCatalog.resolve(SourceIdentity(provider, feed, 'split'), interval=Interval.H1))
+            if with_series:
+                b = replace(b, series=BarSeriesCatalog.resolve(SourceIdentity(provider, feed, 'split'), interval=Interval.H1))
             request = FetchRequest(Market.US, Interval.H1, ('TEST1',), window)
             backend.raw.append(RawBatch(provider, 'x', request, (b,)))
             scanned = list(backend.raw.scan(provider, Market.US, Interval.H1, window))[0]
@@ -97,3 +101,24 @@ def test_raw_store_cross_source_arrival_orders_and_interval_coexistence(tmp_path
         row = next(r for r in hourly if r.ts_start.hour == 15)
         results.append((row.provider, row.close, row.quality_status))
     assert results == [('massive', D('10'), 'divergent')] * 2
+
+
+def test_daily_stored_instrument_id_does_not_change_symbol_reconciliation():
+    from dataclasses import replace
+    from openbars.core.models import DateRange
+    from openbars.orchestrator.finalize import observation_from_raw
+    from openbars.providers.base import FetchRequest, RawBatch
+    from openbars.storage.rows import raw_rows_from_batch
+
+    day = date(2025, 1, 2)
+    daily = replace(bar(15, feed="eod"), interval=Interval.D1, instrument_id=None,
+                    extra={'instrument_id': 'us:TEST1', 'adjustment': 'split'})
+    request = FetchRequest(Market.US, Interval.D1, ('TEST1',), DateRange(day, day))
+    row = raw_rows_from_batch(RawBatch('massive', 'x', request, (daily,)))[0]
+    assert row.instrument_id == 'us:TEST1'
+    restored = row.to_raw_bar()
+    observation = observation_from_raw(restored)
+    assert restored.instrument_id is None
+    assert observation.key == 'TEST1'
+    result = MemoryReconciler().reconcile_range('TEST1', day, day, [observation])
+    assert result.canonical[0].instrument_id == 'TEST1'

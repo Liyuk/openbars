@@ -399,9 +399,14 @@ class RawBarRow:
             feed=self.feed or None,
             extra=extra,
             session_date=self.session_date,
-            instrument_id=self.instrument_id,
+            instrument_id=self.instrument_id if self.interval is Interval.H1 else None,
             series=series,
         )
+
+
+def hourly_adjustment(bar: RawBar) -> str:
+    """Resolve the adjustment identity consistently before and after storage."""
+    return bar.series.legacy_adjustment if bar.series else str(bar.extra.get("adjustment") or "split")
 
 
 def raw_rows_from_batch(
@@ -449,7 +454,7 @@ def raw_rows_from_batch(
                 volume=bar.volume,
                 fetch_id=bar.fetch_id or batch.fetch_id,
                 feed=bar.feed or "",
-                adjustment=(bar.series.legacy_adjustment if bar.interval is Interval.H1 and bar.series else extra.get("adjustment") or Adjustment.RAW.value),
+                adjustment=(hourly_adjustment(bar) if bar.interval is Interval.H1 else extra.get("adjustment") or Adjustment.RAW.value),
                 instrument_id=(bar.instrument_id if bar.interval is Interval.H1 else None) or extra.get("instrument_id"),
                 price_basis=extra.get("price_basis") or UNKNOWN,
                 adjustment_scope=extra.get("adjustment_scope") or UNKNOWN,
