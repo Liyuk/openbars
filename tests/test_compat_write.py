@@ -6,14 +6,28 @@ from pathlib import Path
 
 import pytest
 
-from openbars.core.models import AssetClass, DateRange, Instrument, Interval, Market, SymbolMapping
+from openbars.core.models import (
+    AssetClass,
+    CorporateAction,
+    CorporateActionKind,
+    DateRange,
+    Instrument,
+    Interval,
+    Market,
+    SymbolMapping,
+)
 from openbars.storage.compat_write import (
     RESEARCH_SERIES_READ_SQL,
+    AmbiguousInstrumentError,
+    action_details,
+    action_event_key,
+    action_type_for,
     advisory_lock_key,
     parse_int_id,
     parse_optional_int_ref,
     quality_status_of,
     security_type_for,
+    split_fraction,
 )
 from openbars.storage.errors import StorageError
 from openbars.storage.postgres import PostgresBackend
@@ -52,6 +66,20 @@ def test_security_type_and_quality_helpers():
 
     assert quality_status_of(_Row(quality_status="divergent", flags=())) == "divergent"
     assert quality_status_of(_Row(quality_status="", flags=())) == "complete"
+
+
+
+def test_action_helpers_and_split_fraction():
+    assert split_fraction(Decimal("4")) == (4, 1)
+    assert split_fraction(Decimal("0.25")) == (1, 4)
+    assert split_fraction(Decimal("1.5")) == (3, 2)
+    assert action_type_for(CorporateActionKind.SPLIT) == "split"
+    assert action_type_for(CorporateActionKind.DIVIDEND, amount=Decimal("0.2")) == "cash_dividend"
+    assert action_type_for(CorporateActionKind.DIVIDEND, ratio=Decimal("1.1")) == "stock_dividend"
+    assert action_type_for(CorporateActionKind.SPINOFF) == "spin_off"
+    details = action_details(CorporateActionKind.SPLIT, ratio=Decimal("4"))
+    assert details == {"new_shares_numerator": 4, "old_shares_denominator": 1}
+    assert action_event_key("split", 42, date(2024, 1, 2)) == "openbars:split:42:2024-01-02"
 
 
 def _raw(**kw) -> RawBarRow:
@@ -204,8 +232,97 @@ def test_live_upstream_compat_ticker_reuse_is_ambiguous(pg_dsn, tmp_path):
         backend = PostgresBackend(
             pg_dsn, mode="upstream_compat", write=True, schema=schema, state_path=tmp_path / "state.db"
         )
-        with pytest.raises(StorageError, match="more than one instrument"):
+        with pytest.raises(AmbiguousInstrumentError) as exc:
             backend.raw.append_rows([_raw(instrument_id="ZZZB", symbol_as_returned="ZZZB")])
+        err = exc.value
+        assert err.symbol == "ZZZB" and err.on == date(2024, 1, 2)
+        assert [c.instrument_id for c in err.candidates] == [10, 11]
+        report = err.format_report()
+        assert "instrument_id=10" in report and "instrument_id=11" in report
+        assert "2010-01-01..open" in report and "2020-01-01..open" in report
+        assert "ZZZB" in report
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_canonical_only_fills_selected_source_bar_id(pg_dsn, tmp_path):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    schema = f"openbars_compat_c_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+        backend = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=True, schema=schema, state_path=tmp_path / "state.db"
+        )
+        assert backend.canonical.upsert_rows([_canon()]) == 1
+        with psycopg.connect(pg_dsn, row_factory=dict_row, options=f"-c search_path={schema}") as conn:
+            research = conn.execute("SELECT * FROM research_daily_bar").fetchone()
+            raw = conn.execute("SELECT * FROM daily_bar").fetchone()
+            assert research["selected_source_bar_id"] is not None
+            assert raw is not None
+            assert research["selected_source_bar_id"] == raw["id"]
+            assert raw["close"] == Decimal("11.5")
+            assert raw["provider"] == "prov_a"
+        # A later raw upsert with the same identity keeps the same id and updates values.
+        assert backend.raw.append_rows([_raw(close=Decimal("11.80"))]) == 1
+        with psycopg.connect(pg_dsn, row_factory=dict_row, options=f"-c search_path={schema}") as conn:
+            rows = conn.execute("SELECT id, close FROM daily_bar").fetchall()
+            assert len(rows) == 1
+            assert rows[0]["id"] == research["selected_source_bar_id"]
+            assert rows[0]["close"] == Decimal("11.80")
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_upstream_compat_writes_corporate_actions(pg_dsn, tmp_path):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    schema = f"openbars_compat_a_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+        backend = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=True, schema=schema, state_path=tmp_path / "state.db"
+        )
+        action = CorporateAction(
+            instrument_id="42",
+            ex_date=date(2024, 3, 1),
+            kind=CorporateActionKind.SPLIT,
+            source="prov_a",
+            ratio=Decimal("4"),
+        )
+        backend.instruments.upsert_corporate_actions([action])
+        backend.instruments.upsert_corporate_actions([action])  # idempotent
+        with psycopg.connect(pg_dsn, row_factory=dict_row, options=f"-c search_path={schema}") as conn:
+            events = conn.execute("SELECT * FROM corporate_action_event").fetchall()
+            revs = conn.execute("SELECT * FROM corporate_action_revision ORDER BY revision").fetchall()
+            obs = conn.execute("SELECT * FROM corporate_action_observation").fetchall()
+            links = conn.execute("SELECT * FROM corporate_action_observation_link").fetchall()
+            inst = conn.execute("SELECT id FROM instrument WHERE id = 42").fetchone()
+            assert inst is not None
+            assert len(events) == 1 and events[0]["event_key"] == "openbars:split:42:2024-03-01"
+            assert len(revs) == 1 and revs[0]["action_type"] == "split" and revs[0]["revision"] == 1
+            details = revs[0]["details"]
+            if isinstance(details, str):
+                import json
+                details = json.loads(details)
+            assert details["new_shares_numerator"] == 4 and details["old_shares_denominator"] == 1
+            assert list(revs[0]["instrument_ids"] if not isinstance(revs[0]["instrument_ids"], str) else __import__("json").loads(revs[0]["instrument_ids"])) == [42]
+            assert len(obs) == 1 and obs[0]["provider"] == "prov_a"
+            assert len(links) == 1
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA "{schema}" CASCADE')

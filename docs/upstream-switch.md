@@ -25,6 +25,24 @@ and config checklist outside this repository.
   otherwise give openbars its own key.
 - `upstream_compat` writes US daily bars only.
 
+## CLI
+
+`openbars plan` and `openbars run` honor `storage.backend: postgres`. The DSN
+is resolved at runtime from settings (`storage.postgres.dsn`, typically
+`${OPENBARS_PG_DSN}` or an env file) and is never printed by `openbars config`
+or command output. A dry-run `plan` (no `--submit`) opens the backend
+read-only even if `write: true`, so it will introspect the upstream schema
+but will not write jobs or bars. `plan --submit` and `run` use the
+configured `write` flag and can upsert `daily_bar`, `research_daily_bar`,
+and the corporate-action tables in `upstream_compat`. Jobs, checkpoints and
+the fetch log stay in `{storage.path}/state.db` for compat mode (they are
+not stored in the upstream database).
+
+If symbol bootstrap hits a reused ticker, `run` marks the job dead and
+prints an actionable report listing each candidate's numeric
+`instrument_id`, alias validity window, and exchange / security type.
+Re-run with one of those numeric ids instead of the ticker.
+
 ## Identity
 
 openbars instrument ids are strings; upstream FKs are integers.
@@ -34,8 +52,9 @@ openbars instrument ids are strings; upstream FKs are integers.
 - Any other string is treated as a **symbol bootstrap**: look up
   `symbol_alias` covering that session date. One hit is reused; no hit
   inserts `instrument` + a covering alias (`valid_from` is not later than the
-  first bar). More than one hit (ticker reuse) is an error — pass the numeric
-  id instead.
+  first bar). More than one hit (ticker reuse) raises `AmbiguousInstrumentError`
+  with an actionable report: each candidate's numeric `instrument_id`, alias
+  validity window, and exchange / security type. Pass one of those numeric ids.
 - Prefer numeric upstream ids (or a pre-seeded identity table) in production.
   Ticker-only bootstrap is fine for a short dry-run, but it can mis-merge a
   reused ticker.
@@ -73,14 +92,20 @@ be written, but readers that join `symbol_alias` will not see it.
    are shared, no data migration is required. Watermarks keep incrementing
    from whichever process writes last.
 
-`selected_source_bar_id` is filled only when a matching `daily_bar` row
-already exists; a canonical-only upsert leaves it null. Volume is required
-(null volume is refused, not stored as zero).
+`selected_source_bar_id` is always set when a canonical upsert succeeds: a
+matching `daily_bar` is reused when present; otherwise a row is materialized
+from the canonical OHLCV under the same unique key (existing raw values are
+not overwritten). It is missing only if identity resolution fails, in which
+case the whole upsert errors. Volume is required (null volume is refused,
+not stored as zero). Corporate actions are written to the upstream
+observation / event / revision tables (`event_key` =
+`openbars:{action_type}:{instrument_id}:{ex_date}`).
 
 ## 中文摘要
 
 `upstream_compat` 在 `write: true` 时写入既有表，永不做迁移；启动时做列级校验。
-字符串 instrument id 若是整数就复用，否则按代码引导（代码复用冲突必须传数值 id）。
+字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表。
+`openbars plan` / `run` 已支持 `storage.backend: postgres`：DSN 只在运行时解析且不会打印；dry-run `plan` 只读，`plan --submit` 与 `run` 按 `write` 写入。compat 模式下 jobs 仍在本地 SQLite。
 切换前先影子对账，再在临时库验证外部读取 SQL；切到共用表时与 upstream 投影器共用
 `research-daily:{policy}:{date}` 的 advisory lock，并依赖水位表让缓存失效。
 回滚只需关掉 openbars 写入、恢复 upstream worker，不必迁数据。密钥和 DSN 只在运行时提供，不要入库。

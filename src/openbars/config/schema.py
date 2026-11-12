@@ -46,6 +46,10 @@ class Settings:
     providers: Mapping[str, ProviderConfig]
     storage_backend: str = "parquet_duckdb"
     storage_path: str = "./data"
+    postgres_dsn: str | None = None
+    postgres_mode: str = "native"
+    postgres_write: bool = False
+    postgres_schema: str | None = None
     default_adjustment: Adjustment = Adjustment.SPLIT
     nodes: tuple[NodeConfig, ...] = (NodeConfig(name="local"),)
     # Explicit symbols per market (InstrumentMaster-based universes come later).
@@ -58,16 +62,15 @@ class Settings:
 
     def secret_values(self, min_length: int = 8) -> tuple[str, ...]:
         """Resolved credential values (for output scrubbing only; never log them)."""
-        return tuple(
-            sorted(
-                {
-                    v
-                    for p in self.providers.values()
-                    for k, v in p.options.items()
-                    if isinstance(v, str) and len(v) >= min_length and is_secret_key(k)
-                }
-            )
-        )
+        values = {
+            v
+            for p in self.providers.values()
+            for k, v in p.options.items()
+            if isinstance(v, str) and len(v) >= min_length and is_secret_key(k)
+        }
+        if isinstance(self.postgres_dsn, str) and len(self.postgres_dsn) >= min_length:
+            values.add(self.postgres_dsn)
+        return tuple(sorted(values))
 
 
 _SECRET_KEY_PARTS = ("key", "secret", "token", "password", "dsn")

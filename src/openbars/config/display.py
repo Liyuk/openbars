@@ -53,6 +53,12 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
     lines.append(f"intervals: {intervals}")
     lines.append(f"history: {start} .. {end}")
     lines.append(f"storage: {settings.storage_backend}  {settings.storage_path}")
+    if settings.storage_backend == "postgres":
+        lines.append(f"  postgres.mode: {settings.postgres_mode}")
+        lines.append(f"  postgres.write: {str(settings.postgres_write).lower()}")
+        lines.append(f"  postgres.dsn: {'set' if settings.postgres_dsn else 'missing'}")
+        if settings.postgres_schema:
+            lines.append(f"  postgres.schema: {settings.postgres_schema}")
     lines.append(f"adjustment: {settings.default_adjustment.value}")
 
     lines.append("providers:")
