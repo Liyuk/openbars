@@ -1,7 +1,9 @@
-"""Optional yfinance fallback for US daily bars (source identity ``yfinance/yahoo/split``).
+"""Optional yfinance adapter for US and Hong Kong daily bars (source identity ``yfinance/yahoo/split``).
 
 Yahoo publishes no official API or quota; this provider is a conservative, best-effort
-fallback for history before 2016-01-01 and for gaps the priority sources do not cover.
+source. For US it is the fallback for history before 2016-01-01 and for gaps the
+priority sources do not cover. For HK it is the first free daily source (``0700.HK``
+tickers, XHKG session check). Yahoo is not a licensed HKEX vendor feed.
 Terms: https://policies.yahoo.com/us/en/yahoo/terms/index.htm (personal use only).
 
 The ``yfinance`` package is an optional extra (``pip install openbars[yfinance]``). It is
@@ -15,7 +17,7 @@ import numbers
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any
 
@@ -31,6 +33,8 @@ from openbars.core.models import (
 )
 from openbars.core.ohlcv import PRICE_SCALE, VOLUME_SCALE
 from openbars.core.series import BarSeriesCatalog, SourceIdentity
+from openbars.normalize.hk_instruments import from_yahoo_hk_ticker, to_yahoo_hk_ticker
+from openbars.providers.adapter import NullQuotaGate
 from openbars.providers.base import (
     API_VERSION,
     BatchShape,
@@ -40,7 +44,6 @@ from openbars.providers.base import (
     RawBatch,
     SourceCapability,
 )
-from openbars.providers.adapter import NullQuotaGate
 from openbars.providers.http import decimal_value, digest_payload
 from openbars.quota.gate import QuotaGate
 from openbars.quota.policy import QuotaPolicy, RateLimit
@@ -48,8 +51,10 @@ from openbars.quota.policy import QuotaPolicy, RateLimit
 __all__ = [
     "YFinanceProvider",
     "YFinanceResult",
+    "chunk_hk_symbols",
     "chunk_symbols",
     "should_request_yfinance",
+    "to_yahoo_hk_ticker",
     "to_yahoo_ticker",
 ]
 
@@ -63,14 +68,23 @@ DOWNLOAD_TIMEOUT_SECONDS = 10
 ALPACA_HISTORY_START = date(2016, 1, 1)
 
 NOT_INSTALLED_CODE = "yfinance_not_installed"
-_TRANSIENT_MARKERS = ("rate", "timeout", "timed out", "temporarily", "connection", "too many requests")
+_TRANSIENT_MARKERS = (
+    "rate",
+    "timeout",
+    "timed out",
+    "temporarily",
+    "connection",
+    "too many requests",
+)
 _OHLCV = ("open", "high", "low", "close", "volume")
 _DATE_KEYS = ("date", "datetime")
 
 Download = Callable[..., Any]
 
 
-def chunk_symbols(symbols: Iterable[str], size: int = MAX_SYMBOLS_PER_REQUEST) -> list[tuple[str, ...]]:
+def chunk_symbols(
+    symbols: Iterable[str], size: int = MAX_SYMBOLS_PER_REQUEST
+) -> list[tuple[str, ...]]:
     """Normalise (strip, upper, unique) and split into chunks of at most ``size``."""
     if size < 1:
         raise ValueError("size must be >= 1")
@@ -83,10 +97,34 @@ def to_yahoo_ticker(symbol: str) -> str:
     return symbol.replace(".", "-")
 
 
+def chunk_hk_symbols(
+    symbols: Iterable[str], size: int = MAX_SYMBOLS_PER_REQUEST
+) -> list[tuple[str, ...]]:
+    """Deduplicate HK spellings by 5-digit code and split into chunks of at most ``size``.
+
+    Each chunk entry is the first spelling seen for that code (stripped). The Yahoo
+    ticker used on the wire is produced separately by ``to_yahoo_hk_ticker``.
+    """
+    if size < 1:
+        raise ValueError("size must be >= 1")
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols:
+        if not raw or not str(raw).strip():
+            continue
+        text = str(raw).strip()
+        code = from_yahoo_hk_ticker(text)
+        if code in seen:
+            continue
+        seen.add(code)
+        unique.append(text)
+    return [tuple(unique[i : i + size]) for i in range(0, len(unique), size)]
+
+
 def _yfinance_download(ticker: str, **kwargs: Any) -> Any:
     """Default download: lazy import of the optional ``yfinance`` package."""
     try:
-        import yfinance  # noqa: PLC0415 - optional extra, imported only when fetching
+        import yfinance
     except ImportError:
         raise ProviderError(
             NOT_INSTALLED_CODE,
@@ -160,13 +198,19 @@ def _rows(data: Any) -> list[dict[str, Any]]:
     elif isinstance(data, Mapping):  # column-oriented: {"Date": [...], "Close": [...]}
         columns = {_field_name(k): list(v) for k, v in data.items()}
         length = max((len(v) for v in columns.values()), default=0)
-        data = [{k: v[i] for k, v in columns.items() if i < len(v)} for i in range(length)]
+        data = [
+            {k: v[i] for k, v in columns.items() if i < len(v)} for i in range(length)
+        ]
     if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
-        raise ProviderError("invalid_payload", "download result is not tabular", retryable=False)
+        raise ProviderError(
+            "invalid_payload", "download result is not tabular", retryable=False
+        )
     rows: list[dict[str, Any]] = []
     for item in data:
         if not isinstance(item, Mapping):
-            raise ProviderError("invalid_payload", "download row is not a mapping", retryable=False)
+            raise ProviderError(
+                "invalid_payload", "download row is not a mapping", retryable=False
+            )
         rows.append({_field_name(k): v for k, v in item.items()})
     return rows
 
@@ -204,34 +248,52 @@ class YFinanceProvider:
         fetch_id_factory: Callable[[], str] | None = None,
     ) -> None:
         if not 1 <= batch_size <= MAX_SYMBOLS_PER_REQUEST:
-            raise ValueError(f"batch_size must be between 1 and {MAX_SYMBOLS_PER_REQUEST}")
+            raise ValueError(
+                f"batch_size must be between 1 and {MAX_SYMBOLS_PER_REQUEST}"
+            )
         self._download = download
         self._batch_size = batch_size
-        self._quota_gate: QuotaGate = quota_gate if quota_gate is not None else NullQuotaGate()
+        self._quota_gate: QuotaGate = (
+            quota_gate if quota_gate is not None else NullQuotaGate()
+        )
         self._before_request = before_request
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._fetch_id = fetch_id_factory or (lambda: uuid.uuid4().hex)
 
     # -- Provider contract -------------------------------------------------------------
     def capabilities(self) -> Sequence[SourceCapability]:
-        terms = ProviderTerms(
-            personal_only=True,
-            redistribution_allowed=False,
-            url=TERMS_URL,
-            notes="Unofficial Yahoo data; default fallback for pre-2016 history and primary gaps.",
-        )
+        def _terms(notes: str) -> ProviderTerms:
+            return ProviderTerms(
+                personal_only=True,
+                redistribution_allowed=False,
+                url=TERMS_URL,
+                notes=notes,
+            )
+
+        shared = {
+            "provider": PROVIDER_ID,
+            "interval": Interval.D1,
+            "asset_classes": frozenset({AssetClass.EQUITY, AssetClass.ETF}),
+            "history_start": None,  # since listing
+            "batch": BatchShape.MULTI_SYMBOL,
+            "max_symbols_per_request": MAX_SYMBOLS_PER_REQUEST,
+            "adjusted_modes": frozenset({Adjustment.SPLIT}),
+            "feed": FEED,
+        }
         return (
             SourceCapability(
-                provider=PROVIDER_ID,
                 market=Market.US,
-                interval=Interval.D1,
-                asset_classes=frozenset({AssetClass.EQUITY, AssetClass.ETF}),
-                history_start=None,  # since listing
-                batch=BatchShape.MULTI_SYMBOL,
-                max_symbols_per_request=MAX_SYMBOLS_PER_REQUEST,
-                adjusted_modes=frozenset({Adjustment.SPLIT}),
-                feed=FEED,
-                terms=terms,
+                terms=_terms(
+                    "Unofficial Yahoo data; default fallback for pre-2016 history and primary gaps."
+                ),
+                **shared,
+            ),
+            SourceCapability(
+                market=Market.HK,
+                terms=_terms(
+                    "Unofficial Yahoo .HK data; not a licensed HKEX vendor feed. Personal use only."
+                ),
+                **shared,
             ),
         )
 
@@ -244,11 +306,17 @@ class YFinanceProvider:
         )
 
     def list_instruments(self, market: Market) -> Iterable[ProviderInstrument]:
-        raise NotImplementedError("instrument listing is not part of the yfinance adapter")
+        raise NotImplementedError(
+            "instrument listing is not part of the yfinance adapter"
+        )
 
-    def fetch_corporate_actions(self, request: FetchRequest) -> Iterable[CorporateAction]:
+    def fetch_corporate_actions(
+        self, request: FetchRequest
+    ) -> Iterable[CorporateAction]:
         # Out of scope for the bars-only fallback; the primary source owns corporate actions.
-        raise NotImplementedError("corporate actions are not part of the yfinance adapter")
+        raise NotImplementedError(
+            "corporate actions are not part of the yfinance adapter"
+        )
 
     def chunk_symbols(self, symbols: Iterable[str]) -> list[tuple[str, ...]]:
         return chunk_symbols(symbols, self._batch_size)
@@ -258,22 +326,46 @@ class YFinanceProvider:
         return self.fetch_bars_result(request).batch
 
     def fetch_bars_result(self, request: FetchRequest) -> YFinanceResult:
-        if request.market is not Market.US or request.interval is not Interval.D1:
+        if (
+            request.market not in (Market.US, Market.HK)
+            or request.interval is not Interval.D1
+        ):
             raise ProviderError(
-                "unsupported_request", "yfinance adapter serves US 1d bars only", retryable=False
+                "unsupported_request",
+                "yfinance adapter serves US and HK 1d bars only",
+                retryable=False,
             )
         feed = (request.feed or FEED).strip().lower()
         if feed != FEED:
-            raise ProviderError("invalid_request", f"unsupported feed {feed!r}", retryable=False)
+            raise ProviderError(
+                "invalid_request", f"unsupported feed {feed!r}", retryable=False
+            )
         adjustment = request.adjustment or ADJUSTMENT
-        adjustment = (adjustment.value if isinstance(adjustment, Adjustment) else adjustment).strip().lower()
+        adjustment = (
+            (adjustment.value if isinstance(adjustment, Adjustment) else adjustment)
+            .strip()
+            .lower()
+        )
         if adjustment != ADJUSTMENT:
             raise ProviderError(
-                "invalid_request", f"unsupported adjustment {adjustment!r}", retryable=False
+                "invalid_request",
+                f"unsupported adjustment {adjustment!r}",
+                retryable=False,
             )
-        chunks = self.chunk_symbols(request.symbols)
+        if request.market is Market.HK:
+            self._require_hk_coverage(request.window)
+            try:
+                chunks = chunk_hk_symbols(request.symbols, self._batch_size)
+            except ValueError as exc:
+                raise ProviderError(
+                    "invalid_request", str(exc), retryable=False
+                ) from exc
+        else:
+            chunks = self.chunk_symbols(request.symbols)
         if not chunks:
-            raise ProviderError("invalid_request", "no symbols requested", retryable=False)
+            raise ProviderError(
+                "invalid_request", "no symbols requested", retryable=False
+            )
         symbols = [s for chunk in chunks for s in chunk]
         first = self._decode_cursor(request.cursor, len(symbols))
 
@@ -281,9 +373,12 @@ class YFinanceProvider:
         series = BarSeriesCatalog.resolve(SourceIdentity(PROVIDER_ID, FEED, ADJUSTMENT))
         fetch_id = self._fetch_id()
         window = request.window
+        session_ok = self._hk_session_ok if request.market is Market.HK else None
         kwargs: dict[str, Any] = {
             "start": window.start.isoformat(),
-            "end": (window.end + timedelta(days=1)).isoformat(),  # Yahoo's end is exclusive
+            "end": (
+                window.end + timedelta(days=1)
+            ).isoformat(),  # Yahoo's end is exclusive
             "auto_adjust": False,
             "actions": False,
             "progress": False,
@@ -306,10 +401,17 @@ class YFinanceProvider:
                 errors[symbol] = ProviderError(
                     "quota_exhausted", str(exc), retryable=True, retry_at=exc.retry_at
                 )
-                next_cursor = str(index)  # resume here; later symbols were not attempted
+                next_cursor = str(
+                    index
+                )  # resume here; later symbols were not attempted
                 break
             try:
-                data = download(to_yahoo_ticker(symbol), **kwargs)
+                ticker = (
+                    to_yahoo_hk_ticker(symbol)
+                    if request.market is Market.HK
+                    else to_yahoo_ticker(symbol)
+                )
+                data = download(ticker, **kwargs)
                 rows = _rows(data)
             except ProviderError as exc:
                 if exc.code == NOT_INSTALLED_CODE:
@@ -319,7 +421,9 @@ class YFinanceProvider:
             except Exception as exc:  # noqa: BLE001 - classified below, never leaked raw
                 errors[symbol] = self._symbol_error(exc)
                 continue
-            parsed = self._parse_rows(symbol, rows, window, fetch_id, series, skipped)
+            parsed = self._parse_rows(
+                symbol, rows, window, fetch_id, series, skipped, session_ok=session_ok
+            )
             if parsed:
                 bars.extend(parsed)
             else:
@@ -346,7 +450,9 @@ class YFinanceProvider:
         if cursor is None:
             return 0
         if not cursor.isdigit() or int(cursor) >= count:
-            raise ProviderError("invalid_request", "malformed fetch cursor", retryable=False)
+            raise ProviderError(
+                "invalid_request", "malformed fetch cursor", retryable=False
+            )
         return int(cursor)
 
     def _symbol_error(self, exc: Exception) -> ProviderError:
@@ -396,6 +502,7 @@ class YFinanceProvider:
         fetch_id: str,
         series: Any,
         skipped: dict[str, int],
+        session_ok: Callable[[date], bool] | None = None,
     ) -> list[RawBar]:
         def skip(reason: str) -> None:
             skipped[reason] = skipped.get(reason, 0) + 1
@@ -410,17 +517,27 @@ class YFinanceProvider:
                 if not window.start <= day <= window.end:
                     skip("out_of_window")
                     continue
+                if session_ok is not None and not session_ok(day):
+                    skip("non_session")
+                    continue
                 values = {
-                    name: _quantized(row.get(name), name, VOLUME_SCALE if name == "volume" else PRICE_SCALE)
+                    name: _quantized(
+                        row.get(name),
+                        name,
+                        VOLUME_SCALE if name == "volume" else PRICE_SCALE,
+                    )
                     for name in _OHLCV
                 }
-                payload = {k: ("" if _is_missing(v) else str(v)) for k, v in sorted(row.items())}
+                payload = {
+                    k: ("" if _is_missing(v) else str(v))
+                    for k, v in sorted(row.items())
+                }
                 out[day] = RawBar(
                     provider=PROVIDER_ID,
                     symbol_as_returned=symbol,
                     fetch_id=fetch_id,
                     interval=Interval.D1,
-                    ts_start=datetime.combine(day, time.min, tzinfo=timezone.utc),
+                    ts_start=datetime.combine(day, time.min, tzinfo=UTC),
                     open=values["open"],
                     high=values["high"],
                     low=values["low"],
@@ -434,6 +551,29 @@ class YFinanceProvider:
             except (ValueError, TypeError, ProviderError):
                 skip("invalid_row")
         return list(out.values())
+
+    @staticmethod
+    def _require_hk_coverage(window: DateRange) -> None:
+        from openbars.calendars.hk import coverage  # lazy: heavy import
+
+        first, last = coverage()
+        if window.start < first or window.end > last:
+            raise ProviderError(
+                "invalid_request",
+                f"XHKG holiday coverage is {first.isoformat()}..{last.isoformat()}; "
+                f"window {window.start.isoformat()}..{window.end.isoformat()} is outside that range. "
+                "Upgrade exchange-calendars rather than inventing sessions.",
+                retryable=False,
+            )
+
+    @staticmethod
+    def _hk_session_ok(day: date) -> bool:
+        from openbars.calendars.hk import is_session  # lazy: heavy import
+
+        try:
+            return bool(is_session(day))
+        except ValueError:
+            return False
 
 
 def should_request_yfinance(
@@ -450,15 +590,17 @@ def should_request_yfinance(
     Consecutive needed sessions are merged into one ``DateRange``.
     """
     if sessions is None:
-        from openbars.calendars.xnys import sessions as xnys_sessions  # lazy: heavy import
+        from openbars.calendars.xnys import (
+            sessions as xnys_sessions,
+        )  # lazy: heavy import
 
         days = list(xnys_sessions(window.start, window.end))
     else:
         days = sorted({d for d in sessions if window.start <= d <= window.end})
     if primary_covered is None:
-        covered: Callable[[date], bool] = lambda _d: False  # noqa: E731
+        covered: Callable[[date], bool] = lambda _d: False
     elif isinstance(primary_covered, DateRange):
-        covered = lambda d: primary_covered.start <= d <= primary_covered.end  # noqa: E731
+        covered = lambda d: primary_covered.start <= d <= primary_covered.end
     else:
         covered_set = set(primary_covered)
         covered = covered_set.__contains__

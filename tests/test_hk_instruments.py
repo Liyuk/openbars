@@ -148,3 +148,26 @@ def test_market_of_uses_hk_prefix(tmp_path):
     assert backend.market_of(hk_instrument_id("xhkg", "00700")) is Market.HK
     assert backend.market_of(hk_instrument_id("xhkg", "00005", 2)) is Market.HK
     assert backend.market_of("us:eq:01ARZ3NDEKTSV4RRFFQ69G5FAV") is Market.US
+
+
+@pytest.mark.parametrize(
+    "raw,yahoo",
+    [
+        ("00700", "0700.HK"),
+        ("700", "0700.HK"),
+        ("0700.HK", "0700.HK"),
+        ("hk:eq:xhkg:00700", "0700.HK"),
+        ("09988", "9988.HK"),
+        ("00005", "0005.HK"),
+        ("08031", "8031.HK"),
+    ],
+)
+def test_yahoo_ticker_roundtrip(raw, yahoo):
+    from openbars.normalize.hk_instruments import (
+        from_yahoo_hk_ticker,
+        to_yahoo_hk_ticker,
+    )
+
+    assert to_yahoo_hk_ticker(raw) == yahoo
+    assert from_yahoo_hk_ticker(yahoo) == from_yahoo_hk_ticker(raw)
+    assert len(from_yahoo_hk_ticker(yahoo)) == 5
