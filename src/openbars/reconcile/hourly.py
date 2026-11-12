@@ -61,6 +61,7 @@ def reconcile_hourly(
             capabilities=sel.capabilities, sources_seen=tuple(s.provider for s in sel.sources_seen),
             currency=sel.selected.resolved_series.currency,
             available_at=raw_ingested_at(raw),
+            freshness=sel.selected.freshness,
         ))
     return tuple(result)
 

@@ -6,6 +6,7 @@ throwaway schema; it is skipped by the default check.sh run.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -32,6 +33,7 @@ from openbars.storage.postgres import (
     _CANON_DAILY_SQL,
     _CANON_INTRADAY_SQL,
     NATIVE_REQUIRED,
+    PgCanonicalStore,
     ColumnInfo,
     check_native,
     native_ddl,
@@ -51,15 +53,16 @@ def at(hours: float) -> datetime:
 
 
 def row(day: date = D1, *, iid: str = IID, close: str = "10", revision: int = 1,
-        available_at: datetime | None = None, interval: Interval = Interval.D1,
+        available_at: datetime | None = None, freshness: str = "final", provider: str = "massive",
+        interval: Interval = Interval.D1,
         hour: int = 0) -> CanonicalBarRow:
     ts = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
     return CanonicalBarRow(
         instrument_id=iid, market=Market.US, interval=interval, ts_start=ts, session_date=day,
-        session=Session.REGULAR, provider="massive", open=Decimal("10"), high=Decimal("12"),
+        session=Session.REGULAR, provider=provider, open=Decimal("10"), high=Decimal("12"),
         low=Decimal("9"), close=Decimal(close), volume=Decimal("100"), price_source="massive:eod",
         reconcile_rule="primary_source", feed="eod", adjustment="split", revision=revision,
-        generated_at=T0, available_at=available_at,
+        generated_at=T0, available_at=available_at, freshness=freshness,
     )
 
 
@@ -77,7 +80,20 @@ def test_available_at_is_an_additive_nullable_utc_column():
     field = CANONICAL_BARS_SCHEMA.field("available_at")
     assert field.nullable and field.type == TS == pa.timestamp("us", tz="UTC")
     assert SCHEMA_VERSION == 1
-    assert CANONICAL_BARS_SCHEMA.names[-1] == "available_at"
+    assert CANONICAL_BARS_SCHEMA.field("freshness").nullable
+    assert CANONICAL_BARS_SCHEMA.names[-2:] == ["available_at", "freshness"]
+
+
+def test_freshness_is_independent_and_legacy_null_defaults_to_final(tmp_path):
+    backend = open_backend(tmp_path)
+    with pytest.raises(ValueError, match="freshness"):
+        row(freshness="stale")
+    backend.canonical.upsert_rows([row(freshness="provisional", available_at=at(1))])
+    assert backend.canonical.scan_rows([IID], Interval.D1, WINDOW)[0].freshness == "provisional"
+    _write_pre_154_part(backend, [row(D2)])
+    assert {r.session_date: r.freshness for r in backend.canonical.scan_rows([IID], Interval.D1, WINDOW)} == {
+        D1: "provisional", D2: "final"
+    }
 
 
 def test_naive_available_at_is_rejected():
@@ -105,12 +121,13 @@ def _write_pre_154_part(backend, rows):
     from openbars.storage.rows import canonical_rows_to_table
 
     table = canonical_rows_to_table(rows)
-    table = table.drop_columns(["available_at"]).replace_schema_metadata(CANONICAL_BARS_SCHEMA.metadata)
+    table = table.drop_columns(["available_at", "freshness"]).replace_schema_metadata(CANONICAL_BARS_SCHEMA.metadata)
     directory = backend.root / "canonical" / "market=us" / "interval=1d" / "year=2025"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "part-0000000000000000001-old00000.parquet"
     pq.write_table(table, path)
     assert "available_at" not in pq.read_schema(path).names
+    assert "freshness" not in pq.read_schema(path).names
     return path
 
 
@@ -120,6 +137,7 @@ def test_old_files_read_as_null_and_are_hidden_by_available_by(tmp_path):
     assert [r.available_at for r in backend.canonical.scan_rows([IID], Interval.D1, WINDOW)] == [None, None]
     table = backend.reader.bars([IID], start=D1, end=D2)
     assert table.num_rows == 2 and table.column("available_at").null_count == 2
+    assert table.column("freshness").to_pylist() == ["final", "final"]
     assert backend.reader.bars([IID], start=D1, end=D2, available_by=at(1000)).num_rows == 0
     assert [r["session_date"] for r in load_canonical(backend, [IID], start=D1, end=D2)] == ["2025-01-02", "2025-01-03"]
 
@@ -141,31 +159,62 @@ def test_old_and_new_files_mix_and_a_null_is_filled_for_the_same_source_bar(tmp_
 # --- available_by -------------------------------------------------------------------------
 
 
-def test_available_by_filters_the_stored_row_of_each_key_with_revisions(tmp_path):
+def test_available_by_selects_latest_available_revision_and_compaction_keeps_history(tmp_path):
     backend = open_backend(tmp_path)
     reader = backend.reader
-    backend.canonical.upsert_rows([row(available_at=at(1)), row(D2, available_at=at(1)),
+    backend.canonical.upsert_rows([row(available_at=at(1), freshness="provisional"), row(D2, available_at=at(1)),
                                    row(iid=OTHER, available_at=at(1))])
-    # D1 of TEST1 gets a corrected revision 2, available only later
-    backend.canonical.upsert_rows([row(close="11", revision=2, available_at=at(5))])
+    # A different provider supplies the final bar later.
+    backend.canonical.upsert_rows([row(close="11", revision=2, available_at=at(5),
+                                       provider="alpaca", freshness="final")])
 
     def read(by):
-        return closes(reader.bars([IID, OTHER], start=D1, end=D2, available_by=by))
+        return sorted(closes(reader.bars([IID, OTHER], start=D1, end=D2, available_by=by)))
 
     assert read(at(0)) == []
-    # the newest stored row of TEST1/D1 is revision 2 (not available yet): it is hidden, and the
-    # superseded revision 1 is NOT resurrected (one row per key, like upstream research_daily_bar)
-    assert read(at(1)) == [(OTHER, D1, "10", 1), (IID, D2, "10", 1)]
-    assert read(at(5)) == [(IID, D1, "11", 2), (OTHER, D1, "10", 1), (IID, D2, "10", 1)]
+    assert read(at(1)) == sorted([(OTHER, D1, "10", 1), (IID, D1, "10", 1), (IID, D2, "10", 1)])
+    assert read(at(5)) == sorted([(IID, D1, "11", 2), (OTHER, D1, "10", 1), (IID, D2, "10", 1)])
+    selected = reader.bars([IID], start=D1, end=D1, available_by=at(1)).to_pylist()[0]
+    assert selected["freshness"] == "provisional" and selected["available_at"] == at(1)
+    selected = reader.bars([IID], start=D1, end=D1, available_by=at(5)).to_pylist()[0]
+    assert selected["freshness"] == "final" and selected["available_at"] == at(5)
     # no available_by = today's behaviour (newest row, whatever its availability)
-    assert closes(reader.bars([IID, OTHER], start=D1, end=D2)) == read(at(5))
+    assert sorted(closes(reader.bars([IID, OTHER], start=D1, end=D2))) == read(at(5))
     # the boundary is inclusive and any time zone is accepted
     tokyo = at(5).astimezone(__import__("zoneinfo").ZoneInfo("Asia/Tokyo"))
     assert read(tokyo) == read(at(5))
     # the same answer after compaction (superseded parts are gone, nothing changes)
     backend.canonical.compact()
-    assert read(at(1)) == [(OTHER, D1, "10", 1), (IID, D2, "10", 1)]
-    assert read(at(5)) == [(IID, D1, "11", 2), (OTHER, D1, "10", 1), (IID, D2, "10", 1)]
+    assert read(at(1)) == sorted([(OTHER, D1, "10", 1), (IID, D1, "10", 1), (IID, D2, "10", 1)])
+    assert read(at(5)) == sorted([(IID, D1, "11", 2), (OTHER, D1, "10", 1), (IID, D2, "10", 1)])
+
+
+def assert_latest_write_wins_with_reversed_availability(backend):
+    store = backend.canonical
+    store.upsert_rows([row(available_at=at(5), revision=9)])
+    store.upsert_rows([row(close="11", revision=2, available_at=at(1), provider="alpaca")])
+    for by in (at(3), at(6), None):
+        (selected,) = backend.reader.bars([IID], start=D1, end=D2, available_by=by).to_pylist()
+        assert (selected["close"], selected["revision"], selected["available_at"]) == (Decimal("11"), 2, at(1))
+
+
+def test_parquet_pit_uses_write_order_when_availability_is_reversed(tmp_path):
+    backend = open_backend(tmp_path)
+    assert_latest_write_wins_with_reversed_availability(backend)
+    backend.canonical.compact()
+    for by in (at(3), at(6), None):
+        (selected,) = backend.reader.bars([IID], start=D1, end=D2, available_by=by).to_pylist()
+        assert (selected["close"], selected["revision"], selected["available_at"]) == (Decimal("11"), 2, at(1))
+
+
+@pytest.mark.postgres_live
+def test_postgres_pit_uses_write_order_when_availability_is_reversed(pg_dsn):
+    from pg_helpers import throwaway_schema
+    from openbars.storage.postgres import PostgresBackend
+
+    with throwaway_schema(pg_dsn) as schema:
+        backend = PostgresBackend(pg_dsn, mode="native", write=True, schema=schema)
+        assert_latest_write_wins_with_reversed_availability(backend)
 
 
 def test_available_by_must_be_timezone_aware(tmp_path):
@@ -239,7 +288,11 @@ def test_changed_source_or_price_with_the_same_fingerprint_takes_its_own_time(tm
     store.upsert_rows([later])
     (stored,) = store.scan_rows([IID], Interval.D1, WINDOW)
     assert stored.available_at == at(7)
-    assert load_canonical(open_backend(tmp_path), [IID], start=D1, end=D1, market=Market.US, available_by=at(5)) == []
+    reader = open_backend(tmp_path).reader
+    for when, expected in ((at(5), first), (at(7), later), (None, later)):
+        (selected,) = reader.bars([IID], start=D1, end=D1, available_by=when).to_pylist()
+        for field in ("close", "provider", "feed", "price_source", "volume", "volume_source", "available_at"):
+            assert selected[field] == getattr(expected, field)
 
 
 # --- producers ------------------------------------------------------------------------------
@@ -262,6 +315,13 @@ def test_reloaded_raw_bar_carries_ingested_at_into_the_observation(tmp_path):
     reloaded = next(backend.raw.scan("massive", Market.US, Interval.D1, DateRange(D1, D1)))
     assert observation_from_raw(reloaded).available_at == stored.ingested_at
     assert observation_from_raw(_raw_bar()).available_at is None  # straight from a provider
+
+
+def test_raw_observation_tier_changes_after_local_session_day():
+    same_day = replace(_raw_bar(), extra={"market": "us", "ingested_at": at(1)})
+    next_day = replace(_raw_bar(), extra={"market": "us", "ingested_at": at(8)})
+    assert observation_from_raw(same_day).freshness == "provisional"
+    assert observation_from_raw(next_day).freshness == "final"
 
 
 def test_us_daily_sink_uses_stored_ingested_at_or_the_write_time(tmp_path):
@@ -306,16 +366,53 @@ def test_cn_and_hourly_producers_set_available_at(tmp_path):
 # --- Postgres native (offline) ---------------------------------------------------------------
 
 
-def test_postgres_native_ddl_and_schema_check_treat_available_at_as_additive():
+def test_postgres_native_without_history_filters_current_rows_by_availability():
+    queries = []
+
+    class Cursor:
+        def fetchone(self):
+            return {"name": None}
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            return Cursor()
+
+    @contextmanager
+    def session():
+        yield Connection()
+
+    store = PgCanonicalStore(session, False, lambda _: Market.US)
+    store.scan_rows([IID], Interval.D1, WINDOW, available_by=at(1))
+    sql, params = queries[-1]
+    # SQL's <= comparison excludes both later timestamps and NULL.
+    assert "available_at <= ?" in sql
+    assert at(1) in params
+
+    queries.clear()
+    store.scan_rows([IID], Interval.D1, WINDOW)
+    sql, params = queries[-1]
+    assert "available_at" not in sql
+    assert at(1) not in params
+
+
+def test_postgres_native_ddl_and_schema_check_treat_pit_fields_as_additive():
     from test_storage_postgres import fake_catalog
 
     ddl = native_ddl()
     create = next(s for s in ddl if s.startswith('CREATE TABLE IF NOT EXISTS "canonical_bars"'))
     assert '"available_at" TIMESTAMPTZ' in create
+    assert '"freshness" TEXT' in create
     assert 'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ' in ddl
+    assert 'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS freshness TEXT' in ddl
+    assert any('"canonical_bars_history"' in s for s in ddl)
     catalog = fake_catalog(NATIVE_REQUIRED)
     check_native(catalog)
     del catalog["canonical_bars"]["available_at"]  # pre-#154 database
+    del catalog["canonical_bars"]["freshness"]  # pre-#180 database
     check_native(catalog)
     catalog["canonical_bars"]["available_at"] = ColumnInfo("text")
     from openbars.storage.errors import SchemaMismatchError
@@ -326,6 +423,7 @@ def test_postgres_native_ddl_and_schema_check_treat_available_at_as_additive():
         for column in ("source_fingerprint", "price_source", "close", "volume_source"):
             assert f'"canonical_bars"."{column}" IS NOT DISTINCT FROM EXCLUDED."{column}"' in sql
         assert 'LEAST("canonical_bars"."available_at", EXCLUDED."available_at")' in sql
+        assert '"freshness" = EXCLUDED."freshness"' in sql
 
 
 class _FakeCanonical:

@@ -110,8 +110,9 @@ def _compact(args: argparse.Namespace, settings: Settings, out: Any, root: Path,
     plan = compact_plan(root, layer, min_parts=args.min_parts)
     out.line(f"compact plan (layer={args.layer}, min_parts={args.min_parts}):")
     for c in plan:
+        retained_label = "retained" if c.layer == "canonical" else "visible"
         out.line(
-            f"  {c.partition}: {c.parts} parts -> 1, {c.rows_before} rows -> {c.rows_after} visible, "
+            f"  {c.partition}: {c.parts} parts -> 1, {c.rows_before} rows -> {c.rows_after} {retained_label}, "
             f"{human_bytes(c.bytes_before)} -> ~{human_bytes(c.estimated_bytes_after)}"
         )
     before = sum(c.bytes_before for c in plan)

@@ -611,6 +611,7 @@ class CanonicalBarRow:
     # #154: earliest moment the bar may be used for research (selected source's raw
     # ``ingested_at`` / upstream ``received_at``); None = unknown (hidden by ``available_by``).
     available_at: datetime | None = None
+    freshness: str = "final"
     currency: str | None = None  # ISO 4217 of the bar prices; not a schema column (see capabilities)
 
     def __post_init__(self) -> None:
@@ -636,6 +637,10 @@ class CanonicalBarRow:
         _set(self, "generated_at", _utc(self.generated_at, "generated_at"))
         if self.available_at is not None:
             _set(self, "available_at", _utc(self.available_at, "available_at"))
+        freshness = self.freshness or "final"
+        if freshness not in {"provisional", "final"}:
+            raise InvalidBarError("freshness must be 'provisional' or 'final'")
+        _set(self, "freshness", freshness)
         if self.currency is None:
             for cap in self.capabilities:
                 if isinstance(cap, str) and cap.lower().startswith("currency:"):

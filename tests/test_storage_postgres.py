@@ -279,6 +279,7 @@ def test_compat_row_mapping_helpers():
     )
     row = compat_canonical_row(rec)
     assert row.instrument_id == "42" and row.flags == ("DIVERGENT",) and row.open == Decimal("11.25")
+    assert row.freshness == "final"  # upstream_compat remains one current row without tier history
     raw = compat_raw_row(
         dict(rec, symbol="ZZZA", price_basis="split_adjusted", adjustment_scope="splits",
              adjustment_as_of=None, session_semantics="regular", currency="USD",

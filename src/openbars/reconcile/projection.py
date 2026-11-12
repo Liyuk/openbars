@@ -72,6 +72,7 @@ class SourceObservation:
     source_bar_id: str | None = None
     series: BarSeriesIdentity | None = None  # None: resolved via BarSeriesCatalog
     available_at: datetime | None = None  # #154: the source row's raw ``ingested_at`` when known
+    freshness: str = "final"
 
     def __post_init__(self) -> None:
         if type(self.session_date) is not date:
@@ -84,6 +85,8 @@ class SourceObservation:
             raise ValueError("either instrument_id or symbol is required")
         if self.volume is None:
             raise ValueError("volume is required")
+        if self.freshness not in {"provisional", "final"}:
+            raise ValueError("freshness must be 'provisional' or 'final'")
         o, h, low, c, v, _ = validate_ohlcv(self.open, self.high, self.low, self.close, self.volume)
         for name, value in (("open", o), ("high", h), ("low", low), ("close", c), ("volume", v)):
             object.__setattr__(self, name, value)
@@ -151,6 +154,7 @@ class CanonicalSelection:
             generated_at=generated_at,
             currency=bar.resolved_series.currency,
             available_at=bar.available_at,
+            freshness=bar.freshness,
         )
 
 

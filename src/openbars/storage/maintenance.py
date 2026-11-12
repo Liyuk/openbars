@@ -127,7 +127,7 @@ class CompactionCandidate:
     partition: str  # relative to the data directory
     parts: int
     rows_before: int  # including superseded duplicates
-    rows_after: int  # visible rows after deduplication
+    rows_after: int  # retained rows: visible rows for raw, all distinct canonical history rows
     bytes_before: int
 
     @property
@@ -157,7 +157,7 @@ def _layers(layer: str | None) -> list[str]:
 
 
 def compact_plan(root: str | Path, layer: str | None = None, *, min_parts: int = 2) -> list[CompactionCandidate]:
-    """Partitions ``compact(layer, min_parts=...)`` would merge. Reads metadata and keys only."""
+    """Partitions ``compact(layer, min_parts=...)`` would merge and rows each layer retains."""
     base = Path(root)
     backend = _ReadOnlyBackend(base)
     out: list[CompactionCandidate] = []
@@ -173,7 +173,20 @@ def compact_plan(root: str | Path, layer: str | None = None, *, min_parts: int =
             rows_before = sum(pq.ParquetFile(p).metadata.num_rows for p in files)
             con = _mem_connection()
             try:
-                sql = f"SELECT count(*) FROM ({_dedup_sql(LAYERS[name], 'read_parquet(?, filename=true, union_by_name=true)')})"
+                if name == "canonical":
+                    has_rank = table._has_write_rank(files)
+                    rank_expr = (
+                        "coalesce(__write_rank, try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT))"
+                        if has_rank else "try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT)"
+                    )
+                    exclude = "filename, __write_rank" if has_rank else "filename"
+                    retained = (
+                        f"SELECT DISTINCT * EXCLUDE ({exclude}), {rank_expr} AS __write_rank "
+                        "FROM read_parquet(?, filename=true, union_by_name=true)"
+                    )
+                    sql = f"SELECT count(*) FROM ({retained})"
+                else:
+                    sql = f"SELECT count(*) FROM ({_dedup_sql(LAYERS[name], 'read_parquet(?, filename=true, union_by_name=true)')})"
                 row = con.execute(sql, [[str(p) for p in files]]).fetchone()
             finally:
                 con.close()
