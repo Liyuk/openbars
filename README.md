@@ -4,9 +4,9 @@
 >
 > **免费、多市场、多数据源的 K 线采集、清洗与合并框架，产出一份可审计的唯一数据源。**
 
-**Status / 状态：pre-alpha** — 美股日线的本地链路（`plan` / `run` / `status` / `verify`）已在本仓库可用；其余市场与粒度仍在路线图中。API 随时会变。
+**Status / 状态：pre-alpha** — 美股日线、加密日线、A 股日线（BaoStock，可选依赖）的本地 `plan` / `run` 链路已在本仓库可用；`verify` 仍只面向美股；港股的规划器尚未接入；其余粒度仍在路线图中。API 随时会变。
 
-*US daily local path (`plan` / `run` / `status` / `verify`) is available in this tree; other markets and intervals come later. Pre-alpha: the API may change.*
+*US daily, crypto daily and A-share daily (BaoStock, optional extra) local `plan` / `run` are available in this tree; `verify` is still US-oriented; the Hong Kong planner is not wired yet; other intervals come later. Pre-alpha: the API may change.*
 
 ---
 
@@ -61,6 +61,20 @@ uv run openbars verify               # 覆盖率与多源一致性报告（只�
 - `shadow` 只对外部 research-daily-v2 HTTP API 发 GET：用 `--symbols-file` 提供标的（仓库不带默认股票池），可选 `--fetch` 经 QuotaGate 按**显式标的列表**抓取（不会走整市场 grouped 接口）。报告写到 `--output`；请把符号列表和结果放在仓库外。密钥与 bearer token 不会写入报告。
 - 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
 
+### A 股日线（BaoStock）
+
+```bash
+uv sync --extra baostock             # 或 pip install "openbars[baostock]"
+# config.yaml：markets: [cn]；providers.baostock.enabled: true；universe.cn.symbols: [sh.600000, 000001.SZ]
+uv run openbars plan && uv run openbars run
+```
+
+- 不需要 API key。`universe.cn.symbols` 写 `sh.600000` 或 `600000.SH`；**不接受**裸 6 位代码（会被跳过并给出提示）。
+- 条款：BaoStock 仅限**个人本地使用**；请勿提交或分发行情数据（`data/` 已被 git 忽略）。海外网络可能连不上 BaoStock，此时任务会失败并记入任务状态（`openbars status` 可查），网络恢复后重跑即可续抓。
+- 落库的是**不复权**序列（`cn-daily-v1`，`adjustment=raw`）：停牌日只留在 raw 层（带 `tradestatus`），规范层不写占位并标记涨跌停；复权因子首次拉取上市以来全量、之后只拉增量。读取时传 `adjustment=Adjustment.QFQ` / `Adjustment.HFQ`（前/后复权在查询时派生，不落库）。
+- 可选冒烟：`OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py`（1 只股票、2 个交易日，默认跳过）。
+- `verify` 仍只支持美股；港股的规划器尚未接入。
+
 ### 数据条款声明（重要）
 
 - **openbars 不分发、不托管任何行情数据。** 仓库里只有代码、规则与文档。
@@ -112,6 +126,20 @@ uv run openbars verify               # coverage and cross-source agreement repor
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It shows coverage of expected XNYS sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory.
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
 - The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
+
+### A-share daily (BaoStock)
+
+```bash
+uv sync --extra baostock             # or: pip install "openbars[baostock]"
+# config.yaml: markets: [cn]; providers.baostock.enabled: true; universe.cn.symbols: [sh.600000, 000001.SZ]
+uv run openbars plan && uv run openbars run
+```
+
+- No API key. Write `universe.cn.symbols` as `sh.600000` or `600000.SH`; bare 6-digit codes are **not** accepted (they are skipped with a note).
+- Terms: BaoStock is for **personal local use only**; never commit or redistribute market data (`data/` is git-ignored). BaoStock may be unreachable from overseas networks; jobs then fail and show up in `openbars status`; re-run once the network is back to resume.
+- The stored series is **unadjusted** (`cn-daily-v1`, `adjustment=raw`): suspended sessions stay in the raw layer only (with `tradestatus`), canonical gets no placeholder bar and carries limit-up / limit-down flags. Adjust factors are fetched as full history the first time and incrementally afterwards. Pass `adjustment=Adjustment.QFQ` / `Adjustment.HFQ` at read time (derived on query, never stored).
+- Optional smoke test: `OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py` (1 symbol, 2 sessions; skipped by default).
+- `verify` is still US-only; the Hong Kong planner is not wired yet.
 
 ### Data terms disclaimer
 
