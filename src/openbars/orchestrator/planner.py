@@ -52,7 +52,7 @@ from openbars.calendars import crypto as crypto_calendar
 from openbars.calendars import hk as hk_calendar
 from openbars.calendars import xnys
 from openbars.config.schema import Selection
-from openbars.core.models import DateRange, Interval, Market
+from openbars.core.models import DateRange, HourlyAlignment, Interval, Market
 from openbars.normalize.cn_instruments import normalize_cn_symbol
 from openbars.normalize.hk_instruments import (
     hk_instrument_id,
@@ -151,7 +151,10 @@ class RawStoreCoverage:
             whole: set[date] = set()
             per_symbol: dict[str, set[date]] = defaultdict(set)
             for bar in self._raw.scan(provider, market, interval, window):
-                day = bar.session_date or bar.ts_start.date()
+                day = bar.session_date or (
+                    bar.ts_start.astimezone(NEW_YORK).date()
+                    if market is Market.US and interval is Interval.H1 else bar.ts_start.date()
+                )
                 whole.add(day)
                 per_symbol[bar.symbol_as_returned].add(day)
                 if bar.instrument_id:
@@ -402,6 +405,18 @@ def _bars_per_session(interval: Interval) -> int:
 
 def estimate_requests(job: Job, cap: SourceCapability | None) -> int:
     """Estimated HTTP requests for one job (lower bound; pagination may add more)."""
+    if job.market is Market.US and job.interval is Interval.H1:
+        sessions = _sessions(Market.US, job.window.start, job.window.end)
+        # Conservative full-session estimates, including extended hours when configured.
+        minutes = sum(960 for _ in sessions)
+        if job.provider == "massive":
+            return max(1, len(job.instruments) * math.ceil(minutes / 50000))
+        if job.provider == "alpaca":
+            return max(1, math.ceil(len(job.instruments) * minutes / 30 / 10000))
+        if job.provider == "twelve_data":
+            return max(1, len(job.instruments) * math.ceil(minutes / 60 / 5000))
+        if job.provider == "yfinance":
+            return len(job.instruments)
     if tuple(job.instruments) == WHOLE_MARKET:
         return 1
     if cap is None or not cap.max_bars_per_request:
@@ -434,11 +449,15 @@ class DefaultPlanner:
         policies: Mapping[str, QuotaPolicy] | None = None,
         max_window_days: int = MAX_WINDOW_DAYS,
         instruments: InstrumentMaster | None = None,
+        hourly_alignment: HourlyAlignment = HourlyAlignment.SESSION_OPEN,
+        include_extended_hours: bool = False,
     ) -> None:
         # ``instruments`` (optional): a crypto pair master. When given, a crypto symbol is
         # planned for a provider only if ``resolve(symbol, provider=...)`` hits; otherwise the
         # ``crypto_symbol_for_provider`` heuristic decides.
         self.instruments = instruments
+        self.hourly_alignment = HourlyAlignment(hourly_alignment)
+        self.include_extended_hours = include_extended_hours
         self.universe = universe
         self.providers = providers
         self.policies = policies
@@ -551,6 +570,10 @@ class DefaultPlanner:
                 )
                 caps_by_job[job_id] = capable[provider]
 
+        if is_us and interval is Interval.H1:
+            self._plan_hourly(capable, coverage, window, all_sessions, symbols, today, latest, emit, notes)
+            return
+
         # 1. whole-market grouped providers -------------------------------------------------
         whole_done: set[date] = set()  # covered or planned for every symbol
         whole = [
@@ -638,6 +661,39 @@ class DefaultPlanner:
                         JobKind.BACKFILL, name, chunk, DateRange(w_start, w_end),
                         PRIORITY_FALLBACK_HISTORY if pre_history else PRIORITY_FALLBACK_GAP,
                     )  # fmt: skip
+
+    def _plan_hourly(self, capable, coverage, window, sessions, symbols, today, latest, emit, notes):
+        """Plan complete US sessions; readiness follows the daily next-day rule.
+
+        This conservative rule also exceeds Alpaca SIP's close + 16 minute delay.
+        Each request spans one session so covered sessions are never crossed.
+        """
+        if not symbols:
+            notes.append(PlanNote("no_universe", "us/1h: no symbols configured; skipped"))
+            return
+        for name, cap in capable.items():
+            if name in {"yfinance", "twelve_data"} and self.hourly_alignment is not HourlyAlignment.SESSION_OPEN:
+                notes.append(PlanNote("unsupported_options", f"us/1h: {name} requires session_open alignment; skipped"))
+                continue
+            if name == "twelve_data" and self.include_extended_hours:
+                notes.append(PlanNote("unsupported_options", "us/1h: twelve_data does not support extended hours; skipped"))
+                continue
+            floor = max(window.start, cap.history_start or window.start,
+                        today - cap.rolling_window if cap.rolling_window else window.start)
+            eligible = [d for d in sessions if d >= floor]
+            groups = defaultdict(list)
+            for symbol in symbols:
+                have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
+                # One stored bar covers the session; missing hours are a quality concern.
+                for day in eligible:
+                    if day not in have:
+                        groups[day].append(symbol)
+            size = 1 if cap.batch is BatchShape.PER_SYMBOL else self._batch_size(name, cap)
+            for day, syms in groups.items():
+                kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
+                for chunk in _chunks(syms, size):
+                    emit(kind, name, chunk, DateRange(day, day),
+                         PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
 
     def _symbols_for(
         self,

@@ -618,3 +618,78 @@ def test_cn_without_a_universe_is_a_note():
 
     p = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake()], universe=[])
     assert p.jobs == () and any(n.code == "no_universe" for n in p.notes)
+
+
+def test_hourly_plans_each_capable_source_and_does_not_bridge_covered_session():
+    providers = [
+        FakeProvider(name, interval=Interval.H1, batch=shape, max_symbols=limit)
+        for name, shape, limit in [
+            ("massive", BatchShape.PER_SYMBOL, 1),
+            ("alpaca", BatchShape.MULTI_SYMBOL, 200),
+            ("yfinance", BatchShape.PER_SYMBOL, 1),
+            ("twelve_data", BatchShape.PER_SYMBOL, 1),
+        ]
+    ]
+    covered = StaticCoverage([("massive", date(2026, 3, 3), "TEST1")])
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 4), frozenset({Interval.H1})), providers, covered, universe=["TEST1"])
+    assert {j.provider for j in p.jobs} == {p.id for p in providers}
+    assert all(not (j.provider == "massive" and j.window.start <= date(2026, 3, 3) <= j.window.end) for j in p.jobs)
+
+
+def test_hourly_unsupported_options_skip_sources():
+    from openbars.core.models import HourlyAlignment
+
+    providers = {name: FakeProvider(name, interval=Interval.H1) for name in ("massive", "yfinance", "twelve_data")}
+    p = DefaultPlanner(hourly_alignment=HourlyAlignment.CLOCK_HOUR, include_extended_hours=True).plan(
+        sel(date(2026, 3, 2), date(2026, 3, 2), frozenset({Interval.H1})),
+        now=NOW, universe=["TEST1"], providers=providers,
+    )
+    assert {j.provider for j in p.jobs} == {"massive"}
+    assert len([n for n in p.notes if n.code == "unsupported_options"]) == 2
+
+
+def test_hourly_respects_rolling_history_and_session_readiness():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 10), frozenset({Interval.H1})),
+             [FakeProvider("massive", interval=Interval.H1, rolling_window=timedelta(days=3))],
+             now=NOW)
+    assert {j.window.start for j in p.jobs} == {date(2026, 3, 9)}
+
+
+def test_sparse_hourly_raw_session_is_covered():
+    from dataclasses import replace
+    from openbars.calendars import xnys
+    from openbars.providers.base import FetchRequest, RawBatch
+
+    day = date(2026, 3, 2)
+    provider = FakeProvider("massive", interval=Interval.H1)
+    req = FetchRequest(Market.US, Interval.H1, ("TEST1",), DateRange(day, day))
+    bar = replace(provider.bar("TEST1", day, "f1"), interval=Interval.H1,
+                  ts_start=xnys.hourly_slots(day)[0].ts_start)
+    raw = MemoryRawStore()
+    raw.append(RawBatch("massive", "f1", req, (bar,)))
+    p = plan(sel(day, day, frozenset({Interval.H1})), [provider], RawStoreCoverage(raw), universe=["TEST1"])
+    assert not p.jobs
+
+
+def test_mixed_daily_hourly_budget_combines_requests():
+    class MixedProvider(FakeProvider):
+        def capabilities(self):
+            from dataclasses import replace
+            daily = super().capabilities()[0]
+            return (daily, replace(daily, interval=Interval.H1))
+
+    provider = MixedProvider("alpaca")
+    selection = sel(date(2026, 3, 9), date(2026, 3, 9), frozenset({Interval.D1, Interval.H1}))
+    result = plan(selection, [provider], universe=["TEST1"])
+    assert {job.interval for job in result.jobs} == {Interval.D1, Interval.H1}
+    assert result.budget.providers["alpaca"].requests == 2
+
+
+def test_hourly_extended_hours_skips_twelve_data():
+    providers = {name: FakeProvider(name, interval=Interval.H1) for name in ("massive", "twelve_data")}
+    result = DefaultPlanner(include_extended_hours=True).plan(
+        sel(date(2026, 3, 2), date(2026, 3, 2), frozenset({Interval.H1})),
+        now=NOW, universe=["TEST1"], providers=providers,
+    )
+    assert {job.provider for job in result.jobs} == {"massive"}
+    assert any(note.code == "unsupported_options" and "twelve_data" in note.message for note in result.notes)
