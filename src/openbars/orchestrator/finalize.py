@@ -7,23 +7,36 @@ rows. Bars whose instrument is not resolved yet are reconciled under their symbo
 
 Crypto jobs (``Market.CRYPTO``) never go through that US reconciler: ``CryptoReconcilingSink``
 resolves each bar to its ``crypto:spot:<venue>:<BASE>-<QUOTE>`` instrument and reconciles per
-instrument with ``crypto-daily-v1`` (``reconcile_crypto``). ``DispatchingSink`` picks the sink
-by ``job.market`` so callers keep passing one sink object.
+instrument with ``crypto-daily-v1`` (``reconcile_crypto``).
+
+A-share jobs (``Market.CN``) are not reconciled either: ``CnCanonicalSink`` projects the single
+source (BaoStock) into ``cn-daily-v1`` canonical rows on the stored ``RAW`` basis. Suspended
+sessions (``tradestatus`` 0) are dropped from canonical (a calendar hole; the raw layer keeps the
+placeholder), limit-up / limit-down closes get ``LIMIT_UP`` / ``LIMIT_DOWN`` flags
+(``normalize.cn_quality``), and the provider's adjust factors, when it has any, are ingested into
+the factor table so ``QFQ`` / ``HFQ`` can be derived at read time.
+
+``DispatchingSink`` picks the sink by ``job.market`` so callers keep passing one sink object.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
-from openbars.core.models import DateRange, Interval, Market, RawBar
-from openbars.core.series import CanonicalDailyRow
+from openbars.core.models import DateRange, Interval, Market, QualityFlag, RawBar, Session
+from openbars.core.series import SELECTION_PRIMARY_SOURCE, CanonicalDailyRow
+from openbars.normalize.cn_adjust import from_baostock
+from openbars.normalize.cn_ingest import ensure_cn_instruments
+from openbars.normalize.cn_quality import flags_for_cn_series, is_suspended
 from openbars.orchestrator.jobs import Job
 from openbars.normalize.instruments import InstrumentMaster
+from openbars.providers.base import FetchRequest
+from openbars.reconcile.crypto import POLICY_VERSION_CN_DAILY_V1
 from openbars.raw.store import RawStore
 from openbars.reconcile.projection import SourceObservation
 from openbars.reconcile.reconciler import MemoryReconciler
@@ -86,8 +99,8 @@ class ReconcilingSink:
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is not Interval.D1:
             return  # the reconciler is daily-only for now
-        if Market(job.market) is Market.CRYPTO:
-            return  # XNYS reconciler: crypto bars stay raw-only unless a crypto sink handles them
+        if Market(job.market) in (Market.CRYPTO, Market.CN):
+            return  # XNYS reconciler: crypto / A-share bars stay raw-only unless their own sink handles them
         mine = [o for o in (observation_from_raw(b) for b in bars) if o is not None]
         if not mine:
             return
@@ -197,19 +210,137 @@ class CryptoReconcilingSink:
         return out
 
 
+CnWriter = Callable[[Sequence[Any]], object]  # takes ``CanonicalBarRow`` rows (``upsert_rows``)
+
+
+@dataclass
+class CnCanonicalSink:
+    """Raw A-share daily bars -> ``cn-daily-v1`` canonical rows (single source, stored RAW).
+
+    * **Identity**: ``bar.instrument_id``, else ``master`` resolution, else the deterministic
+      generation-1 id (``ensure_cn_instruments`` registers it first). A symbol that is not a
+      recognised CN spelling stays raw-only.
+    * **Suspensions** (``tradestatus`` 0) are dropped: no placeholder bar in canonical (the raw
+      row stays; ``cn_quality.missing_sessions`` treats the session as not missing). A trading
+      day with volume 0 that is *not* suspended is kept.
+    * **Flags**: ``LIMIT_UP`` / ``LIMIT_DOWN`` from ``cn_quality`` (reference = ``extra["preclose"]``,
+      else the previous raw close; IPO windows from the instrument's ``listed_on`` when known).
+    * Rows are ``RAW``, ``policy_version="cn-daily-v1"``, regular session, ``selection_reason``
+      ``primary_source``. They never go through the US XNYS reconciler.
+    * **Adjust factors**: with a ``factor_store`` (``upsert_adjust_factors``) and a provider that has
+      ``fetch_adjust_factors``, each symbol's factors are fetched and stored after the canonical
+      write, so QFQ / HFQ work after a run. The window is the job window, or
+      ``[factor_start, job end]`` when ``factor_start`` is given: BaoStock factors are cumulative
+      from listing, so a late start silently misses earlier ex-dates. Pass a long start (listing
+      date / ``1990-01-01``) for a complete history; it costs one extra request per symbol and job.
+      A factor failure never fails the job (the bars are already written); it is recorded in
+      ``factor_errors`` as ``(symbol, error code)``. No ``CorporateAction`` rows are invented.
+    """
+
+    master: InstrumentMaster
+    writer: CnWriter
+    providers: Mapping[str, Any] = field(default_factory=dict)
+    factor_store: Any = None
+    factor_start: date | None = None
+    factor_errors: list[tuple[str, str]] = field(default_factory=list)
+
+    def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
+        if Interval(job.interval) is not Interval.D1 or Market(job.market) is not Market.CN:
+            return
+        ids = self._resolve(job, bars)
+        by_id: dict[str, list[RawBar]] = defaultdict(list)
+        for bar in bars:
+            iid = bar.instrument_id or ids.get(bar.symbol_as_returned)
+            if iid is not None:
+                by_id[iid].append(bar)
+        rows = []
+        for iid, group in sorted(by_id.items()):
+            group.sort(key=lambda b: (_session_date(b), b.ts_start))
+            flags = flags_for_cn_series(group, listed_on=self._listed_on(iid))
+            rows += [self._row(iid, b, f) for b, f in zip(group, flags, strict=True) if not is_suspended(b)]
+        if rows:
+            self.writer(rows)
+        self._ingest_factors(job, by_id)
+
+    def _resolve(self, job: Job, bars: Sequence[RawBar]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        first: dict[str, date] = {}
+        for bar in bars:
+            if not bar.instrument_id:
+                day = _session_date(bar)
+                first[bar.symbol_as_returned] = min(day, first.get(bar.symbol_as_returned, day))
+        for symbol, day in first.items():
+            try:
+                out.update(ensure_cn_instruments(self.master, [symbol], as_of=day, provider=job.provider))
+            except ValueError:
+                continue  # not a recognised CN symbol: raw only
+        return out
+
+    def _listed_on(self, instrument_id: str) -> date | None:
+        get = getattr(self.master, "get", None)
+        inst = get(instrument_id) if get is not None else None
+        return None if inst is None else inst.listed_on
+
+    @staticmethod
+    def _row(instrument_id: str, bar: RawBar, flags: QualityFlag) -> Any:
+        from openbars.storage.rows import CanonicalBarRow, flags_to_names, quality_status_for
+
+        source = f"{bar.provider}:{bar.series.feed if bar.series is not None else bar.feed or ''}"
+        return CanonicalBarRow(
+            instrument_id=instrument_id,
+            market=Market.CN,
+            interval=Interval.D1,
+            ts_start=bar.ts_start,
+            session_date=_session_date(bar),
+            session=Session.REGULAR,
+            provider=bar.provider,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+            price_source=source,
+            reconcile_rule=SELECTION_PRIMARY_SOURCE,
+            policy_version=POLICY_VERSION_CN_DAILY_V1,
+            feed=(bar.series.feed if bar.series is not None else bar.feed) or "",
+            adjustment="raw",
+            flags=flags_to_names(flags),
+            selection_reason=SELECTION_PRIMARY_SOURCE,
+            quality_status=quality_status_for(flags),  # limit / suspended marks stay "complete"
+            volume_source=source,
+            sources_seen=(bar.provider,),
+        )
+
+    def _ingest_factors(self, job: Job, by_id: Mapping[str, Sequence[RawBar]]) -> None:
+        provider = self.providers.get(job.provider)
+        fetch = getattr(provider, "fetch_adjust_factors", None)
+        if self.factor_store is None or fetch is None:
+            return
+        window = DateRange(min(self.factor_start or job.window.start, job.window.end), job.window.end)
+        for iid, group in sorted(by_id.items()):
+            symbol = group[0].symbol_as_returned
+            try:
+                request = FetchRequest(Market.CN, Interval.D1, (symbol,), window)
+                found = [from_baostock(f, iid) for f in fetch(request)]
+                self.factor_store.upsert_adjust_factors(found)
+            except Exception as exc:  # noqa: BLE001 - bars are written; a factor outage must not fail the job
+                self.factor_errors.append((symbol, getattr(exc, "code", type(exc).__name__)))
+
+
 @dataclass
 class DispatchingSink:
-    """One sink for every market: ``job.market`` selects the ``us`` or ``crypto`` sink.
+    """One sink for every market: ``job.market`` selects the ``us``, ``crypto`` or ``cn`` sink.
 
     A market without a sink is raw-only (nothing is reconciled), never mis-reconciled.
     """
 
     us: CanonicalSink | None = None
     crypto: CanonicalSink | None = None
+    cn: CanonicalSink | None = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         market = Market(job.market)
-        sink = self.us if market is Market.US else self.crypto if market is Market.CRYPTO else None
+        sink = {Market.US: self.us, Market.CRYPTO: self.crypto, Market.CN: self.cn}.get(market)
         if sink is not None:
             sink.after_fetch(job, bars)
 

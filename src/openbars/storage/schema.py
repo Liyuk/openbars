@@ -211,6 +211,21 @@ CORPORATE_ACTIONS_FIELDS = [
     _f("amount", PRICE, True),
 ]
 
+# A-share adjust factors (``ref/adjust_factors.parquet``, Parquet only; additive: a missing file
+# is an empty table, so ``SCHEMA_VERSION`` does not change). One row per
+# ``(instrument_id, source, effective_from)``; ``source`` / ``method`` say who computed the
+# factors and how (never mixed for one instrument, see ``normalize.cn_adjust``).
+ADJUST_FACTORS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("source", pa.string()),
+    _f("method", pa.string()),  # e.g. "pct_return" (BaoStock 涨跌幅复权法)
+    _f("effective_from", pa.date32()),  # ex-date: the factors apply from this session on
+    _f("fore_adjust_factor", PRICE),
+    _f("back_adjust_factor", PRICE),
+    _f("adjust_factor", PRICE),
+    _f("symbol", pa.string(), True),
+]
+
 
 def _schema(layer: str, fields: list[pa.Field]) -> pa.Schema:
     return pa.schema(
@@ -230,6 +245,7 @@ CORPORATE_ACTIONS_SCHEMA = _schema("corporate_actions", CORPORATE_ACTIONS_FIELDS
 UNRESOLVED_SCHEMA = _schema("unresolved", UNRESOLVED_FIELDS)
 SYMBOL_OBSERVATIONS_SCHEMA = _schema("symbol_observations", SYMBOL_OBSERVATIONS_FIELDS)
 UPSTREAM_IDS_SCHEMA = _schema("upstream_ids", UPSTREAM_IDS_FIELDS)
+ADJUST_FACTORS_SCHEMA = _schema("adjust_factors", ADJUST_FACTORS_FIELDS)
 
 TABLE_SCHEMAS: Mapping[str, pa.Schema] = {
     "raw_bars": RAW_BARS_SCHEMA,
@@ -246,6 +262,9 @@ REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
     "symbol_observations": SYMBOL_OBSERVATIONS_SCHEMA,
     "upstream_ids": UPSTREAM_IDS_SCHEMA,
 }
+
+# Parquet-only ref tables (not part of the Postgres native schema).
+REF_PARQUET_SCHEMAS: Mapping[str, pa.Schema] = {"adjust_factors": ADJUST_FACTORS_SCHEMA}
 
 # --- identity / dedup keys ---------------------------------------------------------------
 # Templates use ``{t}`` as a table-alias prefix ("" or "e.") so the same key can be used in

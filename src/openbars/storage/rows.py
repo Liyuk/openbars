@@ -292,6 +292,7 @@ class RawBarRow:
             volume=self.volume,
             feed=self.feed or None,
             extra=extra,
+            session_date=self.session_date,
         )
 
 
@@ -308,8 +309,9 @@ def raw_rows_from_batch(
     from ``RawBar.extra`` (keys: ``instrument_id``, ``session_date``, ``adjustment``,
     ``price_basis``, ``adjustment_scope``, ``adjustment_as_of``, ``session_semantics``,
     ``currency``, ``volume_basis``, ``revision``, ``vwap``, ``trade_count``); unknown
-    extras are ignored. ``session_date`` falls back to the UTC date of ``ts_start`` -
-    normalizers should supply the exchange-local session date.
+    extras are ignored. ``session_date`` is ``extra["session_date"]``, else ``RawBar.session_date``
+    (A-share bars start at 00:00 Asia/Shanghai, the previous UTC day), else the UTC date of
+    ``ts_start`` - normalizers should supply the exchange-local session date.
     """
     now = ingested_at or datetime.now(UTC)
     rows: list[RawBarRow] = []
@@ -325,7 +327,7 @@ def raw_rows_from_batch(
                 symbol_as_returned=bar.symbol_as_returned,
                 interval=bar.interval,
                 ts_start=ts,
-                session_date=extra.get("session_date") or ts.date(),
+                session_date=extra.get("session_date") or bar.session_date or ts.date(),
                 open=bar.open,
                 high=bar.high,
                 low=bar.low,

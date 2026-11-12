@@ -271,6 +271,10 @@ def adjust_rows(
     module docstring for the arithmetic and that rule.
     """
     mode = Adjustment(mode)
+    if mode in (Adjustment.QFQ, Adjustment.HFQ):
+        raise AdjustmentError(
+            f"{mode.value} is derived for A-share bars only (normalize.cn_adjust)", "unsupported_cn_adjustment"
+        )
     if on_missing_actions not in ("raise", "flag"):
         raise ValueError(f"on_missing_actions must be 'raise' or 'flag', got {on_missing_actions!r}")
     rows = list(rows)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fakes import FakeProvider, MemoryRawStore
@@ -340,14 +341,135 @@ def test_crypto_instrument_master_resolver_decides_when_given():
     }  # TESTUSDT is unknown to the master: not planned
 
 
-def test_other_markets_are_skipped_without_jobs():
-    p = DefaultPlanner().plan(
-        Selection(frozenset({Market.CN}), frozenset({Interval.D1}), date(2026, 3, 2), None),
-        EmptyCoverage(), now=NOW, universe={Market.CN: ["TEST1"]},
-        providers={"fake": _cn_fake()},
+class _HkFake(FakeProvider):
+    def capabilities(self):
+        from dataclasses import replace
+
+        return tuple(replace(c, market=Market.HK) for c in super().capabilities())
+
+
+def _hk_plan(provider):
+    return DefaultPlanner().plan(
+        Selection(frozenset({Market.HK}), frozenset({Interval.D1}), date(2026, 3, 2), None),
+        EmptyCoverage(), now=NOW, universe={Market.HK: ["TEST1"]},
+        providers={"fake": provider},
     )  # fmt: skip
-    assert p.jobs == () and any(n.code in {"no_calendar", "no_provider"} for n in p.notes)
 
 
-def _cn_fake():
-    return FakeProvider("fake")  # declares US only -> no_provider; keeps the note path exercised
+def test_other_markets_are_skipped_without_jobs():
+    p = _hk_plan(FakeProvider("fake"))  # declares US only -> no_provider
+    assert p.jobs == () and any(n.code == "no_provider" for n in p.notes)
+
+
+def test_market_without_a_calendar_is_skipped_with_no_calendar():
+    p = _hk_plan(_HkFake("fake"))  # a provider exists, but HK has no calendar yet
+    assert p.jobs == () and [n.code for n in p.notes] == ["no_calendar"]
+
+
+# --- A-share (Market.CN): XSHG calendar, Asia/Shanghai clock -----------------------------------------
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+CN_NOW = datetime(2026, 3, 6, 16, 0, tzinfo=SHANGHAI)  # Friday, 1h after the 15:00 close
+
+
+def cn_sel(start: date, end: date | None = None) -> Selection:
+    return Selection(frozenset({Market.CN}), frozenset({Interval.D1}), start, end)
+
+
+def cn_plan(selection, providers, coverage=None, universe=("sh.600000",), now=CN_NOW):
+    return DefaultPlanner().plan(
+        selection, coverage or EmptyCoverage(), now=now, universe={Market.CN: list(universe)},
+        providers={p.id: p for p in providers},
+    )  # fmt: skip
+
+
+def test_cn_plans_jobs_with_no_calendar_note():
+    from cn_fakes import CnFake
+
+    p = cn_plan(cn_sel(date(2026, 3, 2), date(2026, 3, 6)), [CnFake()])
+    assert not [n for n in p.notes if n.code == "no_calendar"]
+    assert p.jobs and {j.provider for j in p.jobs} == {"baostock"}
+    assert all(j.market is Market.CN and j.instruments == ("sh.600000",) for j in p.jobs)
+    covered = sorted(d for j in p.jobs for d in (j.window.start, j.window.end))
+    assert covered[0] == date(2026, 3, 2) and covered[-1] == date(2026, 3, 6)
+    daily = [j for j in p.jobs if j.kind is JobKind.DAILY]
+    assert [j.window for j in daily] == [DateRange(date(2026, 3, 6), date(2026, 3, 6))]
+
+
+def test_cn_weekend_and_holiday_windows_contain_only_xshg_sessions():
+    from cn_fakes import CnFake
+
+    # Spring Festival 2026: the exchange is closed 2/16-2/23 (weekdays 2/16-2/20 included)
+    p = cn_plan(cn_sel(date(2026, 2, 12), date(2026, 3, 2)), [CnFake()], now=datetime(2026, 3, 3, 9, 0, tzinfo=SHANGHAI))
+    from openbars.calendars import cn
+
+    expected = cn.sessions(date(2026, 2, 12), date(2026, 3, 2))
+    assert date(2026, 2, 17) not in expected
+    # windows start and end on sessions, never on a weekend or holiday
+    for j in p.jobs:
+        assert cn.is_session(j.window.start) and cn.is_session(j.window.end)
+    assert min(j.window.start for j in p.jobs) == expected[0]
+    assert max(j.window.end for j in p.jobs) == expected[-1] == date(2026, 3, 2)
+
+
+def test_cn_covered_sessions_are_not_planned_again_whatever_the_spelling():
+    from cn_fakes import CnFake
+
+    cov = StaticCoverage([("baostock", d, "sh.600000") for d in (date(2026, 3, 2), date(2026, 3, 3), date(2026, 3, 4))])
+    p = cn_plan(cn_sel(date(2026, 3, 2), date(2026, 3, 6)), [CnFake()], coverage=cov, universe=["600000.SH"])
+    assert [j.window for j in p.jobs if j.kind is JobKind.BACKFILL] == [DateRange(date(2026, 3, 5), date(2026, 3, 5))]
+    assert [j.instruments for j in p.jobs] == [("600000.SH",)] * len(p.jobs)  # spelled as configured
+
+
+def test_cn_latest_ready_session_waits_thirty_minutes_after_the_close():
+    from openbars.orchestrator.planner import latest_ready_session
+
+    fri = date(2026, 3, 6)
+    assert latest_ready_session(datetime(2026, 3, 6, 15, 29, tzinfo=SHANGHAI), Market.CN) == date(2026, 3, 5)
+    assert latest_ready_session(datetime(2026, 3, 6, 15, 30, tzinfo=SHANGHAI), Market.CN) == fri
+    # an aware UTC timestamp is read on the Shanghai clock: 07:30 UTC == 15:30 Shanghai
+    assert latest_ready_session(datetime(2026, 3, 6, 7, 30, tzinfo=UTC), Market.CN) == fri
+    assert latest_ready_session(datetime(2026, 3, 8, 12, 0, tzinfo=SHANGHAI), Market.CN) == fri  # weekend
+
+
+def test_cn_job_is_not_planned_before_the_close_and_dates_use_the_shanghai_day():
+    from cn_fakes import CnFake
+
+    early = datetime(2026, 3, 6, 15, 10, tzinfo=SHANGHAI)  # Friday, still inside the wait
+    p = cn_plan(cn_sel(date(2026, 3, 2), date(2026, 3, 6)), [CnFake()], now=early)
+    assert max(j.window.end for j in p.jobs) == date(2026, 3, 5)
+    # 2026-03-06 23:00 UTC is already Saturday 07:00 in Shanghai (NY and UTC are still Friday)
+    sat = cn_plan(cn_sel(date(2026, 3, 2), date(2026, 3, 6)), [CnFake()], now=datetime(2026, 3, 6, 23, 0, tzinfo=UTC))
+    assert max(j.window.end for j in sat.jobs) == date(2026, 3, 6)
+
+
+def test_cn_never_uses_us_providers_or_yfinance():
+    from cn_fakes import CnFake
+
+    p = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake(), yfinance(), massive(), alpaca()])
+    assert {j.provider for j in p.jobs} == {"baostock"}
+    assert all(j.instruments != WHOLE_MARKET for j in p.jobs)
+
+
+def test_cn_bare_codes_and_unknown_spellings_are_skipped_with_a_note():
+    from cn_fakes import CnFake
+
+    p = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake()], universe=["600000", "sh.600000", "hk.00700", "000001.SZ"])
+    assert {j.instruments for j in p.jobs} == {("000001.SZ",), ("sh.600000",)}
+    assert any(n.code == "no_symbols" and "600000" in n.message and "hk.00700" in n.message for n in p.notes)
+    none = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake()], universe=["600000"])
+    assert none.jobs == () and [n.code for n in none.notes].count("no_symbols") == 2
+
+
+def test_cn_two_spellings_of_one_stock_plan_once():
+    from cn_fakes import CnFake
+
+    p = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake()], universe=["sh.600000", "600000.SH", "SH600000"])
+    assert {s for j in p.jobs for s in j.instruments} == {"600000.SH"}  # sorted first, one job set
+
+
+def test_cn_without_a_universe_is_a_note():
+    from cn_fakes import CnFake
+
+    p = cn_plan(cn_sel(date(2026, 3, 5), date(2026, 3, 6)), [CnFake()], universe=[])
+    assert p.jobs == () and any(n.code == "no_universe" for n in p.notes)

@@ -64,13 +64,19 @@ class Session(str, Enum):
 class Adjustment(str, Enum):
     """Price basis of a bar series.
 
-    v0.1 / ``research-daily-v2``: storage holds bars **split-adjusted as delivered** by the
-    source (backward-adjusted to the latest split, no dividend adjustment), so the stored
+    v0.1 / ``research-daily-v2`` (US): storage holds bars **split-adjusted as delivered** by
+    the source (backward-adjusted to the latest split, no dividend adjustment), so the stored
     column is ``SPLIT`` and the default read (``SPLIT``) is the stored value. ``RAW``,
     ``SPLIT_DIVIDEND``, ``ALL`` and ``SPLIT`` at an earlier ``as_of`` are derived at query
     time by ``openbars.normalize.adjust`` from the stored bars + corporate actions.
 
-    A later, optional profile may store ``RAW`` bars and derive every other basis; the
+    ``cn-daily-v1`` (A-share): storage holds **unadjusted** ``RAW`` bars; ``QFQ`` (前复权) and
+    ``HFQ`` (后复权) are derived at query time by ``openbars.normalize.cn_adjust`` from the
+    stored bars + the adjust-factor table (never persisted: a forward adjustment would rewrite
+    history on every new ex-date). A plain default read (``SPLIT``) of a CN series means "the
+    stored series", i.e. ``RAW``.
+
+    A later, optional US profile may store ``RAW`` bars and derive every other basis; the
     adjuster handles a stored ``RAW`` series as well (see ``normalize.adjust``).
     """
 
@@ -78,6 +84,8 @@ class Adjustment(str, Enum):
     SPLIT = "split"
     SPLIT_DIVIDEND = "split_dividend"
     ALL = "all"
+    QFQ = "qfq"  # 前复权: A-share, anchored at the latest visible adjust-factor event
+    HFQ = "hfq"  # 后复权: A-share, cumulative backward factor
 
 
 class QualityFlag(Flag):
@@ -91,6 +99,9 @@ class QualityFlag(Flag):
     GAP = auto()
     REVISED = auto()
     ADJUSTMENT_UNVERIFIED = auto()  # no corporate-action rows: the stored basis could not be verified/derived
+    LIMIT_UP = auto()  # A-share: close at the daily upper price limit (cn_quality)
+    LIMIT_DOWN = auto()  # A-share: close at the daily lower price limit
+    SUSPENDED = auto()  # A-share: the session was a trading suspension (tradestatus 0)
 
 
 @dataclass(frozen=True)
