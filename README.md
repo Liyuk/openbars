@@ -28,7 +28,7 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 
 ### 路线
 
-美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线；小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md) 与 [docs/architecture.md](docs/architecture.md)。
+美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线；小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md)、[docs/architecture.md](docs/architecture.md) 与 [docs/upstream-switch.md](docs/upstream-switch.md)（把既有研究序列切到 openbars）。
 
 ### 快速开始
 

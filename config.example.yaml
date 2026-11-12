@@ -43,8 +43,8 @@ storage:
   path: ./data
   postgres:
     dsn: ${OPENBARS_PG_DSN}
-    mode: native           # native | upstream_compat（compat 不做迁移，只做列级校验）
-    write: false           # 默认只读；写入需显式 true
+    mode: native           # native | upstream_compat（compat 永不做迁移，只做列级校验）
+    write: false           # 默认只读；写入需显式 true。upstream_compat 在 write: true 时写入已有表
 
 conventions:
   adjustment: split        # raw | split | split_dividend | all（查询时派生，落库只存不复权+公司行动）
