@@ -39,6 +39,10 @@ from openbars.core.models import (
     RawBar,
     Session,
 )
+from openbars.core.series import (
+    BarSeriesIdentity, PriceBasis as SeriesPriceBasis, AdjustmentScope as SeriesAdjustmentScope,
+    SessionSemantics as SeriesSessionSemantics, VolumeBasis as SeriesVolumeBasis,
+)
 from openbars.providers.base import RawBatch
 from openbars.storage.schema import (
     CANONICAL_BARS_SCHEMA,
@@ -371,6 +375,16 @@ class RawBarRow:
             "close_exact": self.close,
             "volume_exact": self.volume,
         }
+        series_data = extra.pop("_bar_series", None)
+        series = None
+        if isinstance(series_data, dict):
+            series_data = dict(series_data)
+            for name, enum in (("interval", Interval), ("price_basis", SeriesPriceBasis),
+                               ("adjustment_scope", SeriesAdjustmentScope),
+                               ("session_semantics", SeriesSessionSemantics),
+                               ("volume_basis", SeriesVolumeBasis)):
+                series_data[name] = enum(series_data[name])
+            series = BarSeriesIdentity(**series_data)
         return RawBar(
             provider=self.provider,
             symbol_as_returned=self.symbol_as_returned,
@@ -385,6 +399,8 @@ class RawBarRow:
             feed=self.feed or None,
             extra=extra,
             session_date=self.session_date,
+            instrument_id=self.instrument_id,
+            series=series,
         )
 
 
@@ -413,6 +429,11 @@ def raw_rows_from_batch(
             raise InvalidBarError(f"bar provider {bar.provider!r} != batch provider {batch.provider!r}")
         extra: Mapping[str, Any] = bar.extra
         ts = _utc(bar.ts_start, "ts_start")
+        leftovers = leftover_extra(extra) or {}
+        if bar.interval is Interval.H1 and bar.series is not None:
+            leftovers["_bar_series"] = {
+                f.name: getattr(bar.series, f.name) for f in fields(BarSeriesIdentity)
+            }
         rows.append(
             RawBarRow(
                 provider=bar.provider,
@@ -428,8 +449,8 @@ def raw_rows_from_batch(
                 volume=bar.volume,
                 fetch_id=bar.fetch_id or batch.fetch_id,
                 feed=bar.feed or "",
-                adjustment=extra.get("adjustment") or Adjustment.RAW.value,
-                instrument_id=extra.get("instrument_id"),
+                adjustment=(bar.series.legacy_adjustment if bar.interval is Interval.H1 and bar.series else extra.get("adjustment") or Adjustment.RAW.value),
+                instrument_id=(bar.instrument_id if bar.interval is Interval.H1 else None) or extra.get("instrument_id"),
                 price_basis=extra.get("price_basis") or UNKNOWN,
                 adjustment_scope=extra.get("adjustment_scope") or UNKNOWN,
                 adjustment_as_of=extra.get("adjustment_as_of"),
@@ -442,7 +463,7 @@ def raw_rows_from_batch(
                 source_artifact_ref=source_artifact_ref,
                 ingest_run_id=ingest_run_id,
                 ingested_at=now,
-                extra=leftover_extra(extra),
+                extra=leftovers or None,
             )
         )
     return rows

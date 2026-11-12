@@ -60,3 +60,40 @@ def test_secondary_fill_and_quality_rules():
     assert reconcile_hourly([missing])[0].quality_status == 'volume_missing'
     marked = reconcile_hourly([bar(15)], overrides={('us:TEST1', bar(15).ts_start): SelectionOverride(ACTION_MARK_SUSPECT)})
     assert marked[0].quality_status == 'spike_suspect'
+
+
+def test_raw_store_cross_source_arrival_orders_and_interval_coexistence(tmp_path):
+    from dataclasses import replace
+    from openbars.core.models import DateRange
+    from openbars.core.series import BarSeriesCatalog, SourceIdentity
+    from openbars.orchestrator.jobs import JobKind
+    from openbars.providers.base import FetchRequest, RawBatch
+    from openbars.storage.parquet_duckdb import open_backend
+
+    day = date(2025, 1, 2)
+    window = DateRange(day, day)
+    results = []
+    for order in [('massive', 'alpaca'), ('alpaca', 'massive')]:
+        backend = open_backend(tmp_path / order[0])
+        sink = ReconcilingSink(MemoryReconciler(), parquet_canonical_writer(backend.canonical),
+                               backend.raw, ('massive', 'alpaca'))
+        for provider in order:
+            feed = 'aggs' if provider == 'massive' else 'sip'
+            b = bar(15, provider, feed, '10' if provider == 'massive' else '15')
+            b = replace(b, series=BarSeriesCatalog.resolve(SourceIdentity(provider, feed, 'split'), interval=Interval.H1))
+            request = FetchRequest(Market.US, Interval.H1, ('TEST1',), window)
+            backend.raw.append(RawBatch(provider, 'x', request, (b,)))
+            scanned = list(backend.raw.scan(provider, Market.US, Interval.H1, window))[0]
+            assert scanned.instrument_id == b.instrument_id
+            assert scanned.series == b.series
+            job = Job('job', JobKind.BACKFILL, provider, Market.US, Interval.H1, ('us:TEST1',), window)
+            sink.after_fetch(job, [b, bar(16)])
+        hourly = backend.canonical.scan_rows(['us:TEST1'], Interval.H1, window)
+        daily = replace(hourly[0], interval=Interval.D1)
+        backend.canonical.upsert_rows([daily])
+        backend.canonical.upsert_rows([daily, *hourly])
+        assert len(backend.canonical.scan_rows(['us:TEST1'], Interval.D1, window)) == 1
+        assert len(backend.canonical.scan_rows(['us:TEST1'], Interval.H1, window)) == 2
+        row = next(r for r in hourly if r.ts_start.hour == 15)
+        results.append((row.provider, row.close, row.quality_status))
+    assert results == [('massive', D('10'), 'divergent')] * 2
