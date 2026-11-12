@@ -109,5 +109,8 @@ class HttpProviderAdapter:
         except httpx.HTTPError as exc:
             raise self.error_for(exc) from None
         if response.status_code >= 400:
-            raise self.http_error(response)
+            error = self.http_error(response)
+            if error.retry_at is not None:
+                self._quota_gate.penalize(self.provider_id, error.retry_at)
+            raise error
         return response

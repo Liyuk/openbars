@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from openbars.core.errors import ProviderError
+from openbars.core.errors import ProviderError, parse_retry_after
 
 REDACTED = "[REDACTED]"
 MIN_REDACTED_SECRET_LENGTH = 8
@@ -88,6 +88,9 @@ def provider_error_from_response(
     except Exception:  # undecodable body
         body = ""
     raw = redact_response_text(body, *secret_values)[:MAX_RAW_PAYLOAD_CHARS]
+    retry_at = None
+    if retryable:
+        retry_at = parse_retry_after(response.headers.get("retry-after"))
     return ProviderError(
         code,
         f"provider responded with HTTP {status}",
@@ -95,6 +98,7 @@ def provider_error_from_response(
         status_code=status,
         request_id=response.headers.get("x-request-id"),
         raw_payload=raw,
+        retry_at=retry_at,
     )
 
 
