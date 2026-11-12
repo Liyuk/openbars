@@ -11,6 +11,7 @@ from typing import Any
 
 from openbars.core.models import Adjustment, DateRange, Interval, Market
 from openbars.normalize.adjust import adjust_rows, requires_derivation
+from openbars.normalize.cn_adjust import adjust_cn_rows
 from openbars.reconcile import policy_version_for_market
 from openbars.storage.rows import (
     ID_KIND_AUTO,
@@ -46,12 +47,17 @@ class StoreBarReader:
         on_missing_actions: str = "raise",
         available_by: datetime | None = None,
         id_kind: str = ID_KIND_AUTO,
+        on_missing_factors: str | None = None,
+        factor_source: str | None = None,
     ) -> list[Any]:
         """Return ``CanonicalBarRow`` values for ``symbols_or_ids`` (ids or tickers).
 
         ``available_by`` (#154): keep only stored rows with ``available_at <= available_by``
         (null = not available), before any derivation - same rule as ``DuckDbBarReader``.
         ``id_kind="upstream"`` (#155): upstream integer ids matched to ``instrument_id`` verbatim.
+        A-share ``QFQ`` / ``HFQ`` (#124) derive from the master's ``adjust_factors`` with
+        ``normalize.cn_adjust`` (``factor_source``, ``on_missing_factors`` default
+        ``on_missing_actions``), as in ``DuckDbBarReader``.
         """
         if available_by is not None:
             available_by = available_by_utc(available_by)
@@ -102,7 +108,11 @@ class StoreBarReader:
             mode = None if adjustment is None else Adjustment(adjustment)
             if mode in (None, Adjustment.RAW, Adjustment.SPLIT):
                 return rows
-            stored = Adjustment.RAW
+            factors = master.adjust_factors(ids) if hasattr(master, "adjust_factors") else []
+            return list(adjust_cn_rows(
+                rows, factors, mode, as_of=as_of, source=factor_source,
+                on_missing_factors=on_missing_factors or on_missing_actions,
+            ).rows)
         else:
             stored = Adjustment(stored_adjustment)
             mode = None if adjustment is None else Adjustment(adjustment)
