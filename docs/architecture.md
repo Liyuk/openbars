@@ -304,19 +304,94 @@ A 股/港股的部分源（东财等）对海外 IP 不可用，Binance 主站�
 
 ## 10. 存储布局（Parquet + DuckDB 默认）
 
+实现：`openbars.storage.schema`（schema 定义）、`parquet_duckdb`（默认后端）、`postgres`（可选后端）、`openbars.raw.archive`（原始响应归档）。schema 版本 **`SCHEMA_VERSION = 1`**（`openbars-storage-v1`）。
+
 ```text
 data/
-  state.db                         # SQLite：jobs、checkpoints、quota buckets、fetch_log
+  state.db                         # SQLite：jobs、checkpoints、fetch_log（quota_* 表名预留给 QuotaGate，本层不创建）
   raw/provider=alpaca/market=us/interval=1d/year=2024/part-*.parquet
+  raw/provider=…/market=…/interval=5m/year=2024/month=03/part-*.parquet   # 日内粒度多一层 month
   canonical/market=us/interval=1d/year=2024/part-*.parquet
   ref/instruments.parquet, symbol_mappings.parquet, corporate_actions.parquet, calendars/
-  audit/reconcile/…, known_gaps.parquet
-  openbars.duckdb                  # 视图与查询目录，可随时重建
+  raw-archive/provider=…/market=…/interval=…/<window>/<request_digest>-<content_digest>.json
+  audit/reconcile/…, known_gaps.parquet     # 预留
+  openbars.duckdb                  # 只含视图与 catalog_meta，可随时重建
 ```
 
-- 写入原子化（临时文件 + rename）；小文件定期合并（compaction）。
-- zstd 压缩；分区键 `market / interval / year`（分钟线再加 `month`）。
-- Postgres 后端实现同一 `StorageBackend` 接口，表结构与 Parquet schema 一一对应。
+- 写入原子化：同目录临时文件（`.<name>.<token>.tmp`）→ `fsync` → `os.replace`，再 fsync 目录。写到一半被 `kill -9` 只会留下被读取方忽略的 `.tmp`（`compact()` 顺带清理陈旧 `.tmp`），已有 part 不受影响。
+- zstd 压缩；分区键 `market / interval / year`（raw 另有 `provider` 在最前；分钟线再加 `month`）。分区值同时作为列写入文件（自描述，不依赖 hive 路径解析）。
+- Postgres 后端实现同一 `StorageBackend` 接口，表结构与 Parquet schema 一一对应（见 §10.5、§11.3）。
+
+### 10.1 写入模型：不可变 part + 最后写入者胜出
+
+- 每次 `append` / `upsert` 对涉及的每个分区写入**一个新的不可变 part**（文件名 `part-<19 位纳秒时间戳>-<随机后缀>.parquet`，字典序即写入先后；同分区内时间戳严格递增，不受时钟回拨影响）。绝不原地修改旧文件。
+- **去重规则（same key, last write wins）**：键相同的行里，文件名最大的 part 中的那一行可见。读取与 DuckDB 视图都用窗口函数实现该规则，所以重复行在 compaction 之前就已不可见。同一批内键重复时，批内最后一行胜出。
+- 写入前与分区内当前可见行比较（忽略血缘列，见下）；**内容完全一致则不写文件**。因此重试同一个 Job、重复 upsert 不会产生新文件或重复行。血缘列：raw 的 `fetch_id / source_artifact_ref / ingest_run_id / ingested_at`，canonical 的 `generated_at`——只有这些列不同的重写视为无变化（历史请求见 `fetch_log`）。
+- `compact()`：把每个分区内的所有 part 合并成**一个**去重后的 part（原子写入，再删除输入）。合并产物保留最新输入的排序位次，因此并发写入的更新 part 仍然胜出；崩溃发生在“新 part 已落盘、旧 part 未删”之间时，数据冗余但读取结果一致。
+- 写入者用 `data/.lock`（`flock`）串行化；读取不加锁。
+- 新增的新 revision（`revision` 属于键的一部分）是独立的行，不会覆盖旧 revision。
+
+### 10.2 数值与模型对应
+
+- 价格 `decimal128(20,8)`，成交量 `decimal128(28,8)`（Parquet / DuckDB `DECIMAL` / Postgres `NUMERIC` 一致），内存中用 `Decimal`，**不经过二进制 float 往返**。
+- 当前 `core.models` 的 `Bar / RawBar / CanonicalBar` 仍声明 `float`。存储层对这些对象的摄入规则：`float` → `Decimal(str(value))`（最短 repr），再以 round-half-even 取 8 位小数；传入 `Decimal` / `str` / `int` 时**不做静默舍入**，小数位或总位数超出列精度直接报错。读取侧提供 `scan_rows` / `scan_table`（精确 `Decimal` / Arrow decimal），协议方法 `scan` 返回旧的 float 模型（有损，精确值放在 `RawBar.extra["*_exact"]`）。待交易日历 / bar 模型 schema 的 PR（#7）合入后，本分支会 rebase 并让模型字段与 schema 对齐。
+- 模型没有的字段不改模型，而是放在存储行映射里：`RawBar.extra` 的键 `instrument_id / session_date / adjustment / price_basis / adjustment_scope / adjustment_as_of / session_semantics / currency / volume_basis / revision / vwap / trade_count`（未知键忽略）；`market` 取自 `RawBatch.request.market`；`session_date` 缺省为 `ts_start` 的 UTC 日期（normalizer 应提供交易所本地交易日）。规范层 `CanonicalBar` 的 `market` 取自 instrument id 前缀（`us:eq:…`）或 instrument master；`policy_version`（默认 `research-daily-v2`）、`selection_reason`（默认 `unspecified`）、`capabilities`、`source_fingerprint`（默认由键与 OHLCV 的 SHA-256 生成）为 `upsert` 的参数，`quality_status` 由 `QualityFlag` 推导（`divergent` > `spike_suspect` > `volume_missing` > `complete`）。时间戳必须带时区（naive 一律拒绝）。
+- 校验：写入前检查 OHLCV 不变量（价格 > 0、`low ≤ open/close ≤ high`、成交量 ≥ 0），与 upstream 一致；raw 可用 `validate=False` 照原样归档。
+
+### 10.3 Schema v1
+
+**`raw_bars`**（与 upstream `daily_bar` 对应，外加抓取身份）
+
+| 列 | 类型 | 说明 |
+| --- | --- | --- |
+| `provider`, `market`, `feed`, `adjustment` | string | `feed` 无则为 `""`；`adjustment` 为源交付口径，未复权为 `raw` |
+| `symbol_as_returned` | string | provider 原样返回的代码 |
+| `instrument_id` | string, null | 解析前为空 |
+| `interval` | string | `1d` … |
+| `ts_start` | timestamp(us, UTC) | bar 开始时刻 |
+| `session_date` | date32 | 交易所本地交易日 |
+| `price_basis`, `adjustment_scope`, `session_semantics`, `volume_basis` | string | 取值同 §11.2；未知为 `unknown`（`volume_basis` 未提供时默认 `unknown`） |
+| `adjustment_as_of` | date32, null | |
+| `currency` | string, null | 3 位大写字母 |
+| `revision` | int32 | 默认 0 |
+| `open/high/low/close` | decimal128(20,8) | |
+| `volume` | decimal128(28,8), null | 空 = 源未给成交量 |
+| `vwap` | decimal128(20,8), null | |
+| `trade_count` | int64, null | |
+| `fetch_id` | string | 对应 `fetch_log` |
+| `source_artifact_ref` | string, null | `raw-archive` 下的相对路径（或摘要） |
+| `ingest_run_id` | string, null | |
+| `ingested_at` | timestamp(us, UTC) | |
+
+唯一键：`(market, interval, provider, feed, adjustment, revision, coalesce(instrument_id, symbol_as_returned), 时间)`，其中时间在 `1d` 为 `session_date`、日内为 `ts_start`（相对需求中的键多了 `market`：symbol 只在市场内唯一）。
+
+**`canonical_bars`**（与 `research_daily_bar` 对应，外加 openbars `Bar` 元数据）
+
+`instrument_id, market, interval, ts_start, session_date, session, policy_version（默认 research-daily-v2）, provider, feed, adjustment, revision, open/high/low/close decimal128(20,8), volume decimal128(28,8)（可空）, vwap（可空）, trade_count（可空）, flags list<string>（QualityFlag 成员名，如 DIVERGENT；不丢信息）, selection_reason, quality_status, capabilities list<string>, source_fingerprint, price_source, volume_source（可空）, sources_seen list<string>, reconcile_rule, generated_at`。
+
+唯一键：`(instrument_id, interval, policy_version, 时间)`，`1d` 时间为 `session_date`，即 `(instrument_id, session_date, interval, policy_version)`（upstream 是 `(instrument_id, session_date, policy_version)`，这里为将来的日内粒度加入 `interval`；日内以 `ts_start` 取代 `session_date`，否则同一交易日的多根 bar 会互相覆盖）。
+
+**`ref/`**：`instruments`（`instrument_id, market, asset_class, currency, name, exchange, listed_on, delisted_on, external_ids map<string,string>`，键 `instrument_id`）；`symbol_mappings`（`instrument_id, provider, symbol, valid_from, valid_to`，键 `(instrument_id, provider, symbol, valid_from)`，`valid_to` 含当日）；`corporate_actions`（`instrument_id, ex_date, kind, source, ratio decimal(20,8), amount decimal(20,8)`，键 `(instrument_id, ex_date, kind, source)`）。ref 表很小，每次 upsert 合并后整文件原子重写。`resolve(symbol, on, provider, market)`：按 `valid_from ≤ on ≤ valid_to` 与 instrument 的市场过滤；provider 专属映射优先于 `"*"`；同一优先级命中多个不同 instrument 视为歧义返回 `None`。
+
+**`state.db`（SQLite）**：`schema_meta`、`jobs`（`job_id` 主键；window 拆为 `window_start/end`，`instruments` 为 JSON 数组）、`checkpoints`（`job_id` 主键）、`fetch_log`（主键 `(provider, fetch_id)`；`market, interval, window_start/end, status(started|ok|empty|partial|error), artifact_ref, row_count, error_code, error_message, started_at, finished_at, job_id`）。
+
+### 10.4 DuckDB 目录与读取
+
+- `openbars.duckdb` 只含视图（`raw_bars`、`canonical_bars`、`instruments`、`symbol_mappings`、`corporate_actions`）与 `catalog_meta`；视图对 `raw/**/part-*.parquet` 取 glob 并套用 §10.1 的去重规则，因此永远只看到完整文件。`rebuild_catalog()` 删除并重建全部视图；`query()` 在目录缺失、数据目录被移动或某层首次出现文件时自动重建。
+- `DuckDbBarReader.bars(...)` 返回 `pyarrow.Table`（精确 decimal），支持整个市场的一年日线查询（`symbols_or_ids` 为空即全市场）。`adjustment` 对已存的 `adjustment` 列做过滤（`research-daily-v2` 为按源交付的拆股复权，默认 `SPLIT` 与之匹配）；查询时派生其他复权口径留给 `normalize.adjust`。
+- 原始响应归档（`RawArchive.write`）：内容摘要（SHA-256）、`license_tag`（必填）、脱敏后的请求参数（键名含 `api_key / apikey / secret / token / password / authorization / credential` 的值替换为 `[REDACTED]`，并掩码字符串里的 `key=value` 形式凭据）；文件名由请求摘要与内容摘要决定，相同输入得到相同路径，重复写入是 no-op；同名但内容不同（摘要碰撞/被篡改）抛 `RawArchiveCollisionError`；原子写入（临时文件 + fsync + 独占 `link`）。响应正文原样保存。
+
+### 10.5 Postgres 后端
+
+`storage.postgres.PostgresBackend(dsn, mode=…, write=False)`：
+
+- `native`：由同一份 schema 生成 DDL（`native_ddl()`），表与列和 Parquet 一一对应（`NUMERIC(20,8)/(28,8)`、`TEXT[]`、`JSONB`）；唯一键用两个部分唯一索引（日线用 `session_date`，日内用 `ts_start`），写入走 `INSERT … ON CONFLICT DO UPDATE`（同样是最后写入者胜出）。只有 `write=True` 才建表；只读连接只校验表结构（不符抛 `SchemaMismatchError`）。
+- `upstream_compat`：**不执行任何 DDL / 迁移**；构造时按 `information_schema` 做列级检查，缺表、缺列、类型不符（整数宽度不限，`numeric` 需精度一致）抛带 `problems` 列表的 `UpstreamSchemaError`。读取把 upstream 行映射为 openbars 行类型：`instrument_id` 转字符串；upstream 没有 `ts_start / fetch_id / price_source / reconcile_rule`，分别用会话日 00:00 UTC、`compat:<行号>`、`provider`、`policy_version` 占位；`quality_status` 映射回对应 `QualityFlag`。本阶段 `write=True` 会被拒绝（写入随 §11.4 的切换一起实现）；jobs / checkpoints / fetch_log 放在本地 SQLite（`state_path`）。
+- 默认只读（只读事务 + 写方法抛 `ReadOnlyError`）。Postgres 后端的 schema 定义依赖 pyarrow，需同时安装 `parquet` extra。
+
+### 10.6 Schema 版本与迁移
+
+v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；计划让读取方遇到更高版本的文件时拒绝而不是猜测（v1 尚未实现该检查）。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
 
 ### 10.1 Arrow / Parquet schema 声明（`openbars.core.schema`）
 
@@ -430,9 +505,9 @@ src/openbars/
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
   quota/         policy.py · gate.py
   providers/     base.py · registry.py · (us/alpaca … 实现随 issue 加入)
-  raw/           store.py
+  raw/           store.py · archive.py
   normalize/     instruments.py · calendar.py · actions.py · normalizer.py
   reconcile/     policy.py · reconciler.py · audit.py
-  storage/       base.py · parquet_duckdb.py · postgres.py
+  storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py
   api/           reader.py · http.py
 ```

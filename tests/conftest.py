@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -23,6 +24,22 @@ class FakeClock:
         self.now += timedelta(**kwargs)
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "postgres_live: needs a reachable Postgres (set OPENBARS_TEST_PG_DSN); skipped otherwise",
+    )
+
+
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+@pytest.fixture
+def pg_dsn():
+    dsn = os.environ.get("OPENBARS_TEST_PG_DSN")
+    if not dsn:
+        pytest.skip("OPENBARS_TEST_PG_DSN not set")
+    pytest.importorskip("psycopg")
+    return dsn
