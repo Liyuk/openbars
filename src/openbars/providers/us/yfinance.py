@@ -11,11 +11,12 @@ imported lazily inside the default download function; tests and callers may inje
 
 from __future__ import annotations
 
+import numbers
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any
 
 from openbars.core.errors import ProviderError, QuotaExhausted
@@ -28,6 +29,7 @@ from openbars.core.models import (
     Market,
     RawBar,
 )
+from openbars.core.ohlcv import PRICE_SCALE, VOLUME_SCALE
 from openbars.core.series import BarSeriesCatalog, SourceIdentity
 from openbars.providers.base import (
     API_VERSION,
@@ -113,6 +115,30 @@ def _is_missing(value: Any) -> bool:
         return bool(value != value)  # NaN
     except Exception:  # pragma: no cover - exotic scalar types
         return False
+
+
+def _quantized(value: Any, name: str, scale: int) -> Decimal:
+    """Exact ``Decimal`` for one OHLCV cell.
+
+    Yahoo/pandas deliver IEEE floats whose shortest ``repr`` can carry binary noise
+    (for example ``10.123456789012``). Floats (incl. numpy floating scalars) are therefore taken via
+    ``repr`` -> ``Decimal`` and rounded ROUND_HALF_EVEN to ``scale`` places, the same rule as
+    ``storage.rows.to_decimal``; no float arithmetic is involved. Exact inputs
+    (``Decimal``/``int``/``str``) are passed through untouched, so ``core.ohlcv`` still
+    rejects them if they carry more than ``scale`` fractional digits.
+    """
+    if isinstance(value, (bool, int, Decimal, str)) or value is None:
+        return decimal_value(value, name)
+    if not isinstance(value, numbers.Real):
+        return decimal_value(value, name)  # raises invalid
+    number = decimal_value(float(value), name)  # finite check; Decimal(repr(float))
+    quantum = Decimal(1).scaleb(-scale)
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 80
+            return number.quantize(quantum, rounding=ROUND_HALF_EVEN)
+    except InvalidOperation:
+        raise ValueError(f"{name} is out of range") from None
 
 
 def _field_name(key: Any) -> str:
@@ -384,7 +410,10 @@ class YFinanceProvider:
                 if not window.start <= day <= window.end:
                     skip("out_of_window")
                     continue
-                values = {name: decimal_value(row.get(name), name) for name in _OHLCV}
+                values = {
+                    name: _quantized(row.get(name), name, VOLUME_SCALE if name == "volume" else PRICE_SCALE)
+                    for name in _OHLCV
+                }
                 payload = {k: ("" if _is_missing(v) else str(v)) for k, v in sorted(row.items())}
                 out[day] = RawBar(
                     provider=PROVIDER_ID,
