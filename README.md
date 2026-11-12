@@ -4,9 +4,9 @@
 >
 > **免费、多市场、多数据源的 K 线采集、清洗与合并框架，产出一份可审计的唯一数据源。**
 
-**Status / 状态：pre-alpha** — 美股日线、加密日线、A 股日线（BaoStock，可选依赖）的本地 `plan` / `run` 链路已在本仓库可用；`verify` 覆盖 `markets` 中的每个市场（美股 / 加密 / A 股 / 港股，各用自己的日历与 `policy_version`）；港股日线（yfinance 主源，AKShare 佐证）同样可用；其余粒度仍在路线图中。API 随时会变。
+**Status / 状态：pre-alpha** — 美股日线、加密日线、A 股日线（BaoStock，可选依赖）的本地 `plan` / `run` 链路已在本仓库可用；`verify` 覆盖 `markets` 中的每个市场（美股 / 加密 / A 股 / 港股，各用自己的日历与 `policy_version`）；港股日线（yfinance 主源，AKShare 佐证）同样可用；美股 1h 可选采集到 raw 层；其他非日线粒度仍在路线图中。API 随时会变。
 
-*US daily, crypto daily and A-share daily (BaoStock, optional extra) local `plan` / `run` are available in this tree; `verify` covers every market in `markets` (US / crypto / A-shares / Hong Kong, each on its own calendar and `policy_version`); Hong Kong daily (yfinance primary, AKShare corroboration) is available too; other intervals come later. Pre-alpha: the API may change.*
+*US daily, crypto daily and A-share daily (BaoStock, optional extra) local `plan` / `run` are available in this tree; `verify` covers every market in `markets` (US / crypto / A-shares / Hong Kong, each on its own calendar and `policy_version`); Hong Kong daily (yfinance primary, AKShare corroboration) is available too; US 1h collection is available as raw bars; other non-daily intervals come later. Pre-alpha: the API may change.*
 
 ---
 
@@ -68,6 +68,37 @@ uv run openbars verify               # 各市场的覆盖率与多源一致性�
 - 默认规划器把每个交易日分给最便宜的来源，所以多源重叠需要你显式抓取一部分（例如给第二个来源排审计任务）后，`verify` 才有可比较的样本。
 - `shadow` 只对外部 research-daily-v2 HTTP API 发 GET：用 `--symbols-file` 提供标的（仓库不带默认股票池），可选 `--fetch` 经 QuotaGate 按**显式标的列表**抓取（不会走整市场 grouped 接口）。报告写到 `--output`；请把符号列表和结果放在仓库外。密钥与 bearer token 不会写入报告。
 - 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
+
+### 美股小时线（可选）
+
+在 `config.yaml` 中设置（`1h` 可单独使用，也可与 `1d` 并列）：
+
+```yaml
+markets: [us]
+intervals: [1d, 1h]
+universe:
+  us:
+    symbols: [TEST1, ZZZA]
+conventions:
+  us_hourly_alignment: session_open
+  include_extended_hours: false
+```
+
+启用所需 provider 并配置自己的凭据；所有美股 1h 来源都需要显式 `universe.us.symbols`，包括 Massive。`session_open` 按纽约时间 9:30 开盘对齐；也可选 `clock_hour`，但规划器会跳过只支持 `session_open` 的 yfinance 和 Twelve Data。默认只存常规时段；Twelve Data 不支持盘前盘后。Massive 和 Alpaca 将 30 分钟数据合成为网格上的 1 小时数据。
+
+将 `storage.path` 指向仓库外的位置；默认 `./data` 位于仓库内且被 git 忽略，请勿把行情数据提交进 git。先运行 `uv run openbars plan` 查看任务和请求预算，再运行 `uv run openbars run --accept-budget`；非日线提交或执行需要此确认。可用 `uv run openbars status` 查看进度，重跑可从断点续抓。
+
+免费档和历史窗口可能变化，请核对官方资料；以下是本项目的保守默认值或实现限制：
+
+- [Massive Basic](https://massive.com/pricing)：小时线约最近 2 年（730 天），默认每分钟 4 次。
+- [yfinance](https://ranaroussi.github.io/yfinance/)：非官方 Yahoo 数据，约最近 730 天（实现留 1 天余量）；默认每分钟 30 次是保守节流，并非官方配额。
+- [Alpaca](https://docs.alpaca.markets/docs/about-market-data-api)：小时线最早从 2016-01-01 开始；默认每分钟 200 次，示例配置收紧为 190 次。
+- [Twelve Data](https://twelvedata.com/pricing)：默认每分钟 8 次、每 UTC 日 800 次；实现将历史起点设为 2016-01-01，实际可用范围取决于服务商。
+
+操作、计时与容量估算见[本地实测手册](docs/measuring-hourly.md)。
+
+小时规范层仍待 #116；小时线与日线的一致性校验仍待 #116。
+看板 1h 支持仍待 #119。
 
 ### A 股日线（BaoStock）
 
@@ -147,6 +178,37 @@ uv run openbars verify               # per-market coverage and cross-source agre
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It produces one report per market in `markets`, each on its own calendar and `policy_version`: US XNYS + `research-daily-v2`; crypto `CryptoCalendar` (every UTC day is a session, weekends included) + `crypto-daily-v1`; A-shares XSHG (XSHE is an alias; Beijing is out of scope) + `cn-daily-v1`; Hong Kong XHKG (half days count as sessions) + `hk-daily-v1`. The window ends at the market's latest ready session (optionally capped by `history.end` / `--end`). A configured market with no stored bars is a note and the run continues; only when no market has bars is it an error. Each report shows coverage of expected sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory: one configured market gives a single report object (with `market` / `calendar` fields), several give `{"markets": {"us": {...}, "cn": {...}}}` (markets without data are listed under `skipped`).
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
 - The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
+
+### US hourly bars (optional)
+
+Set the following in `config.yaml` (`1h` can also be used without `1d`):
+
+```yaml
+markets: [us]
+intervals: [1d, 1h]
+universe:
+  us:
+    symbols: [TEST1, ZZZA]
+conventions:
+  us_hourly_alignment: session_open
+  include_extended_hours: false
+```
+
+Enable the providers you need and configure your own credentials. Every US 1h source, including Massive, needs explicit `universe.us.symbols`. `session_open` aligns to the 9:30 New York open; `clock_hour` is also available, but the planner skips yfinance and Twelve Data, which require `session_open`. Only regular hours are stored by default; Twelve Data does not support extended hours. Massive and Alpaca aggregate 30-minute bars onto the hourly grid.
+
+Point `storage.path` outside the repository; the default `./data` is inside the repository and git-ignored. Do not commit market data. First run `uv run openbars plan` to inspect jobs and the request budget, then `uv run openbars run --accept-budget`; submitting or running non-daily jobs requires this acceptance. Check progress with `uv run openbars status`; rerunning resumes from checkpoints.
+
+Free tiers and history windows can change; check the official references. These are conservative project defaults or implementation limits:
+
+- [Massive Basic](https://massive.com/pricing): approximately the last 2 years (730 days) of hourly data; default 4 requests per minute.
+- [yfinance](https://ranaroussi.github.io/yfinance/): unofficial Yahoo data for approximately the last 730 days (the implementation leaves a one-day margin); the default 30 requests per minute is conservative pacing, not an official quota.
+- [Alpaca](https://docs.alpaca.markets/docs/about-market-data-api): hourly history starts no earlier than 2016-01-01; default 200 requests per minute, tightened to 190 in the example config.
+- [Twelve Data](https://twelvedata.com/pricing): defaults are 8 requests per minute and 800 per UTC day; the implementation sets a 2016-01-01 history floor, while actual availability depends on the provider.
+
+See the [local measurement guide](docs/measuring-hourly.md#english) for timing and storage estimates.
+
+Hourly canonical reconciliation and the hourly-versus-daily consistency check are pending #116.
+Dashboard 1h support is pending #119.
 
 ### A-share daily (BaoStock)
 
