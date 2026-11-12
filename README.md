@@ -69,6 +69,10 @@ uv run openbars verify               # 各市场的覆盖率与多源一致性�
 - `shadow` 只对外部 research-daily-v2 HTTP API 发 GET：用 `--symbols-file` 提供标的（仓库不带默认股票池），可选 `--fetch` 经 QuotaGate 按**显式标的列表**抓取（不会走整市场 grouped 接口）。报告写到 `--output`；请把符号列表和结果放在仓库外。密钥与 bearer token 不会写入报告。
 - 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
 
+### 升级说明
+
+- **日线 raw 复权身份（#145 / #149）**：#145 之前，未在 `extra.adjustment` 里声明复权的拆股复权日线源（美股 Massive `eod`、Alpaca `iex` / `sip`、yfinance `yahoo`）被写成了 `adjustment=raw`；之后重新抓取会写成 `split`，两行在库里共存。读取时（Parquet 与 Postgres native 的 `scan_rows`）这些旧行按来源能力恢复为 `split`，若同一键已有新行则旧行被忽略，因此规范层选源与只有新行时一致，不需要迁移命令。港股 yfinance、AKShare、加密、A 股的 `raw` 本来就是不复权，不受影响；`upstream_compat` 的 `adjustment` 归上游所有，不做改写。旧行只占空间，compaction 不会删除它们（键不同）。
+
 ### 美股小时线（可选）
 
 在 `config.yaml` 中设置（`1h` 可单独使用，也可与 `1d` 并列）：
@@ -180,6 +184,10 @@ uv run openbars verify               # per-market coverage and cross-source agre
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It produces one report per market in `markets`, each on its own calendar and `policy_version`: US XNYS + `research-daily-v2`; crypto `CryptoCalendar` (every UTC day is a session, weekends included) + `crypto-daily-v1`; A-shares XSHG (XSHE is an alias; Beijing is out of scope) + `cn-daily-v1`; Hong Kong XHKG (half days count as sessions) + `hk-daily-v1`. The window ends at the market's latest ready session (optionally capped by `history.end` / `--end`). A configured market with no stored bars is a note and the run continues; only when no market has bars is it an error. Each report shows coverage of expected sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory: one configured market gives a single report object (with `market` / `calendar` fields), several give `{"markets": {"us": {...}, "cn": {...}}}` (markets without data are listed under `skipped`).
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
 - The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
+
+### Upgrade notes
+
+- **Daily raw adjustment identity (#145 / #149)**: before #145, split-adjusted daily sources that did not set `extra.adjustment` (US Massive `eod`, Alpaca `iex` / `sip`, yfinance `yahoo`) were stored as `adjustment=raw`; refetching now writes `split`, so both rows can coexist. Reads (`scan_rows` on Parquet and Postgres native) restore those legacy rows to `split` from the source's capability and ignore a legacy row when a current row has the same key, so canonical selection matches a store holding only current rows; no migration command is needed. Hong Kong yfinance, AKShare, crypto and A-share `raw` rows really are unadjusted and are left alone; `upstream_compat` rows keep the upstream `adjustment`. The legacy rows only cost space; compaction does not remove them (their key differs).
 
 ### US hourly bars (optional)
 

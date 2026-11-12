@@ -56,6 +56,9 @@ def test_seriesless_adjustment_identity_roundtrips(tmp_path, extra):
     restored = reload_bar(open_backend(tmp_path), bar, Market.US)
     before, after = observation_from_raw(bar), observation_from_raw(restored)
     assert restored.series is None
+    if extra.get('adjustment') == 'raw':
+        # massive/eod is split-only: a stored seriesless raw row is a pre-#145 row, read back as split (#149)
+        before = replace(before, adjustment='split')
     assert (after.feed, after.adjustment, after.series) == (before.feed, before.adjustment, before.series)
 
 
