@@ -552,10 +552,9 @@ def list_bars(
 
     # Bound the default window to stored data so we do not emit decades of gaps.
     if start is None or end is None:
-        stored = _scan_canonical(backend, [iid], interval=interval, market=market)
-        if not stored and interval == Interval.H1:
-            stored = list(backend.raw.scan_rows(None, market, interval, _wide_window(), instrument_ids=[iid]))
-        if not stored and source_name != SOURCE_CANONICAL:
+        if source_name == SOURCE_CANONICAL:
+            stored = _scan_canonical(backend, [iid], interval=interval, market=market)
+        else:
             stored = _raw_rows(backend, iid, source_name, market=market, interval=interval, start=None, end=None)
         if not stored and interval == Interval.H1:
             start = start or end or date.today()
@@ -617,26 +616,45 @@ def list_bars(
 
     bars.sort(key=lambda rec: rec.get("ts_start") or rec.get("session_date") or "")
     missing_hours = []
+    ambiguous = False
     if interval == Interval.H1 and hasattr(calendar, "hourly_slots"):
         present_ts = {datetime.fromisoformat(b["ts_start"]).timestamp() for b in bars if b.get("ts_start")}
         extended = any(b.get("session") in {"pre", "post"} for b in bars)
-        # The opening slot is shared by both grids; use all observed regular starts
-        # to choose the best match, falling back to session_open when ambiguous.
-        regular_ts = {datetime.fromisoformat(b["ts_start"]).timestamp() for b in bars
-                      if b.get("ts_start") and b.get("session") not in {"pre", "post"}}
+        # Compare end times too: the opening start is shared by both grids.
+        observed = []
+        for bar in bars:
+            if not bar.get("ts_start") or bar.get("session") in {"pre", "post"}:
+                continue
+            start_ts = datetime.fromisoformat(bar["ts_start"]).timestamp()
+            try:
+                end_ts = datetime.fromisoformat(bar["ts_end"]).timestamp() if bar.get("ts_end") else None
+            except (TypeError, ValueError):
+                end_ts = None
+            observed.append((start_ts, end_ts))
         grids = {}
+        scores = {}
         for alignment in (HourlyAlignment.SESSION_OPEN, HourlyAlignment.CLOCK_HOUR):
-            grids[alignment] = [slot for day in session_list for slot in calendar.hourly_slots(
+            slots = [slot for day in session_list for slot in calendar.hourly_slots(
                 day, alignment=alignment, include_extended_hours=extended
             )]
-        alignment = max(grids, key=lambda key: len(regular_ts & {
-            slot.ts_start.timestamp() for slot in grids[key] if slot.session.value == "regular"
-        }))
+            grids[alignment] = slots
+            regular = {(slot.ts_start.timestamp(), slot.ts_end.timestamp()) for slot in slots
+                       if slot.session.value == "regular"}
+            starts = {slot_start for slot_start, _ in regular}
+            scores[alignment] = sum(
+                (start_ts in starts if end_ts is None else (start_ts, end_ts) in regular)
+                for start_ts, end_ts in observed
+            )
+        alignment = max(scores, key=scores.get)
+        grid_shapes = [{(slot.ts_start.timestamp(), slot.ts_end.timestamp(), slot.session.value)
+                        for slot in slots} for slots in grids.values()]
+        ambiguous = len(set(scores.values())) == 1 and grid_shapes[0] != grid_shapes[1]
         if len(grids[alignment]) > MAX_BARS:
             raise QueryError(f"window has too many hourly slots (max {MAX_BARS}); pass a smaller start/end")
-        for slot in grids[alignment]:
-            if slot.ts_start.timestamp() not in present_ts:
-                missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
+        if not ambiguous:
+            for slot in grids[alignment]:
+                if slot.ts_start.timestamp() not in present_ts:
+                    missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
     missing = [d.isoformat() for d in session_list if d not in present]
     symbol_name = _symbol_for(iid, _mappings(backend), on=end)
     if symbol_name is None and inst is not None:
@@ -654,7 +672,8 @@ def list_bars(
         "bars": bars,
         "missing_sessions": missing if interval == Interval.D1 else [],
         "missing_hours": missing_hours,
-        "note": "No canonical hourly bars are available." if interval == Interval.H1 and source_name == SOURCE_CANONICAL and not bars else None,
+        "note": ("No canonical hourly bars are available." if interval == Interval.H1 and source_name == SOURCE_CANONICAL and not bars
+                 else "Hourly alignment is unknown; missing hours are unavailable." if ambiguous else None),
     }
 
 

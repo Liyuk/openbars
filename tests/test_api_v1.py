@@ -400,3 +400,34 @@ def test_hourly_canonical_stored_adjustment_is_not_mislabeled(client, backend):
     assert client.get('/api/v1/bars', params=params).status_code == 400
     body = client.get('/api/v1/bars', params={**params, 'adjustment': 'raw'}).json()
     assert body['adjustment'] == body['bars'][0]['adjustment'] == 'raw'
+
+
+def test_hourly_opening_bar_identifies_clock_grid(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    row = replace(original, interval=Interval.H1, ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC),
+                  extra={'session': 'regular', 'ts_end': '2020-01-02T15:00:00+00:00'})
+    backend.raw.append_rows([row])
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_a'}).json()
+    starts = [slot['ts_start'] for slot in body['missing_hours']]
+    assert '2020-01-02T15:00:00+00:00' in starts
+    assert '2020-01-02T15:30:00+00:00' not in starts
+
+
+def test_hourly_ambiguous_grid_does_not_claim_gaps(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    backend.raw.append_rows([replace(original, interval=Interval.H1,
+                                    ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC), extra={'session': 'regular'})])
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_a'}).json()
+    assert body['missing_hours'] == []
+    assert body['note']
+
+
+def test_raw_default_window_uses_selected_source(client, backend):
+    day = date(2020, 2, 3)
+    batch = raw_batch([SYM], [day], provider='prov_c', fetch_id='fetch-c')
+    backend.raw.append_rows([replace(row, instrument_id=T1, market=Market.US) for row in raw_rows_from_batch(batch)])
+    body = client.get('/api/v1/bars', params={'id': T1, 'source': 'prov_c'}).json()
+    assert body['start'] == body['end'] == str(day)
+    assert [bar['session_date'] for bar in body['bars']] == [str(day)]

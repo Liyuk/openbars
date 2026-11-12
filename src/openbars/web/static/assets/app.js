@@ -13,6 +13,7 @@
       "chart.hours": "Missing hours",
       "chart.hourly_bars": "Hourly bars (New York time)",
       "chart.no_hourly": "No canonical hourly bars are available.",
+      "chart.unknown_alignment": "Hourly alignment is unknown; missing hours are unavailable.",
       "dash.title": "Coverage dashboard",
       "dash.lede": "Read-only view of stored bars, quality flags, and quota usage. This page never fetches or writes data.",
       "dash.markets": "Markets",
@@ -76,6 +77,7 @@
       "chart.hours": "缺失时段",
       "chart.hourly_bars": "小时线（纽约时间）",
       "chart.no_hourly": "暂无规范层小时线。",
+      "chart.unknown_alignment": "小时线对齐方式未知，无法显示缺失时段。",
       "dash.title": "覆盖看板",
       "dash.lede": "只读查看已存 K 线覆盖、质量标记和额度用量。本页不会抓取或写入数据。",
       "dash.markets": "市场",
@@ -404,7 +406,7 @@
       if (body.end) document.getElementById("chart-end").value = body.end;
       fillSources(body.available_sources, body.source);
       var isCanonical = body.source === "canonical";
-      note.textContent = body.note ? t("chart.no_hourly") : (isCanonical ? t("chart.canonical_note") : t("chart.raw_note"));
+      note.textContent = body.note ? t(isCanonical && !(body.bars || []).length ? ("chart.no_hourly") : "chart.unknown_alignment") : (isCanonical ? t("chart.canonical_note") : t("chart.raw_note"));
       var missing = interval === "1h" ? (body.missing_hours || []) : (body.missing_sessions || []);
       var bars = body.bars || [];
       drawChart(bars, missing, isCanonical, interval);
