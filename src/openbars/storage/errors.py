@@ -15,6 +15,22 @@ class ReadOnlyError(StorageError):
     """A write was attempted on a backend opened read-only."""
 
 
+class SchemaVersionError(StorageError):
+    """A stored file was written by a newer (or unreadable-version) openbars schema.
+
+    The reader refuses it instead of guessing: no migration, no column truncation.
+    """
+
+    def __init__(self, path: object, found: object, supported: int) -> None:
+        self.path = str(path)
+        self.found = found
+        self.supported = supported
+        super().__init__(
+            f"{self.path}: schema version {found!r} is not supported "
+            f"(this openbars reads up to v{supported}); upgrade openbars or rewrite the file"
+        )
+
+
 @dataclass(frozen=True)
 class SchemaProblem:
     """One difference between the required and the actual Postgres catalog."""

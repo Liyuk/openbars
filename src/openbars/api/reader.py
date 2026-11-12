@@ -19,5 +19,12 @@ class BarReader(Protocol):
         adjustment: Adjustment = Adjustment.SPLIT,
         as_of: date | None = None,
     ) -> Any:
-        """Return a columnar table (pyarrow.Table when the parquet extra is installed)."""
+        """Return a columnar table (pyarrow.Table when the parquet extra is installed).
+
+        ``adjustment=SPLIT`` (default) is the stored ``research-daily-v2`` series (split-adjusted as
+        delivered, no dividends); other modes, or ``SPLIT`` at an earlier ``as_of``, are derived at
+        query time. ``as_of`` is a knowledge date (rows generated later are hidden) and the
+        adjustment as-of. A ticker resolves point-in-time per day across ``[start, end]``; an
+        ``instrument_id`` is queried as is.
+        """
         ...

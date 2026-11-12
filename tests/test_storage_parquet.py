@@ -353,7 +353,11 @@ def test_reader_resolves_symbols_and_filters(backend):
     assert backend.reader.bars(interval=Interval.D1, adjustment=None).num_rows == 10
     from openbars.core.models import Adjustment
 
-    assert backend.reader.bars(adjustment=Adjustment.RAW).num_rows == 0
+    # RAW is now derived at query time from the stored split-adjusted bars (no splits recorded
+    # here, so the prices equal the stored ones); before normalize.adjust it filtered the
+    # stored column and returned nothing.
+    raw = backend.reader.bars(adjustment=Adjustment.RAW)
+    assert raw.num_rows == 10 and set(raw.column("adjustment").to_pylist()) == {"raw"}
     assert backend.reader.bars(as_of=date(2000, 1, 1)).num_rows == 0
     assert backend.reader.bars(policy_version="other-policy").num_rows == 0
 
@@ -458,15 +462,15 @@ def test_instrument_resolve_across_symbol_mapping_window(backend):
 
 def test_corporate_actions_roundtrip(backend):
     acts = [
-        CorporateAction("us:eq:A", date(2022, 6, 1), CorporateActionKind.SPLIT, "prov_a", ratio=4.0),
-        CorporateAction("us:eq:A", date(2022, 7, 1), CorporateActionKind.DIVIDEND, "prov_a", amount=0.125),
+        CorporateAction("us:eq:A", date(2022, 6, 1), CorporateActionKind.SPLIT, "prov_a", ratio=Decimal("4")),
+        CorporateAction("us:eq:A", date(2022, 7, 1), CorporateActionKind.DIVIDEND, "prov_a", amount=Decimal("0.125")),
     ]
     backend.instruments.upsert_corporate_actions(acts)
     backend.instruments.upsert_corporate_actions(acts)
     got = backend.instruments.corporate_actions(["us:eq:A"])
     assert [(a.kind, a.ratio, a.amount) for a in got] == [
-        (CorporateActionKind.SPLIT, 4.0, None),
-        (CorporateActionKind.DIVIDEND, None, 0.125),
+        (CorporateActionKind.SPLIT, Decimal("4"), None),
+        (CorporateActionKind.DIVIDEND, None, Decimal("0.125")),
     ]
     table = backend.instruments.corporate_actions_table()
     assert table.column("ratio").to_pylist()[0] == Decimal("4")

@@ -514,13 +514,15 @@ class AlpacaProvider(HttpProviderAdapter):
         return out
 
 
-def _ratio(new: Any, old: Any) -> float | None:
+def _ratio(new: Any, old: Any) -> Decimal | None:
+    """new/old as an exact ``Decimal`` (4-for-1 -> 4, 1-for-4 -> 0.25); ``None`` if undefined."""
     if new is None or old is None:
         return None
     old_value = decimal_value(old, "old_rate")
-    if old_value == 0:
+    if old_value <= 0:
         return None
-    return float(decimal_value(new, "new_rate") / old_value)
+    ratio = decimal_value(new, "new_rate") / old_value
+    return ratio if ratio > 0 else None
 
 
 def _first(item: Mapping[str, Any], *names: str) -> Any:
@@ -532,8 +534,8 @@ def _first(item: Mapping[str, Any], *names: str) -> Any:
 
 def _corporate_action(collection: str, item: Mapping[str, Any]) -> CorporateAction | None:
     """Map one Alpaca item onto ``CorporateAction``; ``None`` if essential fields are absent."""
-    ratio: float | None = None
-    amount: float | None = None
+    ratio: Decimal | None = None
+    amount: Decimal | None = None
     if collection in _SPLIT_COLLECTIONS:
         kind = CorporateActionKind.SPLIT
         symbol = _first(item, "symbol", "old_symbol")
@@ -544,14 +546,14 @@ def _corporate_action(collection: str, item: Mapping[str, Any]) -> CorporateActi
         kind = CorporateActionKind.DIVIDEND
         symbol = _first(item, "symbol")
         rate = item.get("rate")
-        ratio = float(decimal_value(rate, "rate")) if rate is not None else None
+        ratio = decimal_value(rate, "rate") if rate is not None else None
     elif collection == "cash_dividends":
         kind = CorporateActionKind.DIVIDEND
         symbol = _first(item, "symbol")
         rate = item.get("rate")
         if rate is None:
             return None
-        amount = float(decimal_value(rate, "rate"))
+        amount = decimal_value(rate, "rate")
     elif collection == "spin_offs":
         kind = CorporateActionKind.SPINOFF
         symbol = _first(item, "source_symbol", "symbol")

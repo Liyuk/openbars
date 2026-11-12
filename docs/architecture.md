@@ -134,7 +134,7 @@ Bar
   open, high, low, close: Decimal   # 精度 (20,8)，0 < 价格 < 1e12
   volume: Decimal | None            # 精度 (28,8)，0 <= 成交量 < 1e20
   vwap: Decimal | None, trade_count: int | None
-  adjustment: Adjustment    # raw 层/规范层恒为 raw
+  adjustment: Adjustment    # v0.1 / research-daily-v2：规范层为 split（按源交付的拆股复权，见 §3.4、§9）；raw 层为源交付口径
   source: str               # raw: provider id; canonical: 选中的源
   feed: str | None          # 如 alpaca:sip / alpaca:iex —— 成交量口径标注
   flags: QualityFlag
@@ -148,7 +148,10 @@ Bar
 
 ### 3.4 公司行动 / 日历
 
-- `CorporateAction`: `instrument_id, ex_date, kind (split|dividend|spinoff|symbol_change), ratio / amount, source`
+- `CorporateAction`: `instrument_id, ex_date, kind (split|dividend|spinoff|symbol_change), ratio / amount, source`。`ratio` / `amount` 是 **`Decimal | None`**（构造时拒绝 `float`、非有限值，拆股 `ratio` 必须 > 0）；`ratio = new / old`（4 拆 1 = `4`，1 合 4 = `0.25`）。落库为 `decimal128(20,8)`，读取不经 `float`；无限小数（如 1/3）在写入处按 8 位小数半偶舍入，这是公司行动路径上唯一的舍入。
+- **观测追加 + 投票合并**（`normalize.actions.merge_corporate_actions`）：各源各写各的行（键含 `source`）；同一 `(instrument_id, ex_date, kind)` 的行对 `ratio` / `amount` 分字段投票（`None` 视为弃权）。全票一致 → 一行规范行；有分歧 → 得票最多的值胜出，平票取优先级列表（`source_priority`）中靠前的源，未列出的源按字典序排在其后；**绝不取平均**，冲突记录在 `MergedAction.conflicts`（每个源的取值），并标 `disputed` / `QualityFlag.DIVERGENT`。同一来源对同一键的多行，输入中靠后者胜出。
+- **查询时复权**（`normalize.adjust`，纯函数 + `QueryTimeAdjuster`）：v0.1 默认 profile `research-daily-v2` 落库的就是按源交付的拆股复权序列（向最新一次拆股回溯复权，不含分红），所以 **`SPLIT` 且无 `as_of` = 落库值，原样返回**。其余口径由落库 bar + 公司行动派生（精确 `Decimal`，最后统一舍入到 8 位）：`RAW` = 撤销 `ex_date` 晚于该 bar `session_date` 的全部拆股（价格 × ratio，成交量 ÷ ratio）；`SPLIT` + `as_of=D` = 撤销 `ex_date > D` 的拆股，使序列呈现 D 当天所见；`SPLIT_DIVIDEND` / `ALL` = 先得 `SPLIT` 结果，再对每笔现金分红把 `session_date < ex_date` 的价格乘以 `P/(P+amount)`（`P` = 除息日前最后一个交易日的**未复权**收盘价，即落库收盘价撤销其后拆股；`ex_date ≤ as_of` 才生效，多笔连乘，成交量不变）。若落库的是 `RAW`（后续可选 profile），`RAW` 为 no-op，`SPLIT` 则按 `ex_date ≤ as_of` 的拆股向下复权。股票红利（`kind=dividend` 带 `ratio`、无 `amount`）含义因源而异，默认不当拆股处理（`include_stock_dividends=True` 才按拆股），拆分/分拆（spinoff）不做复权；任何未能应用的行动都不会悄悄改 bar，而是列在 `AdjustResult.skipped`（带原因）里。`adjustment_as_of` 不同的行混在同一窗口里 = `adjustment_cutoff_mismatch`（`AdjustmentError`）。
+- **拆股后旧历史检测**（`normalize.actions.find_stale_after_split`，纯函数）：落库 bar 的 `session_date` 早于某次拆股 `ex_date`，且抓取时间（`generated_at` / `ingested_at`）也早于该 `ex_date`，则该段未经此次拆股复权，需在新价格基准下重抓；返回按（instrument, 拆股）聚合的区间。`raw` bar 不会过期；没有抓取时间的 bar 默认按过期报告（`treat_unknown_as_stale=False` 可关闭）。
 - `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1
 
 #### 3.4.1 XNYS 日历（`openbars.calendars.xnys`）
@@ -260,6 +263,7 @@ class StorageBackend(Protocol):
 class BarReader(Protocol):
     def bars(self, symbols_or_ids, *, interval="1d", start=None, end=None,
              adjustment: Adjustment = Adjustment.SPLIT, as_of: date | None = None) -> "pyarrow.Table": ...
+    # 默认 SPLIT = research-daily-v2 落库值；ticker 按日解析；as_of = 知识日期 + 复权 as-of（见 §10.4）
 ```
 
 ## 5. 编排与节奏规则
@@ -386,7 +390,9 @@ data/
 ### 10.4 DuckDB 目录与读取
 
 - `openbars.duckdb` 只含视图（`raw_bars`、`canonical_bars`、`instruments`、`symbol_mappings`、`corporate_actions`）与 `catalog_meta`；视图对 `raw/**/part-*.parquet` 取 glob 并套用 §10.1 的去重规则，因此永远只看到完整文件。`rebuild_catalog()` 删除并重建全部视图；`query()` 在目录缺失、数据目录被移动或某层首次出现文件时自动重建。
-- `DuckDbBarReader.bars(...)` 返回 `pyarrow.Table`（精确 decimal），支持整个市场的一年日线查询（`symbols_or_ids` 为空即全市场）。`adjustment` 对已存的 `adjustment` 列做过滤（`research-daily-v2` 为按源交付的拆股复权，默认 `SPLIT` 与之匹配）；查询时派生其他复权口径留给 `normalize.adjust`。
+- `DuckDbBarReader.bars(...)` 返回 `pyarrow.Table`（精确 decimal），支持整个市场的一年日线查询（`symbols_or_ids` 为空即全市场）。**复权**：请求口径等于落库口径（`stored_adjustment`，`research-daily-v2` 为 `SPLIT`）且无需撤销时走快路径，直接过滤已存的 `adjustment` 列（落库值原样）；`RAW` / `SPLIT_DIVIDEND` / `ALL`，或 `SPLIT` 且 `as_of` 之后还有拆股时，读取落库 bar + 公司行动并交给 `normalize.adjust` 派生（见 §3.4）；分红口径会越过 `end` 加载后续交易日（算前收盘）再裁剪回查询窗口。`adjustment=None` 不过滤。
+- **`as_of` 有两层含义**：（1）知识日期：`generated_at` 晚于 `as_of` 的行不可见；（2）派生复权时它就是复权的 as-of 日期（`ex_date ≤ as_of` 的行动生效，之后的拆股被撤销）。
+- **代码按日解析，覆盖整个查询窗口**：传入 `instrument_id` 原样查询；传入 ticker 时，对该 symbol 所有与 `[start, end]`（缺省 = 无界）有交集的映射（通用 `"*"` 映射，同市场、`valid_to` 含当日，歧义与唯一历史回退规则同 `resolve`）各展开为 `(instrument_id, 起, 止)` 区间，查询条件为 `(instrument_id = A AND session_date BETWEEN …) OR (instrument_id = B AND …)`。因此 ticker 被回收时，同一窗口内每家公司只返回其持有该 ticker 的那些日子的 bar，两家互不混合，ticker 指向别处（空档）的日子没有 bar。不再用 `end or today` 对整个查询做一次性解析。
 - 原始响应归档（`RawArchive.write`）：内容摘要（SHA-256）、`license_tag`（必填）、脱敏后的请求参数（键名含 `api_key / apikey / secret / token / password / authorization / credential` 的值替换为 `[REDACTED]`，并掩码字符串里的 `key=value` 形式凭据）；文件名由请求摘要与内容摘要决定，相同输入得到相同路径，重复写入是 no-op；同名但内容不同（摘要碰撞/被篡改）抛 `RawArchiveCollisionError`；原子写入（临时文件 + fsync + 独占 `link`）。响应正文原样保存。
 
 ### 10.5 Postgres 后端
@@ -399,7 +405,7 @@ data/
 
 ### 10.6 Schema 版本与迁移
 
-v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；计划让读取方遇到更高版本的文件时拒绝而不是猜测（v1 尚未实现该检查）。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
+v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；**读取方遇到更高版本的 Parquet 文件会拒绝而不是猜测**：`parquet_schema_version()` 读取页脚元数据 `openbars.schema_version`（缺失按 v1），若 `> SCHEMA_VERSION` 抛 `SchemaVersionError`（`StorageError` 子类），不迁移、不截断列。检查覆盖打开后端、`ref/*.parquet` 读取、raw / canonical 分区读取与写入前的去重比较、`compact`，以及 `rebuild_catalog()` / `query()` 建 DuckDB 视图之前（DuckDB 不会悄悄 union 一个 v2 文件）；通过的文件按 `(mtime, size)` 缓存，重复读取只做 `stat`。低于当前版本的文件不拒绝（v1 是第一个版本，暂无迁移器）。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
 
 ### 10.7 Arrow / Parquet schema 声明（`openbars.core.schema`）
 
@@ -448,7 +454,7 @@ openbars 的数据层**以一套已在生产运行的上游内部实现（下称
 | `orchestrator` | Job 租约与重试、优先级策略、过期租约回收、调度单例锁、每日同步计划与批次切分、历史回补窗口与“覆盖即废弃”规则、每会话重建调度 | 改接口后搬：脱离 upstream ORM 与 worker 进程模型 |
 | `core.calendar` / `calendars` | XNYS 交易日历（复用 `exchange_calendars`，见 §3.4.1）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬（已完成） |
 | `normalize.instruments` | 点时（point-in-time）身份证据与解析、代码别名有效期、退市目录、身份对账、代码类型 → 证券类型映射、ETF 作为独立证券类型 | 改接口后搬 |
-| `normalize.adjust` | 公司行动“观测追加 + 规范修订”模型、拆股后旧历史重抓检测、`adjustment_as_of` 一致性检查（只拆股复权，不含分红） | 改接口后搬 |
+| `normalize.adjust` / `normalize.actions` | 公司行动“观测追加 + 规范修订”模型、拆股后旧历史重抓检测、`adjustment_as_of` 一致性检查（落库口径只拆股复权，不含分红；分红口径仅查询时派生） | 改接口后搬（已完成：投票合并、检测、查询时派生，见 §3.4） |
 | `reconcile` | **research-daily-v2 选数**：按源优先级、兼容性闸门、兜底源能力集、价格 0.5% / 成交量 5% 容差、独立源佐证（quorum 2）、质量标记、人工/规则覆盖、确定性数据修复 R1–R4（预览/应用、熔断上限、可撤销审计） | 核心逻辑直接搬，持久化改接口 |
 | `storage` / `raw` | 原始响应归档（内容摘要、许可标签）、按源 bar 表、规范层表、水位表 | Parquet+DuckDB 重写；PG 提供 upstream 兼容适配（§11.3） |
 | `verify` | 跨源对比与每日校准、覆盖率对账、覆盖汇总、历史深度报告 | 改接口后搬 |
@@ -514,7 +520,7 @@ src/openbars/
   quota/         policy.py · gate.py
   providers/     base.py · registry.py · (us/alpaca … 实现随 issue 加入)
   raw/           store.py · archive.py
-  normalize/     instruments.py · calendar.py · actions.py · normalizer.py
+  normalize/     instruments.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py
   storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py
   api/           reader.py · http.py

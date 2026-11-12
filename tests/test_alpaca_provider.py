@@ -335,12 +335,12 @@ def test_corporate_actions_map_and_paginate():
 
     split, dividend, reverse, rename = actions
     assert (split.instrument_id, split.kind, split.ex_date, split.ratio) == (
-        "TEST1", CorporateActionKind.SPLIT, date(2024, 2, 1), 2.0,
+        "TEST1", CorporateActionKind.SPLIT, date(2024, 2, 1), Decimal("2"),
     )
     assert (dividend.instrument_id, dividend.kind, dividend.amount, dividend.ex_date) == (
-        "ZZZA", CorporateActionKind.DIVIDEND, 0.25, date(2024, 2, 9),
+        "ZZZA", CorporateActionKind.DIVIDEND, Decimal("0.25"), date(2024, 2, 9),
     )
-    assert reverse.kind is CorporateActionKind.SPLIT and reverse.ratio == 0.25
+    assert reverse.kind is CorporateActionKind.SPLIT and reverse.ratio == Decimal("0.25")
     assert rename.kind is CorporateActionKind.SYMBOL_CHANGE and rename.instrument_id == "TEST1"
     assert all(a.source == "alpaca" for a in actions)
 

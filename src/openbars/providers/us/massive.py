@@ -829,13 +829,15 @@ def _results_list(payload: Mapping[str, Any]) -> list[Any]:
     return results
 
 
-def _ratio(split_to: Any, split_from: Any) -> float | None:
+def _ratio(split_to: Any, split_from: Any) -> Decimal | None:
+    """to/from as an exact ``Decimal`` (4-for-1 -> 4, 1-for-4 -> 0.25); ``None`` if undefined."""
     if split_to is None or split_from is None:
         return None
     denominator = decimal_value(split_from, "split_from")
-    if denominator == 0:
+    if denominator <= 0:
         return None
-    return float(decimal_value(split_to, "split_to") / denominator)
+    ratio = decimal_value(split_to, "split_to") / denominator
+    return ratio if ratio > 0 else None
 
 
 def _parse_splits(items: list[Any], skipped: dict[str, int]) -> list[CorporateAction]:

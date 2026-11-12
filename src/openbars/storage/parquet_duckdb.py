@@ -34,7 +34,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -56,11 +56,12 @@ from openbars.core.models import (
     RawBar,
     SymbolMapping,
 )
+from openbars.normalize.adjust import adjust_rows, requires_derivation
 from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
 from openbars.raw.archive import RawArchive
-from openbars.storage.errors import StorageError
+from openbars.storage.errors import SchemaVersionError, StorageError
 from openbars.storage.rows import (
     CanonicalBarRow,
     InvalidBarError,
@@ -79,6 +80,7 @@ from openbars.storage.schema import (
     CORPORATE_ACTIONS_SCHEMA,
     DEFAULT_POLICY_VERSION,
     INSTRUMENTS_SCHEMA,
+    METADATA_VERSION_KEY,
     RAW_BARS_SCHEMA,
     RAW_KEY_SQL,
     RAW_LINEAGE_COLUMNS,
@@ -127,6 +129,37 @@ def _part_ts(path: Path) -> int:
         return int(path.name.split("-")[1])
     except (IndexError, ValueError):
         return 0
+
+
+def parquet_schema_version(path: str | Path) -> int:
+    """Schema version stamped in a Parquet footer (``openbars.schema_version``).
+
+    A missing key means v1 (the first on-disk version). A value that is not an integer is
+    refused (``SchemaVersionError``). Only the footer is read.
+    """
+    metadata = pq.read_schema(path).metadata or {}
+    raw = metadata.get(METADATA_VERSION_KEY)
+    if raw is None:
+        return 1
+    try:
+        return int(raw.decode())
+    except (UnicodeDecodeError, ValueError):
+        raise SchemaVersionError(path, raw, SCHEMA_VERSION) from None
+
+
+def check_parquet_version(path: str | Path) -> None:
+    """Raise ``SchemaVersionError`` if the file's schema version is newer than ``SCHEMA_VERSION``.
+
+    Older versions are not rejected (v1 is the first version; there is no migrator yet).
+    """
+    version = parquet_schema_version(path)
+    if version > SCHEMA_VERSION:
+        raise SchemaVersionError(path, version, SCHEMA_VERSION)
+
+
+def check_parquet_versions(paths: Iterable[str | Path]) -> None:
+    for path in paths:
+        check_parquet_version(path)
 
 
 @dataclass(frozen=True)
@@ -244,6 +277,7 @@ class _PartitionedTable:
         spec = self.spec
         if not files:
             return spec.schema.empty_table()
+        self.backend.check_versions(files)
         sql = (
             f"SELECT * FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')}) "
             f"WHERE {where} ORDER BY {spec.order_sql}"
@@ -304,6 +338,7 @@ class _PartitionedTable:
 
     def _drop_unchanged(self, incoming: pa.Table, existing_files: Sequence[Path]) -> pa.Table:
         spec = self.spec
+        self.backend.check_versions(existing_files)
         indexed = incoming.append_column("_idx", pa.array(range(incoming.num_rows), pa.int64()))
         on = " AND ".join(
             f"{a} IS NOT DISTINCT FROM {b}"
@@ -336,6 +371,7 @@ class _PartitionedTable:
             for directory, files in sorted(by_dir.items()):
                 if len(files) < max(min_parts, 2):
                     continue
+                self.backend.check_versions(files)
                 rows_before = sum(pq.ParquetFile(p).metadata.num_rows for p in files)
                 table = self.query(files)
                 table = table.sort_by(self._sort_columns(table))
@@ -535,7 +571,10 @@ class ParquetInstrumentMaster(_ResolveMixin):
 
     def _read_records(self, name: str) -> list[dict[str, Any]]:
         path = self._path(name)
-        return pq.read_table(path).to_pylist() if path.exists() else []
+        if not path.exists():
+            return []
+        self.backend.check_versions([path])
+        return pq.read_table(path).to_pylist()
 
     def _write_records(self, name: str, schema: pa.Schema, records: list[dict[str, Any]]) -> None:
         table = pa.Table.from_pylist(records, schema=schema) if records else schema.empty_table()
@@ -714,7 +753,11 @@ class ParquetInstrumentMaster(_ResolveMixin):
     def corporate_actions_table(self, instrument_ids: Sequence[str] | None = None) -> pa.Table:
         """Exact-decimal Arrow table of corporate actions."""
         path = self._path("corporate_actions")
-        table = pq.read_table(path) if path.exists() else CORPORATE_ACTIONS_SCHEMA.empty_table()
+        if path.exists():
+            self.backend.check_versions([path])
+            table = pq.read_table(path)
+        else:
+            table = CORPORATE_ACTIONS_SCHEMA.empty_table()
         if instrument_ids is not None:
             import pyarrow.compute as pc
 
@@ -722,15 +765,15 @@ class ParquetInstrumentMaster(_ResolveMixin):
         return table
 
     def corporate_actions(self, instrument_ids: Sequence[str] | None = None) -> list[CorporateAction]:
-        """Legacy float models (lossy ratio/amount)."""
+        """``CorporateAction`` models with exact ``Decimal`` ratio/amount (no float round trip)."""
         return [
             CorporateAction(
                 instrument_id=r["instrument_id"],
                 ex_date=r["ex_date"],
                 kind=CorporateActionKind(r["kind"]),
                 source=r["source"],
-                ratio=None if r["ratio"] is None else float(r["ratio"]),
-                amount=None if r["amount"] is None else float(r["amount"]),
+                ratio=r["ratio"],
+                amount=r["amount"],
             )
             for r in self.corporate_actions_table(instrument_ids).to_pylist()
         ]
@@ -774,9 +817,19 @@ def _mapping_record(m: SymbolMapping) -> dict[str, Any]:
     }
 
 
+_ACTION_CTX = Context(prec=60)
+
+
 def _action_record(a: CorporateAction) -> dict[str, Any]:
     def dec(v: Any, name: str) -> Decimal | None:
-        return None if v is None else to_decimal(v, precision=20, name=name)
+        # Stored as decimal(20,8). A ratio such as 1/3 has no finite expansion, so values with
+        # more than 8 fractional digits are rounded half-even here (the only rounding on the
+        # corporate-action path); exact values pass through unchanged.
+        if v is None:
+            return None
+        if isinstance(v, Decimal) and v.is_finite():
+            v = v.quantize(Decimal(1).scaleb(-8), rounding=ROUND_HALF_EVEN, context=_ACTION_CTX)
+        return to_decimal(v, precision=20, name=name)
 
     return {
         "instrument_id": a.instrument_id,
@@ -794,15 +847,41 @@ def _action_record(a: CorporateAction) -> dict[str, Any]:
 class DuckDbBarReader:
     """``BarReader`` over the DuckDB catalog views; returns ``pyarrow.Table`` (exact decimals).
 
-    ``adjustment`` filters on the *stored* ``adjustment`` column: the canonical layer holds
-    one series per ``policy_version`` (``research-daily-v2`` is split-adjusted as
-    delivered, so the default ``SPLIT`` matches it). Query-time derivation of other
-    adjustment modes lands with ``normalize.adjust``; pass ``adjustment=None`` to skip the
-    filter. ``as_of`` hides rows generated after that date.
+    **Adjustment.** The canonical layer holds one series per ``policy_version`` on a stored
+    basis (``stored_adjustment``, ``SPLIT`` for ``research-daily-v2``: split-adjusted as
+    delivered, no dividends). When the request equals the stored basis and needs no
+    undoing, the reader filters the stored ``adjustment`` column (fast path, stored values
+    verbatim). Otherwise (``RAW``, ``SPLIT_DIVIDEND``, ``ALL``, or ``SPLIT`` at an ``as_of``
+    before a later split) it loads stored bars + corporate actions and derives the series
+    with ``normalize.adjust`` (exact decimals). ``adjustment=None`` skips the filter.
+
+    **``as_of``** is a knowledge date with two effects: rows whose ``generated_at`` date is
+    after it are hidden, and, when deriving, it is the adjustment as-of date (actions with
+    ``ex_date <= as_of`` apply; later splits are undone).
+
+    **Tickers are point-in-time across the window.** An ``instrument_id`` is queried as is.
+    A ticker expands into one ``(instrument_id, from, to)`` segment per holder whose mapping
+    window overlaps ``[start, end]`` (generic ``"*"`` mappings, same market/ambiguity/
+    unique-history rules as ``resolve``), so a recycled ticker yields each company's bars
+    only on the days it held the ticker and nothing on days it pointed elsewhere.
     """
 
     def __init__(self, backend: "ParquetDuckDbBackend") -> None:
         self.backend = backend
+
+    def _segments(
+        self, items: Sequence[str], start: date | None, end: date | None, market: Market | None
+    ) -> list[tuple[str, date | None, date | None]]:
+        master = self.backend.instruments
+        symbols = {m.symbol for m in master.mappings()}
+        out: list[tuple[str, date | None, date | None]] = []
+        for item in items:
+            if master.get(item) is not None or item not in symbols:
+                out.append((item, None, None))  # an instrument id (possibly without bars)
+                continue
+            for m in [Market(market)] if market is not None else list(Market):
+                out += master.resolve_windows(item, start=start, end=end, provider="*", market=m)
+        return list(dict.fromkeys(out))
 
     def bars(
         self,
@@ -815,27 +894,42 @@ class DuckDbBarReader:
         as_of: date | None = None,
         market: Market | None = None,
         policy_version: str = DEFAULT_POLICY_VERSION,
+        stored_adjustment: Adjustment = Adjustment.SPLIT,
     ) -> pa.Table:
+        mode = None if adjustment is None else Adjustment(adjustment)
+        stored = Adjustment(stored_adjustment)
+        derive = mode is not None and mode is not stored
+        # Dividend adjustment of a bar needs the later sessions (the prior close of every
+        # ex-date after it), so those modes load past ``end`` and trim afterwards.
+        past_end = mode in (Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) and derive
+
         where = ['"interval" = ?', "policy_version = ?"]
         params: list[Any] = [Interval(interval).value, policy_version]
-        if adjustment is not None:
+        if mode is not None and not derive:
             where.append("adjustment = ?")
-            params.append(Adjustment(adjustment).value)
+            params.append(mode.value)
         if market is not None:
             where.append("market = ?")
             params.append(Market(market).value)
+        segments: list[tuple[str, date | None, date | None]] = []
         if symbols_or_ids:
-            ids = [
-                self.backend.instruments.resolve_any(item, on=end or date.today(), market=market)
-                for item in symbols_or_ids
-            ]
-            ids = [i for i in ids if i is not None]
-            where.append(f"instrument_id IN ({', '.join('?' for _ in ids) or 'NULL'})")
-            params.extend(ids)
+            segments = self._segments(symbols_or_ids, start, end, market)
+            clauses = []
+            for iid, lo, hi in segments:
+                parts, ps = ["instrument_id = ?"], [iid]
+                if lo is not None:
+                    parts.append("session_date >= ?")
+                    ps.append(lo)
+                if hi is not None and not past_end:
+                    parts.append("session_date <= ?")
+                    ps.append(hi)
+                clauses.append("(" + " AND ".join(parts) + ")")
+                params.extend(ps)
+            where.append("(" + " OR ".join(clauses) + ")" if clauses else "FALSE")
         if start is not None:
             where.append("session_date >= ?")
             params.append(start)
-        if end is not None:
+        if end is not None and not past_end:
             where.append("session_date <= ?")
             params.append(end)
         if as_of is not None:
@@ -845,7 +939,37 @@ class DuckDbBarReader:
             f"SELECT * FROM {CANONICAL_LAYER.view} WHERE {' AND '.join(where)} "
             "ORDER BY session_date, instrument_id, ts_start"
         )
-        return self.backend.query(sql, params)
+        table = self.backend.query(sql, params)
+        if mode is None or table.num_rows == 0:
+            return table
+
+        ids = sorted(set(table.column("instrument_id").to_pylist()))
+        if not derive and not (mode is Adjustment.SPLIT and as_of is not None):
+            return table  # stored basis verbatim (research-daily-v2 default)
+        actions = self.backend.instruments.corporate_actions(ids)
+        if not derive and not requires_derivation(mode, stored=stored, as_of=as_of, actions=actions):
+            return table  # no split after ``as_of``: the stored series is already as-of
+        rows = table_to_rows(table, CanonicalBarRow)
+        adjusted = adjust_rows(rows, actions, mode, as_of=as_of).rows
+        if past_end:
+            by_id: dict[str, list[tuple[date | None, date | None]]] = defaultdict(list)
+            for iid, lo, hi in segments:
+                by_id[iid].append((lo, hi))
+            adjusted = [
+                r
+                for r in adjusted
+                if (end is None or r.session_date <= end)
+                and (
+                    not segments
+                    or any(
+                        (lo is None or r.session_date >= lo) and (hi is None or r.session_date <= hi)
+                        for lo, hi in by_id.get(r.instrument_id, ())
+                    )
+                )
+            ]
+        if not adjusted:
+            return CANONICAL_BARS_SCHEMA.empty_table()
+        return canonical_rows_to_table(adjusted)
 
 
 # --- backend -----------------------------------------------------------------------------
@@ -864,12 +988,14 @@ class ParquetDuckDbBackend:
         for directory in (self.root, self.ref_dir, self.audit_dir):
             directory.mkdir(parents=True, exist_ok=True)
         self.lock = ProcessLock(self.root / LOCK_FILE)
+        self._verified: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size) already checked
         self.raw = ParquetRawStore(self)
         self.canonical = ParquetCanonicalStore(self)
         self.instruments = ParquetInstrumentMaster(self)
         self.state = SqliteStateStore(self.root / "state.db")
         self.archive = RawArchive(self.root / "raw-archive")
         self.reader = DuckDbBarReader(self)
+        self.check_schema_versions()  # refuse to open a tree holding newer-schema files
 
     def __enter__(self) -> "ParquetDuckDbBackend":
         return self
@@ -879,6 +1005,30 @@ class ParquetDuckDbBackend:
 
     def close(self) -> None:
         """Nothing is held open between calls; present for symmetry with other backends."""
+
+    # -- schema version guard (docs/architecture.md section 10.6) --
+
+    def check_versions(self, paths: Iterable[Path]) -> None:
+        """Raise ``SchemaVersionError`` for any file stamped with a newer schema version.
+
+        Successful checks are remembered per ``(mtime, size)`` so repeated reads only stat.
+        """
+        for path in paths:
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            stamp = (st.st_mtime_ns, st.st_size)
+            if self._verified.get(str(path)) == stamp:
+                continue
+            check_parquet_version(path)
+            self._verified[str(path)] = stamp
+
+    def check_schema_versions(self) -> None:
+        """Check every complete Parquet file under raw/, canonical/ and ref/."""
+        for spec in LAYERS.values():
+            self.check_versions(_PartitionedTable(self, spec).parts())
+        self.check_versions(sorted(self.ref_dir.glob("*.parquet")))
 
     # -- helpers --
 
@@ -924,6 +1074,7 @@ class ParquetDuckDbBackend:
     def rebuild_catalog(self) -> None:
         """Drop and recreate every DuckDB view from the Parquet tree (the file holds no data)."""
         with self.lock:
+            self.check_schema_versions()  # never let DuckDB silently union a newer-schema file
             sig = self._catalog_signature()
             con = duckdb.connect(str(self.catalog_path))
             try:
@@ -970,6 +1121,7 @@ class ParquetDuckDbBackend:
     def query(self, sql: str, params: Sequence[Any] = ()) -> pa.Table:
         """Run SQL against the catalog views (``raw_bars``, ``canonical_bars``, ``instruments``,
         ``symbol_mappings``, ``corporate_actions``, plus the identity side tables) and return a ``pyarrow.Table``."""
+        self.check_schema_versions()
         self.ensure_catalog()
         con = duckdb.connect(str(self.catalog_path), read_only=True)
         try:
