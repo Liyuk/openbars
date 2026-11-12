@@ -880,7 +880,10 @@ class DuckDbBarReader:
     instrument with no corporate-action rows cannot be done honestly (no rows is not "never
     split"): by default ``AdjustmentError`` (``missing_corporate_actions``) is raised;
     ``on_missing_actions="flag"`` returns those bars on the stored basis with
-    ``QualityFlag.ADJUSTMENT_UNVERIFIED`` instead. The plain stored read never needs actions.
+    ``QualityFlag.ADJUSTMENT_UNVERIFIED`` instead. A ``SPLIT`` read at an ``as_of`` with no
+    corporate-action rows keeps the stored prices (already ``SPLIT``) and is flagged
+    ``ADJUSTMENT_UNVERIFIED`` rather than raised. The plain stored read (no ``as_of``)
+    never needs actions.
 
     **Stale flag.** When the instrument has splits, stored bars that predate a split's
     ``ex_date`` but were generated before it (``find_stale_after_split``) get
@@ -984,7 +987,11 @@ class DuckDbBarReader:
         must_derive = derive or (mode is Adjustment.SPLIT and as_of is not None)
         actions = self.backend.instruments.corporate_actions(ids)
         if must_derive and not derive and not requires_derivation(mode, stored=stored, as_of=as_of, actions=actions):
-            must_derive = False  # no split after ``as_of``: the stored series is already as-of
+            # no later split to undo, but a SPLIT+as_of read with no action rows at all still
+            # needs adjust_rows to flag ADJUSTMENT_UNVERIFIED (the as-of claim is unattested)
+            covered = {a.instrument_id for a in actions}
+            if mode is not Adjustment.SPLIT or as_of is None or all(i in covered for i in ids):
+                must_derive = False
         stale = self._stale_positions(table, actions)
         if not must_derive and not stale:
             return table  # stored basis verbatim (research-daily-v2 default)

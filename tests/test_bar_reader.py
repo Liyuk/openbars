@@ -98,6 +98,11 @@ def test_raw_without_action_rows_raises_or_flags_never_relabels(backend):
     # the default stored read needs no actions and carries no flag
     plain = backend.reader.bars([T1])
     assert closes(plain) == closes(flagged) and not any(plain.column("flags").to_pylist())
+    # SPLIT + as_of with no action rows: stored prices, flagged, never raised
+    asof = backend.reader.bars([T1], as_of=date(2020, 9, 30))
+    assert closes(asof) == closes(plain)
+    assert set(asof.column("adjustment").to_pylist()) == {"split"}
+    assert all("ADJUSTMENT_UNVERIFIED" in f for f in asof.column("flags").to_pylist())
 
 
 def test_raw_with_actions_but_no_later_split_is_attested(backend):
