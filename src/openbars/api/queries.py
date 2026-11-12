@@ -452,14 +452,23 @@ def _raw_rows(
     except TypeError:
         rows = []
     symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
+    if interval != Interval.H1:
+        # Daily and other intervals keep the pre-#147 rule: rows written before
+        # instrument_id was filled are used only when no mapped row exists.
+        if rows or not symbols:
+            return rows
+        return list(backend.raw.scan_rows(provider, market, interval, window, symbols=symbols))
     if symbols:
+        # Normalize only the instrument portion of the storage key: legacy rows
+        # reached through these mappings represent the requested instrument.
+        mapped_keys = {row.key()[:6] + row.key()[7:] for row in rows}
         legacy = backend.raw.scan_rows(provider, market, interval, window, symbols=symbols)
-        rows.extend(row for row in legacy if not getattr(row, "instrument_id", None))
-    # Prefer ID-mapped rows when both representations describe the same bar.
-    unique = {}
-    for row in rows:
-        unique.setdefault((row.provider, row.ts_start), row)
-    return list(unique.values())
+        rows.extend(
+            row for row in legacy
+            if not getattr(row, "instrument_id", None)
+            and row.key()[:6] + row.key()[7:] not in mapped_keys
+        )
+    return rows
 
 
 def _from_raw_row(row: Any, instrument_id: str) -> dict[str, Any]:

@@ -62,3 +62,37 @@ test('historical hourly sources and source/interval changes use fresh default wi
   assert.equal(elements['chart-start'].value, '2019-03-04');
   assert.equal(elements['chart-end'].value, '2019-03-04');
 });
+
+test('a late response cannot overwrite the latest source and window', async () => {
+  const elements = Object.fromEntries(['app', 'lang-toggle', 'chart-form', 'chart-source', 'chart-start',
+    'chart-end', 'chart-q', 'interval', 'chart-note', 'chart-meta', 'chart'].map(id => [id, new Element()]));
+  elements['chart-q'].value = 'TEST1';
+  elements['chart-source'].value = 'canonical';
+  elements.interval.value = '1h';
+  const pending = [];
+  const rendered = [];
+  const charts = { createChart() { return { remove() {}, timeScale() { return { fitContent() {} }; },
+    addCandlestickSeries() { return { setData(data) { rendered.push(data); }, setMarkers() {} }; } }; } };
+  const document = { documentElement: {}, getElementById: id => elements[id], querySelectorAll: () => [],
+    querySelector: () => null, createElement: () => new Element() };
+  const context = { document, window: { addEventListener() {}, LightweightCharts: charts }, LightweightCharts: charts, navigator: { language: 'en' },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    location: { pathname: '/chart', search: '?symbol=TEST1&interval=1h' },
+    history: { replaceState() {} }, URLSearchParams, Intl, Date,
+    fetch: () => new Promise(resolve => pending.push(resolve)) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../src/openbars/web/static/assets/app.js'), 'utf8'), context);
+  elements['chart-source'].value = 'prov_b';
+  elements['chart-source'].dispatch('change');
+  const response = (source, day) => ({ ok: true, json: async () => ({ source, start: day, end: day,
+    available_sources: [source], bars: [{ ts_start: day + 'T14:30:00Z', open: 1, high: 2, low: 1, close: source === 'prov_b' ? 2 : 1 }], missing_hours: [], note: false }) });
+  pending[1](response('prov_b', '2020-01-02'));
+  await settle();
+  pending[0](response('canonical', '2026-01-01'));
+  await settle();
+  assert.equal(elements['chart-source'].value, 'prov_b');
+  assert.equal(elements['chart-start'].value, '2020-01-02');
+  assert.equal(elements['chart-end'].value, '2020-01-02');
+  assert.match(elements['chart-note'].textContent, /raw/i);
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0][0].close, 2);
+});

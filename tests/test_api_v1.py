@@ -515,3 +515,37 @@ def test_hourly_mixed_rows_deduplicate_and_prefer_mapped(client, backend, monkey
     body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_mixed'}).json()
     assert len(body['bars']) == 1
     assert D(str(body['bars'][0]['close'])) == mapped.close
+
+
+def test_daily_raw_rows_keep_pre_147_legacy_fallback(backend, monkeypatch):
+    from openbars.api.queries import _raw_rows
+
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_daily', fetch_id='daily')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=Interval.D1)
+    legacy = [replace(mapped, instrument_id=None, feed='legacy-only')]
+    found = {'mapped': [mapped]}
+    monkeypatch.setattr(backend.raw, 'scan_rows', lambda *args, **kwargs:
+                        found['mapped'] if 'instrument_ids' in kwargs else legacy)
+    kwargs = dict(market=Market.US, interval=Interval.D1, start=DAYS[0], end=DAYS[0])
+    # Mapped rows exist: legacy rows are not added (same as before #147).
+    assert _raw_rows(backend, T1, 'prov_daily', **kwargs) == [mapped]
+    # No mapped rows: fall back to the legacy symbol rows.
+    found['mapped'] = []
+    assert _raw_rows(backend, T1, 'prov_daily', **kwargs) == legacy
+
+
+def test_raw_rows_keep_distinct_series_and_only_merge_matching_legacy(backend, monkeypatch):
+    interval = Interval.H1
+    from openbars.api.queries import _raw_rows
+
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_series', fetch_id='series')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=interval)
+    variants = [mapped, replace(mapped, feed='other'), replace(mapped, adjustment='adjusted'),
+                replace(mapped, revision=mapped.revision + 1)]
+    legacy = [replace(row, instrument_id=None) for row in variants]
+    legacy.append(replace(mapped, instrument_id=None, feed='legacy-only'))
+    monkeypatch.setattr(backend.raw, 'scan_rows', lambda *args, **kwargs:
+                        variants if 'instrument_ids' in kwargs else legacy)
+    rows = _raw_rows(backend, T1, 'prov_series', market=Market.US, interval=interval,
+                     start=DAYS[0], end=DAYS[0])
+    assert rows == variants + [legacy[-1]]
