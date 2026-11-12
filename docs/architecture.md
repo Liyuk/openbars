@@ -158,6 +158,7 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **复权口径**（#75 / #99）：规范层 profile 为 `hk-daily-v1`，**落库只存不复权（`RAW`）**，查询时由 `openbars.normalize.hk_adjust`（薄封装 `adjust_rows`）派生 `SPLIT` / `SPLIT_DIVIDEND` / `ALL`（默认读取 `SPLIT`，与美股同一套 Adjustment 枚举，不是 A 股的 QFQ/HFQ）。拆股 `hk_split`、合股 `hk_consolidation` 都是 `kind=SPLIT`（ratio = 新/旧，合股 < 1）。红股 `hk_bonus` 编码为带 `ratio` 的股票股利，**默认不按拆股套用**（与美股 `include_stock_dividends=False` 一致，Discussion #68 默认，以后可改），需显式 `include_bonus=True`。供股 `hk_rights` 是独立的 `kind=RIGHTS`，只记录、永不参与价格调整。现金分红 `hk_cash_dividend` 带 ISO 4217 `currency`（默认 `HKD`），仅当分红币种与 K 线币种一致时才套用；ADR 的美元分红不能套到港币 K 线上。以上四项默认见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)，以后可以改。
 - **AKShare 港股备源**（#72）：`openbars.providers.hk.akshare`，入口 `stock_hk_hist`，代码用 5 位（`00700`）。只请求不复权（`adjust=""`），按 XHKG 丢弃非交易日；源身份 `akshare/eastmoney/raw`。库为 MIT，**不转授**东财等上游数据权；官方声明偏学术研究；[东财法律声明](https://about.eastmoney.com/home/disclaimer) 禁止未经交易所书面同意复制传播行情。openbars 只在用户本机落库。默认低频限流（4 次/分钟、80 次/24h），按代码逐只请求，不在默认配置里鼓励批量爬取。规划器（#77）仍只用 yfinance，本备源不自动进 plan/run。
 - **Futu OpenD 港股日线**（#73）：`openbars.providers.hk.futu`，经用户本机自行登录的 OpenD（`providers.futu.host` / `port`，默认 `127.0.0.1:11111`）调用 `request_history_kline`（`K_DAY`、`AuType.NONE`，按 `page_req_key` 翻页），代码写成 `HK.00700`；源身份 `futu/opend/raw`。openbars 不碰富途登录，也不假定登录即有港股行情权：行情档位、历史 K 线额度（30 天内不同标的数）与境内/国际判定以账户和官方为准；OpenD 的频率、额度、权限错误分别映射为可重试 `rate_limited`、不可重试 `history_quota_exhausted` / `no_entitlement`，错误文本不回显。富途用户协议、OpenAPI 协议与交易所行情权禁止未授权转发与商用再分发，只做本机私存。SDK `futu-api` 不是 openbars 依赖，用户自行安装；限速默认 30 次/30 秒（官方 60 次/30 秒的一半）。基类 `openbars.providers.hk.broker` 负责 XHKG 会话、窗口、精度与游标。与 AKShare 一样不进入规划器（#77 仍只用 yfinance）。
+- **LongPort 港股日线**（#74）：`openbars.providers.hk.longport`，`QuoteContext.history_candlesticks_by_date`（`Period.Day`、`AdjustType.NoAdjust`），代码写成 `700.HK`，长区间按 1000 个日历日分段；源身份 `longport/openapi/raw`。需要用户自己的长桥账户与开发者认证；`app_key` / `app_secret` / `access_token` 只在运行时从配置里的 `${ENV}` 引用读取，`repr` 与错误信息都不含它们，SDK 异常文本不回显（频率 → 可重试 `rate_limited`，无行情权 → `no_entitlement`，凭证被拒 → `auth_failed`）。日 K 时间戳若带时区先换算到 `Asia/Hong_Kong` 再取交易日，无时区按香港本地时间。API 许可通常为个人、可撤销、非商业、不可转授，行情附件禁止未经同意复制、再分发与商用，只做本机私存。SDK `longport` 不是 openbars 依赖；限速默认 5 次/秒（官方 10 次/秒的一半）。同样不进入规划器。
 
 ### 3.3 Bar
 
@@ -575,6 +576,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `yfinance/yahoo/raw`（港股日线，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
 | `akshare/eastmoney/raw`（港股日线备源，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
 | `futu/opend/raw`（港股日线，用户自己的 OpenD，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
+| `longport/openapi/raw`（港股日线，用户自己的长桥账户，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
 | `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `coinbase/exchange/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `baostock/ashare/raw` | `raw` | `none` | `regular` | `as_traded` |

@@ -52,6 +52,7 @@ MODULES = [
     "openbars.providers.hk.akshare",
     "openbars.providers.hk.broker",
     "openbars.providers.hk.futu",
+    "openbars.providers.hk.longport",
     "openbars.providers.crypto",
     "openbars.providers.crypto.binance",
     "openbars.providers.crypto.coinbase",

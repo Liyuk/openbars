@@ -51,6 +51,7 @@ coinbase = "openbars.providers.crypto.coinbase:CoinbaseProvider"
 baostock = "openbars.providers.cn.baostock:BaoStockProvider"
 akshare = "openbars.providers.hk.akshare:AKShareHKProvider"
 futu = "openbars.providers.hk.futu:FutuOpenDProvider"
+longport = "openbars.providers.hk.longport:LongPortProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]

@@ -73,6 +73,8 @@ BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
 AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
 # Futu OpenD HK daily (AuType.NONE), user's own OpenD login (#73). Not US, not in KNOWN_SOURCES.
 FUTU_OPEND_RAW = SourceIdentity("futu", "opend", "raw")
+# LongPort OpenAPI HK daily (AdjustType.NoAdjust), user's own account (#74). Not in KNOWN_SOURCES.
+LONGPORT_OPENAPI_RAW = SourceIdentity("longport", "openapi", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -212,6 +214,13 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         currency="HKD",
     ),
     (FUTU_OPEND_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
+    (LONGPORT_OPENAPI_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.REGULAR,
