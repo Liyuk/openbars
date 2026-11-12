@@ -50,6 +50,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/openbars"]
 
+# `openbars init` copies these from the package when installed from a wheel
+# (from a git checkout it reads them from the repo root).
+[tool.hatch.build.targets.wheel.force-include]
+"config.example.yaml" = "openbars/_templates/config.example.yaml"
+".env.example" = "openbars/_templates/.env.example"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

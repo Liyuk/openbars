@@ -36,31 +36,20 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 
 ```bash
 uv sync --all-extras                 # 安装（含 Parquet / DuckDB）
-cp config.example.yaml config.yaml   # config.yaml 已在 .gitignore 中
-
-# 密钥：进程环境优先；也可用 dotenv（不要提交该文件）
-#   --env-file path/to/.env
-#   或 export OPENBARS_ENV_FILE=path/to/.env
-#   或在 config.yaml 写 env_file: .env
-# 也接受 ALPACA_API_KEY / ALPACA_API_SECRET 作为
-# ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY 的别名（仅当规范名未设置时）。
-export MASSIVE_API_KEY="<your-massive-key>"
-export ALPACA_API_KEY_ID="<your-alpaca-key-id>"
-export ALPACA_API_SECRET_KEY="<your-alpaca-secret>"
-
-# 可选：在 config.yaml 里指定股票池（Alpaca / yfinance 的任务需要显式 symbols；
-# Massive 按交易日整市场抓取）
-#   universe:
-#     us:
-#       symbols: [AAA, BBB]
-
-uv run openbars config --config config.yaml   # 查看生效配置（所有 key 脱敏为 set/missing）
-uv run openbars plan   --config config.yaml   # 预览任务与请求预算（不写入）
-uv run openbars run    --config config.yaml   # 规划、入队并执行，直到队列空闲；可随时重跑续抓
-uv run openbars status --config config.yaml   # 任务状态、失败/死信、断点
-uv run openbars verify --config config.yaml   # 覆盖率与多源一致性报告（只读）
+uv run openbars init                 # 在当前目录生成 config.yaml 和 .env（已被 .gitignore；绝不覆盖已有文件）
+# 编辑 .env 填入你自己的 key（或用 OPENBARS_ENV_FILE / --env-file 指向你已有的 dotenv）
+uv run openbars config               # 查看生效配置（所有 key 脱敏为 set/missing）
+# 可选：在 config.yaml 里设置 universe.symbols（Alpaca / yfinance 需要显式 symbols）
+uv run openbars plan                 # 预览任务与请求预算（不写入）
+uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
+uv run openbars status               # 任务状态、失败/死信、断点
+uv run openbars verify               # 覆盖率与多源一致性报告（只读）
 ```
 
+- `init [目录]` 把 `config.example.yaml`、`.env.example` 复制为 `config.yaml`、`.env`；任一目标已存在就报错退出（退出码 2），什么都不写。
+- **密钥优先级（高 → 低）**：① 进程环境变量；② dotenv 文件：`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`，都没有时自动读取 **`config.yaml` 同目录的 `.env`**（不存在也不报错）；③ `config.yaml` 里 `${VAR:-default}` 的默认值。也接受 `ALPACA_API_KEY` / `ALPACA_API_SECRET` 作为 `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` 的别名（仅当规范名未设置时）。
+- 示例配置里 Alpaca 与 Massive 都是 `enabled: true` 的主源：`run` 在它们缺 key 时会报错并列出变量名（如 `MASSIVE_API_KEY`），请填上 key，或把不用的源改成 `enabled: false`。`plan` 只提示缺失，不会中止（但没有任何可用源、或选了无源支持的粒度时会报错）。
+- `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
 - 再次提醒：openbars 不分发任何数据，一切由你用自己的 key（BYOK）在本地抓取，请遵守各数据源的服务条款（详见下方声明）。
 - 数据写在 `storage.path`（默认 `./data/`，已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
 - 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
@@ -95,31 +84,20 @@ Needs Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). US daily bars as the
 
 ```bash
 uv sync --all-extras                 # install (includes Parquet / DuckDB)
-cp config.example.yaml config.yaml   # config.yaml is git-ignored
-
-# Keys: process environment wins; a dotenv file is also accepted (do not commit it)
-#   --env-file path/to/.env
-#   or export OPENBARS_ENV_FILE=path/to/.env
-#   or set env_file: .env in config.yaml
-# ALPACA_API_KEY / ALPACA_API_SECRET are accepted as aliases for
-# ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY when the canonical name is unset.
-export MASSIVE_API_KEY="<your-massive-key>"
-export ALPACA_API_KEY_ID="<your-alpaca-key-id>"
-export ALPACA_API_SECRET_KEY="<your-alpaca-secret>"
-
-# Optional: pin a symbol universe in config.yaml (Alpaca / yfinance jobs need explicit
-# symbols; Massive fetches the whole market per session)
-#   universe:
-#     us:
-#       symbols: [AAA, BBB]
-
-uv run openbars config --config config.yaml   # print effective settings (secrets redacted as set/missing)
-uv run openbars plan   --config config.yaml   # preview jobs and request budget (writes nothing)
-uv run openbars run    --config config.yaml   # plan, queue and execute until idle; safe to re-run / resume
-uv run openbars status --config config.yaml   # job states, dead jobs, checkpoints
-uv run openbars verify --config config.yaml   # coverage and cross-source agreement report (read-only)
+uv run openbars init                 # write config.yaml and .env here (git-ignored; never overwrites)
+# fill in .env with your own keys (or point OPENBARS_ENV_FILE / --env-file at a dotenv you already have)
+uv run openbars config               # print effective settings (secrets redacted as set/missing)
+# optional: set universe.symbols in config.yaml (Alpaca / yfinance jobs need explicit symbols)
+uv run openbars plan                 # preview jobs and request budget (writes nothing)
+uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
+uv run openbars status               # job states, dead jobs, checkpoints
+uv run openbars verify               # coverage and cross-source agreement report (read-only)
 ```
 
+- `init [directory]` copies `config.example.yaml` and `.env.example` to `config.yaml` and `.env`. If either target already exists it prints an error, writes nothing and exits 2.
+- **Key priority (highest first):** (1) the process environment; (2) a dotenv file: `--env-file`, else `OPENBARS_ENV_FILE`, else `env_file` in `config.yaml`, and when none of those is set, **`.env` next to `config.yaml`** is loaded automatically (no error if it is absent); (3) `${VAR:-default}` in `config.yaml`. `ALPACA_API_KEY` / `ALPACA_API_SECRET` are accepted as aliases for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` when the canonical name is unset.
+- The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
+- `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.
 - Reminder: openbars distributes no data; everything is fetched locally with your own keys (BYOK), and you must follow each provider's terms (see the disclaimer below).
 - Data lands in `storage.path` (default `./data/`, git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
 - Non-daily intervals imply a large request budget and need an explicit `--accept-budget`.

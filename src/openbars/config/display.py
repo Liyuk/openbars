@@ -9,8 +9,8 @@ from openbars.config.schema import Settings, is_secret_key
 
 PRIORITY_HELP = (
     "priority (highest wins): process environment; then env file "
-    "(--env-file, else OPENBARS_ENV_FILE, else config.yaml env_file); "
-    "then ${VAR:-default} in config.yaml. Literal YAML values are used as written. "
+    "(--env-file, else OPENBARS_ENV_FILE, else config.yaml env_file, else ./.env next to config.yaml "
+    "when it exists); then ${VAR:-default} in config.yaml. Literal YAML values are used as written. "
     "ALPACA_API_KEY / ALPACA_API_SECRET alias ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY "
     "when the canonical name is unset."
 )
@@ -67,7 +67,8 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
             lines.append(f"    {key}: {_safe_option(str(key), cfg.options[key], secrets)}")
         if cfg.quota_overrides:
             quota = ", ".join(f"{k}={v:g}" for k, v in sorted(cfg.quota_overrides.items()))
-            lines.append(f"    quota: {quota}")
+            suffix = "  (override: true, may exceed defaults)" if cfg.quota_override else ""
+            lines.append(f"    quota: {quota}{suffix}")
 
     lines.append("universe:")
     if not settings.universe:

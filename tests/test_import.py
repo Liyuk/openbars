@@ -17,6 +17,7 @@ MODULES = [
     "openbars.config.loader",
     "openbars.config.display",
     "openbars.cli.main",
+    "openbars.cli.init",
     "openbars.orchestrator.jobs",
     "openbars.orchestrator.planner",
     "openbars.orchestrator.nodes",

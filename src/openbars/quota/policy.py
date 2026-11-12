@@ -105,25 +105,43 @@ class QuotaPolicy:
         return limit.per / self.effective_limit(limit)
 
 
-def tighten(policy: QuotaPolicy, overrides: Mapping[str, float]) -> QuotaPolicy:
-    """Apply user overrides, never raising anything above the policy default.
+OVERRIDE_KEY = "override"  # a flag in the user's ``quota:`` mapping, never a window name
+
+
+def tighten(
+    policy: QuotaPolicy, overrides: Mapping[str, float], *, override: bool = False
+) -> QuotaPolicy:
+    """Apply user overrides; raising anything above the policy default needs ``override``.
 
     Recognised keys (anything else raises ``ValueError``):
 
-    * ``safety_margin`` -- lowers the margin (a higher value is ignored).
-    * ``per_minute`` -- caps the count of every rolling window of at most one minute.
-    * ``per_day`` -- caps the count of every window of one day (rolling 24h or UTC day).
-    * a window label (``RateLimit.name``) -- caps that window's count.
+    * ``safety_margin`` -- the margin (must be in (0, 1]).
+    * ``per_minute`` -- count of every rolling window of at most one minute.
+    * ``per_day`` -- count of every window of one day (rolling 24h or UTC day).
+    * a window label (``RateLimit.name``) -- that window's count.
 
-    A cap is applied as ``min(default, override)``; values below 1 are rejected.
+    By default a cap is ``min(default, value)`` and asking for more than the default
+    raises ``ValueError`` naming the key. With ``override=True`` (config:
+    ``quota: {override: true, ...}``) each listed key is set to exactly the requested
+    value, higher or lower; keys not listed are untouched. ``override`` itself is a flag,
+    not a window: a mapping entry named ``"override"`` is read as that flag.
+    Values below 1 are rejected.
     """
+    flag = bool(override) or bool(overrides.get(OVERRIDE_KEY))
     limits = list(policy.limits)
     margin = policy.safety_margin
     for key, value in overrides.items():
+        if key == OVERRIDE_KEY:
+            continue
         if key == "safety_margin":
             if not 0 < value <= 1:
                 raise ValueError("safety_margin override must be in (0, 1]")
-            margin = min(margin, float(value))
+            if value > policy.safety_margin and not flag:
+                raise ValueError(
+                    f"quota.safety_margin {value:g} is above the default {policy.safety_margin:g} "
+                    f"of {policy.provider}; add `override: true` to raise it"
+                )
+            margin = float(value)
             continue
         if value < 1:
             raise ValueError(f"quota override {key!r} must be at least 1")
@@ -138,7 +156,12 @@ def tighten(policy: QuotaPolicy, overrides: Mapping[str, float]) -> QuotaPolicy:
                 hit = limit.name == key
             if hit:
                 matched = True
-                limits[index] = replace(limit, count=min(limit.count, cap))
+                if cap > limit.count and not flag:
+                    raise ValueError(
+                        f"quota.{key} {cap} is above the default {limit.count} of {policy.provider}; "
+                        "add `override: true` to raise it"
+                    )
+                limits[index] = replace(limit, count=cap)
         if not matched:
             raise ValueError(f"quota override {key!r} matches no window of {policy.provider}")
     return replace(policy, limits=tuple(limits), safety_margin=margin)

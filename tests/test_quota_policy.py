@@ -77,10 +77,38 @@ def test_policy_is_frozen():
 def test_tighten_only_lowers_limits():
     tighter = tighten(TWELVE_DATA, {"per_minute": 3, "per_day": 100, "safety_margin": 0.5})
     assert counts(tighter) == {"per_minute": (3, 1), "per_utc_day": (100, 50)}
-    # Raising is ignored: the result never exceeds the default.
-    same = tighten(TWELVE_DATA, {"per_minute": 99, "per_day": 10_000, "safety_margin": 1.0})
+    # Asking for exactly the default is a no-op.
+    same = tighten(TWELVE_DATA, {"per_minute": 8, "per_day": 800})
     assert same.limits == TWELVE_DATA.limits and same.safety_margin == TWELVE_DATA.safety_margin
     assert TWELVE_DATA.limits[0].count == 8  # original untouched
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [("per_minute", 99), ("per_day", 10_000), ("per_utc_day", 801), ("safety_margin", 1.0)],
+)
+def test_widening_without_override_is_a_clear_error(key, value):
+    with pytest.raises(ValueError, match=key) as info:
+        tighten(TWELVE_DATA, {key: value})
+    assert "override: true" in str(info.value)
+
+
+def test_override_allows_widening_only_the_listed_keys():
+    wider = tighten(TWELVE_DATA, {"per_minute": 20, "override": True})
+    assert counts(wider) == {"per_minute": (20, 18), "per_utc_day": (800, 720)}  # per_day untouched
+    assert wider.safety_margin == TWELVE_DATA.safety_margin
+    assert tighten(TWELVE_DATA, {"per_minute": 20}, override=True).limits == wider.limits
+    mixed = tighten(TWELVE_DATA, {"per_minute": 20, "per_day": 100, "safety_margin": 1.0, "override": True})
+    assert counts(mixed) == {"per_minute": (20, 20), "per_utc_day": (100, 100)}
+    assert TWELVE_DATA.limits[0].count == 8  # original untouched
+
+
+def test_override_is_a_flag_not_a_window_name():
+    # A falsey flag does not widen, and the key never reaches window matching.
+    with pytest.raises(ValueError, match="per_minute"):
+        tighten(TWELVE_DATA, {"per_minute": 20, "override": False})
+    assert tighten(TWELVE_DATA, {"override": True}).limits == TWELVE_DATA.limits
+    assert tighten(TWELVE_DATA, {"override": False}).limits == TWELVE_DATA.limits
 
 
 def test_tighten_by_label_and_errors():
