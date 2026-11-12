@@ -228,6 +228,17 @@ QuotaPolicy
 - `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`），并按 `baseAsset` / `quoteAsset`（去空白；缺失或空白为 `None`）填充 `base_asset` / `quote_asset`；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。`normalize.crypto_pairs.listing_from_provider_instrument(row, provider=…, venue=None)` 把此类行转成 `CryptoPairListing`（缺 base/quote 抛 `ValueError`，`venue` 缺省取 `row.exchange`），由调用方显式使用，编排器暂不自动调用。无公司行动。
 - 目前**尚未接入编排器**（计划、配置入口随后续 issue 加入）。
 
+#### 3.5.2 Coinbase Exchange 日线（`openbars.providers.crypto.coinbase`）
+
+- 公开 Coinbase Exchange candles（`GET /products/{product_id}/candles?granularity=86400`），**无需 API key**，`secret_values()` 为空；来源标识 `coinbase/exchange/raw`（feed 为 Coinbase Exchange，不是 Advanced Trade；不属于美股 `KNOWN_SOURCES`）。
+- **默认 base URL 为 `https://api.exchange.coinbase.com`**（不是 `api.coinbase.com`）；构造时可用 `base_url` 覆盖。`User-Agent` 为 `openbars/<version>`，不带邮箱。
+- **UTC 00:00 切日**：`granularity=86400` 的桶按 UTC 零点切分，序列口径 `session_semantics=utc_day`；`ts_start` 必须恰为当日 `00:00:00 UTC`，`session_date` = 其 UTC 日期，与 §3.4.2 一致；`time` 不在 UTC 零点的行整批以 `invalid_payload` 拒收。请求 `start` = 起日 `00:00:00Z`，`end` = 止日次日 `00:00:00Z`，并丢弃 `session_date` 落在窗口外的行（API 若把 `end` 视为闭区间，次日零点那根不会被保留）。
+- **响应是数组的数组，不是对象**，行布局为 `[time, low, high, open, close, volume]`（low/high 在 open/close 之前），`time` 为 Unix 秒；接口常按新到旧返回，适配器先按 `time` 升序排序，重复时间为 `invalid_payload`。价格、成交量用 `json.loads(..., parse_float=Decimal)` 解析为 `Decimal`（不经 float）；`volume` 为基础资产成交量。口径 `price_basis=raw`、`volume_basis=as_traded`，`currency=None`。
+- 每次请求 1 个产品（Coinbase product id，如 `TEST-USDT`）；单次请求最多 300 根。窗口更长时按每页最多 300 天分段翻页，下一页从本页末根之后开始（游标必须前进，否则报 `pagination_loop`；跨页不升序按 `invalid_payload`）；后续页失败时返回已得部分并带 `next_cursor`（Unix 秒）。无数据返回空批次而非错误。
+- **额度**：公开 REST 每 IP 每秒 10 次（`key_scope="per_ip"`，`safety_margin=0.9`），每页权重 1，经 `QuotaGate.acquire` 获取；429 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`，其余 4xx 为 `provider_rejected_request`。官方文档见 `QuotaPolicy.official_docs_url`。
+- `list_instruments(Market.CRYPTO)` 读 `GET /products`（`exchange="COINBASE"`，`active` = `status == "online"` 且（若有该字段）未 `trading_disabled`），按 `base_currency` / `quote_currency` 填充 `base_asset` / `quote_asset`；不生成 `instrument_id`。无公司行动。
+- 目前**尚未接入编排器**，也**不在 `KNOWN_SOURCES`** 中（加密对账口径由后续 issue 决定）。
+
 ### 3.6 Job / Checkpoint
 
 ```text
@@ -477,6 +488,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `twelve_data/daily/split` | `split_adjusted` | `splits` | `provider_aligned` | `unknown`（成交量处理依赖源） |
 | `yfinance/yahoo/split` | `provider_defined` | `unknown` | `provider_aligned` | `provider_defined`（可检视，不视为已证明兼容） |
 | `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
+| `coinbase/exchange/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | 其他 | `unknown` | `unknown` | `unknown` | `unknown`（`currency` 仍按入参设置） |
 
 ## 11. 上游搬运来源与 backend 兼容与切换
@@ -558,7 +570,7 @@ src/openbars/
   cli/           main.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
   quota/         policy.py · gate.py
-  providers/     base.py · registry.py · (us/alpaca … · crypto/binance 实现随 issue 加入)
+  providers/     base.py · registry.py · (us/alpaca … · crypto/binance · crypto/coinbase 实现随 issue 加入)
   raw/           store.py · archive.py
   normalize/     instruments.py · crypto_pairs.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py

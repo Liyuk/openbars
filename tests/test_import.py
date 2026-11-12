@@ -47,6 +47,7 @@ MODULES = [
     "openbars.providers.us.yfinance",
     "openbars.providers.crypto",
     "openbars.providers.crypto.binance",
+    "openbars.providers.crypto.coinbase",
     "openbars.raw.store",
     "openbars.normalize.instruments",
     "openbars.normalize.crypto_pairs",

@@ -42,6 +42,7 @@ alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
 massive = "openbars.providers.us.massive:MassiveProvider"
 yfinance = "openbars.providers.us.yfinance:YFinanceProvider"
 binance = "openbars.providers.crypto.binance:BinanceProvider"
+coinbase = "openbars.providers.crypto.coinbase:CoinbaseProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]
