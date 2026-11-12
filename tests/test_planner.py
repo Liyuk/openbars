@@ -655,7 +655,7 @@ def test_hourly_respects_rolling_history_and_session_readiness():
     assert {j.window.start for j in p.jobs} == {date(2026, 3, 9)}
 
 
-def test_sparse_hourly_raw_session_is_covered():
+def test_sparse_hourly_raw_session_is_replanned_until_the_grid_is_complete():
     from dataclasses import replace
     from openbars.calendars import xnys
     from openbars.providers.base import FetchRequest, RawBatch
@@ -663,10 +663,13 @@ def test_sparse_hourly_raw_session_is_covered():
     day = date(2026, 3, 2)
     provider = FakeProvider("massive", interval=Interval.H1)
     req = FetchRequest(Market.US, Interval.H1, ("TEST1",), DateRange(day, day))
-    bar = replace(provider.bar("TEST1", day, "f1"), interval=Interval.H1,
-                  ts_start=xnys.hourly_slots(day)[0].ts_start)
+    slots = xnys.hourly_slots(day)
+    bars = [replace(provider.bar("TEST1", day, "f1"), interval=Interval.H1, ts_start=s.ts_start) for s in slots]
     raw = MemoryRawStore()
-    raw.append(RawBatch("massive", "f1", req, (bar,)))
+    raw.append(RawBatch("massive", "f1", req, tuple(bars[:1])))  # one stored hour is not coverage (#144)
+    p = plan(sel(day, day, frozenset({Interval.H1})), [provider], RawStoreCoverage(raw), universe=["TEST1"])
+    assert [j.window for j in p.jobs] == [DateRange(day, day)]
+    raw.append(RawBatch("massive", "f2", req, tuple(bars[1:])))
     p = plan(sel(day, day, frozenset({Interval.H1})), [provider], RawStoreCoverage(raw), universe=["TEST1"])
     assert not p.jobs
 

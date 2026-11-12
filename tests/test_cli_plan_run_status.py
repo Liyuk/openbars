@@ -540,3 +540,30 @@ def test_hourly_pagination_resumes_saved_cursor(tmp_path, clock):
     assert env.state(job).state is JobState.DONE
     assert [request.cursor for request in provider.requests] == [None, "1", "1", "2"]
     assert len(env.raw.rows) == 3
+
+
+def test_plan_hourly_uses_state_for_empty_fetch_and_multi_session_windows(tmp_path, capsys):
+    from datetime import date
+
+    from openbars.core.models import DateRange, Market
+    from openbars.orchestrator.jobs import Job, JobKind
+
+    config_path = Path(config(tmp_path, intervals="[1h]", extra_universe="[TEST1]"))
+    config_path.write_text(config_path.read_text().replace("massive:", "alpaca:").replace("end: null", "end: 2026-03-06"))
+    store = state(tmp_path)
+    middle = date(2026, 3, 4)
+    job = Job("empty", JobKind.BACKFILL, "alpaca", Market.US, Interval.H1, ("TEST1",),
+              DateRange(middle, middle), state=JobState.DONE)
+    store.save_job(job)
+    store.start_fetch(provider="alpaca", fetch_id="empty-fetch", job_id=job.job_id,
+                      market=Market.US, interval=Interval.H1, window=job.window,
+                      started_at=datetime(2026, 3, 5, 15, tzinfo=UTC))
+    store.finish_fetch("alpaca", "empty-fetch", "empty", row_count=0)
+    provider = FakeProvider("alpaca", interval=Interval.H1)
+    assert main(["--config", str(config_path), "plan", "--submit", "--accept-budget"],
+                provider_factory=lambda settings, gate: {"alpaca": provider},
+                clock=lambda: NOW, env={"TEST_API_KEY": SECRET}) == 0
+    assert "submitted 2 new jobs" in capsys.readouterr().out
+    windows = {j.window for j in store.list_jobs() if j.job_id != "empty"}
+    assert windows == {DateRange(date(2026, 3, 2), date(2026, 3, 3)),
+                       DateRange(date(2026, 3, 5), date(2026, 3, 6))}

@@ -42,8 +42,9 @@ uv run openbars config               # 查看生效配置（所有 key 脱敏为
 # 可选：在 config.yaml 里设置 universe.symbols（Alpaca / yfinance 需要显式 symbols）
 uv run openbars plan                 # 预览任务与请求预算（不写入）
 uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
-uv run openbars status               # 任务状态、失败/死信、断点
+uv run openbars status               # 任务状态、失败/死信、断点、raw 覆盖摘要（Parquet / Postgres）
 uv run openbars verify               # 各市场的覆盖率与多源一致性报告（只读）
+uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新入队（可加 --provider / --error / --dry-run）
 # 可选：安装 http 额外依赖后，在本机打开只读界面（默认仅绑定 127.0.0.1；非回环 --host 会被拒绝）
 # uv sync --extra http
 # uv run openbars serve              # 打开 http://127.0.0.1:8787
@@ -68,6 +69,10 @@ uv run openbars verify               # 各市场的覆盖率与多源一致性�
 - 默认规划器把每个交易日分给最便宜的来源，所以多源重叠需要你显式抓取一部分（例如给第二个来源排审计任务）后，`verify` 才有可比较的样本。
 - `shadow` 只对外部 research-daily-v2 HTTP API 发 GET：用 `--symbols-file` 提供标的（仓库不带默认股票池），可选 `--fetch` 经 QuotaGate 按**显式标的列表**抓取（不会走整市场 grouped 接口）。报告写到 `--output`；请把符号列表和结果放在仓库外。密钥与 bearer token 不会写入报告。
 - 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
+
+### 升级说明
+
+- **日线 raw 复权身份（#145 / #149）**：#145 之前，未在 `extra.adjustment` 里声明复权的拆股复权日线源（美股 Massive `eod`、Alpaca `iex` / `sip`、yfinance `yahoo`）被写成了 `adjustment=raw`；之后重新抓取会写成 `split`，两行在库里共存。读取时（Parquet 与 Postgres native 的 `scan_rows`）这些旧行按来源能力恢复为 `split`，若同一键已有新行则旧行被忽略，因此规范层选源与只有新行时一致，不需要迁移命令。港股 yfinance、AKShare、加密、A 股的 `raw` 本来就是不复权，不受影响；`upstream_compat` 的 `adjustment` 归上游所有，不做改写。旧行只占空间，compaction 不会删除它们（键不同）。
 
 ### 美股小时线（可选）
 
@@ -121,6 +126,13 @@ uv run openbars plan && uv run openbars run
 - 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `"00700"` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
 - `verify`（港股）：按 XHKG 日历、`hk-daily-v1`，评分落库的 RAW 序列，不评分读取时派生的调整结果。
 
+### 存储维护（Parquet 后端）
+
+- `openbars usage [--json]`：按 layer / market / interval / year（raw 另按 provider）汇总文件数与字节数，日线与小时线分开列；只打印相对数据目录的路径。
+- `openbars compact [--layer raw|canonical|all] [--min-parts N]`：默认只列出会合并的分区与预计腾出的空间，加 `--apply` 才执行；去重语义不变。part 文件变多时（尤其是小时线回填之后）跑一次即可，执行时持有写锁，可与 `run` 并存。
+- 保留策略默认关闭：只有在 `storage.retention` 写了规则（例如 `- {layer: raw, keep_years: 2, market: us, interval: 1h}`）时，`openbars retention` 才会列出早于保留窗口的整年 raw 分区，加 `--apply` 才删除。canonical 与 ref 永远保留，配置成其它 layer 会报错。若 `history.start` 早于保留窗口，之后的 `plan` / `run` 可能重新拉取被删的区间。
+- `openbars backup <目标目录> [--market M] [--interval I]`：在写锁下把数据目录复制到一个新的（或空的）目录，`state.db` / `quota.db` 用 SQLite 在线备份；跳过 `.lock`、临时文件、点文件与可重建的 `openbars.duckdb`，写入 `backup-manifest.json`。备份不包含配置文件、dotenv 或任何密钥 / DSN（它们本就不在数据目录里）。恢复：停掉 `run`，把 `storage.path` 指向备份目录（或把它复制回原位置）即可。
+
 ### 数据条款声明（重要）
 
 - **openbars 不分发、不托管任何行情数据。** 仓库里只有代码、规则与文档。
@@ -154,8 +166,9 @@ uv run openbars config               # print effective settings (secrets redacte
 # optional: set universe.symbols in config.yaml (Alpaca / yfinance jobs need explicit symbols)
 uv run openbars plan                 # preview jobs and request budget (writes nothing)
 uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
-uv run openbars status               # job states, dead jobs, checkpoints
+uv run openbars status               # job states, dead jobs, checkpoints, raw coverage (Parquet / Postgres)
 uv run openbars verify               # per-market coverage and cross-source agreement report (read-only)
+uv run openbars jobs retry --dead     # dead jobs are re-queued only on an explicit retry (--provider / --error / --dry-run)
 # Optional: install the http extra and open the local read-only UI (loopback only; a non-loopback --host is rejected)
 # uv sync --extra http
 # uv run openbars serve              # http://127.0.0.1:8787
@@ -180,6 +193,10 @@ uv run openbars verify               # per-market coverage and cross-source agre
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It produces one report per market in `markets`, each on its own calendar and `policy_version`: US XNYS + `research-daily-v2`; crypto `CryptoCalendar` (every UTC day is a session, weekends included) + `crypto-daily-v1`; A-shares XSHG (XSHE is an alias; Beijing is out of scope) + `cn-daily-v1`; Hong Kong XHKG (half days count as sessions) + `hk-daily-v1`. The window ends at the market's latest ready session (optionally capped by `history.end` / `--end`). A configured market with no stored bars is a note and the run continues; only when no market has bars is it an error. Each report shows coverage of expected sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory: one configured market gives a single report object (with `market` / `calendar` fields), several give `{"markets": {"us": {...}, "cn": {...}}}` (markets without data are listed under `skipped`).
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
 - The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
+
+### Upgrade notes
+
+- **Daily raw adjustment identity (#145 / #149)**: before #145, split-adjusted daily sources that did not set `extra.adjustment` (US Massive `eod`, Alpaca `iex` / `sip`, yfinance `yahoo`) were stored as `adjustment=raw`; refetching now writes `split`, so both rows can coexist. Reads (`scan_rows` on Parquet and Postgres native) restore those legacy rows to `split` from the source's capability and ignore a legacy row when a current row has the same key, so canonical selection matches a store holding only current rows; no migration command is needed. Hong Kong yfinance, AKShare, crypto and A-share `raw` rows really are unadjusted and are left alone; `upstream_compat` rows keep the upstream `adjustment`. The legacy rows only cost space; compaction does not remove them (their key differs).
 
 ### US hourly bars (optional)
 
@@ -232,6 +249,13 @@ uv run openbars plan && uv run openbars run
 
 - Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `"00700"` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
 - `verify` (Hong Kong): XHKG calendar, `hk-daily-v1`, scores the stored RAW series, not the read-time adjusted view.
+
+### Storage maintenance (Parquet backend)
+
+- `openbars usage [--json]`: file count and bytes per layer / market / interval / year (raw also per provider), daily and hourly listed apart; prints paths relative to the data directory only.
+- `openbars compact [--layer raw|canonical|all] [--min-parts N]`: lists the partitions it would merge and the estimated space freed; only `--apply` changes files. Deduplication semantics are unchanged. Run it when parts pile up (for example after an hourly backfill); it holds the writer lock, so it is safe next to `run`.
+- Retention is off by default. Only when `storage.retention` has rules (for example `- {layer: raw, keep_years: 2, market: us, interval: 1h}`) does `openbars retention` list whole raw `year=` partitions older than the window, and only `--apply` deletes them. Canonical and ref are always kept; any other layer is a config error. If `history.start` reaches before the window, later `plan` / `run` may fetch the pruned range again.
+- `openbars backup <dest> [--market M] [--interval I]`: copies the data directory to a new (or empty) directory under the writer lock, `state.db` / `quota.db` via the SQLite online backup; skips `.lock`, temp files, dotfiles and the rebuildable `openbars.duckdb`, and writes `backup-manifest.json`. Backups never contain the config file, dotenv files, keys or DSNs (none of them live in the data directory). To restore, stop `run` and point `storage.path` at the backup (or copy it back).
 
 ### Data terms disclaimer
 

@@ -82,6 +82,7 @@ CANONICAL_DAILY_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("source_fingerprint", STRING, False),
     FieldSpec("generated_at", TIMESTAMP_UTC, False),
     FieldSpec("currency", STRING, True),  # ISO 4217 of the bar prices; null when unknown
+    FieldSpec("available_at", TIMESTAMP_UTC, True),  # #154: research availability; null = unknown
 )
 
 CANONICAL_DAILY_UNIQUE_KEY = ("instrument_id", "session_date", "policy_version")

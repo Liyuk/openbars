@@ -62,6 +62,8 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
         lines.append(f"  postgres.quota: {settings.postgres_quota}")
         if settings.postgres_schema:
             lines.append(f"  postgres.schema: {settings.postgres_schema}")
+    for rule in settings.retention:
+        lines.append(f"  retention: {rule.describe()} (prune only with `openbars retention --apply`)")
     lines.append(f"adjustment: {settings.default_adjustment.value}")
     lines.append(f"us_hourly_alignment: {settings.us_hourly_alignment.value}")
     lines.append(f"include_extended_hours: {str(settings.include_extended_hours).lower()}")

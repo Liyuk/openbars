@@ -71,6 +71,10 @@ COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
 # AKShare HK daily, unadjusted Eastmoney bars. Not US, not in KNOWN_SOURCES.
 AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
+# Futu OpenD HK daily (AuType.NONE), user's own OpenD login (#73). Not US, not in KNOWN_SOURCES.
+FUTU_OPEND_RAW = SourceIdentity("futu", "opend", "raw")
+# LongPort OpenAPI HK daily (AdjustType.NoAdjust), user's own account (#74). Not in KNOWN_SOURCES.
+LONGPORT_OPENAPI_RAW = SourceIdentity("longport", "openapi", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -209,6 +213,20 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         volume_basis=VolumeBasis.AS_TRADED,
         currency="HKD",
     ),
+    (FUTU_OPEND_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
+    (LONGPORT_OPENAPI_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
     # Volume handling is provider-dependent, so it stays unknown.
     (TWELVE_DATA_DAILY_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.UNKNOWN),
     # US 1h (providers.us.hourly): bars sit on the XNYS hourly grid, regular session by default.
@@ -316,6 +334,9 @@ class CanonicalDailyRow:
     source_fingerprint: str
     generated_at: datetime
     currency: str | None = None  # ISO 4217 of the bar prices; None when unknown
+    # #154: earliest moment the bar may be used for research (the selected source's raw
+    # ``ingested_at``); None when the producer does not know it.
+    available_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "policy_version", "provider", "feed", "adjustment"):
@@ -347,6 +368,10 @@ class CanonicalDailyRow:
             raise TypeError("source_fingerprint must be str")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at must be timezone-aware")
+        if self.available_at is not None and (
+            self.available_at.tzinfo is None or self.available_at.utcoffset() is None
+        ):
+            raise ValueError("available_at must be timezone-aware")
         if self.currency is not None:
             cur = self.currency.strip() if isinstance(self.currency, str) else ""
             if len(cur) != 3 or not cur.isalpha():

@@ -64,3 +64,7 @@ class UpstreamSchemaError(SchemaMismatchError):
     """``upstream_compat`` introspection found missing tables/columns or type mismatches."""
 
     mode = "upstream_compat"
+
+
+class CoverageTimeout(StorageError):
+    """A coverage summary query hit its ``statement_timeout`` (#146)."""
