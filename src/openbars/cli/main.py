@@ -2,7 +2,8 @@
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
-credential values. ``verify`` is a read-only report over the stored bars.
+credential values. ``plan`` / ``run`` serve every market in ``markets`` (us, crypto, cn); ``verify``
+is a read-only report over the stored US bars.
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="write config.yaml and .env from the examples (never overwrites)")
     init.add_argument("directory", nargs="?", default=".", help="target directory (default .)")
 
-    verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars")
+    verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars (us market only)")
     common(verify)
     verify.add_argument("--start", type=_iso_date, default=None, help="first session (default: history.start or oldest stored)")
     verify.add_argument("--end", type=_iso_date, default=None, help="last session (default: latest ready session)")
