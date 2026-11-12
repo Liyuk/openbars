@@ -19,7 +19,10 @@ import re
 from datetime import date
 from typing import Any
 
-from openbars.core.models import AssetClass
+from dataclasses import dataclass
+from fractions import Fraction
+
+from openbars.core.models import AssetClass, CorporateActionKind
 from openbars.storage.errors import StorageError
 from openbars.storage.rows import quality_status_for
 
@@ -123,6 +126,131 @@ def capabilities_json(row: Any) -> str:
     return json.dumps(list(caps))
 
 
+
+@dataclass(frozen=True)
+class InstrumentCandidate:
+    """One instrument a symbol bootstrap could mean (covering alias on the session date)."""
+
+    instrument_id: int
+    symbol: str
+    valid_from: date
+    valid_to: date | None
+    exchange: str | None = None
+    asset_class: str | None = None
+    security_type: str | None = None
+
+    def describe(self) -> str:
+        end = "open" if self.valid_to is None else self.valid_to.isoformat()
+        bits = [f"instrument_id={self.instrument_id}", f"valid={self.valid_from.isoformat()}..{end}"]
+        if self.exchange:
+            bits.append(f"exchange={self.exchange}")
+        if self.security_type:
+            bits.append(f"security_type={self.security_type}")
+        elif self.asset_class:
+            bits.append(f"asset_class={self.asset_class}")
+        return "  - " + "  ".join(bits)
+
+
+class AmbiguousInstrumentError(StorageError):
+    """Symbol bootstrap hit more than one covering instrument; pass a numeric id."""
+
+    def __init__(self, symbol: str, on: date, candidates: list[InstrumentCandidate]) -> None:
+        self.symbol = symbol
+        self.on = on
+        # one row per instrument_id (first covering alias)
+        seen: dict[int, InstrumentCandidate] = {}
+        for c in candidates:
+            seen.setdefault(c.instrument_id, c)
+        self.candidates = tuple(sorted(seen.values(), key=lambda c: c.instrument_id))
+        super().__init__(self.format_report())
+
+    def format_report(self) -> str:
+        lines = [
+            f"symbol {self.symbol!r} on {self.on.isoformat()} matches {len(self.candidates)} instruments; "
+            "pass a numeric instrument_id (one of the ids below) instead of the ticker:",
+        ]
+        lines.extend(c.describe() for c in self.candidates)
+        return "\n".join(lines)
+
+
+def covering_alias_rows(conn: Any, symbol: str, on: date) -> list[dict[str, Any]]:
+    return list(
+        conn.execute(
+            "SELECT a.instrument_id, a.symbol, a.valid_from, a.valid_to, a.exchange, "
+            "i.asset_class, i.security_type "
+            "FROM symbol_alias a JOIN instrument i ON i.id = a.instrument_id "
+            "WHERE a.symbol = ? AND a.valid_from <= ? AND (a.valid_to IS NULL OR a.valid_to >= ?) "
+            "ORDER BY a.instrument_id, a.valid_from",
+            [symbol, on, on],
+        ).fetchall()
+    )
+
+
+def candidates_from_rows(rows: list[Any]) -> list[InstrumentCandidate]:
+    out: list[InstrumentCandidate] = []
+    for r in rows:
+        rec = dict(r)
+        out.append(
+            InstrumentCandidate(
+                instrument_id=int(rec["instrument_id"]),
+                symbol=str(rec["symbol"]),
+                valid_from=rec["valid_from"],
+                valid_to=rec["valid_to"],
+                exchange=rec.get("exchange"),
+                asset_class=rec.get("asset_class"),
+                security_type=rec.get("security_type"),
+            )
+        )
+    return out
+
+
+def action_type_for(kind: CorporateActionKind | str, *, ratio: Any = None, amount: Any = None) -> str:
+    value = CorporateActionKind(kind)
+    if value is CorporateActionKind.SPLIT:
+        return "split"
+    if value is CorporateActionKind.DIVIDEND:
+        return "stock_dividend" if ratio is not None and amount is None else "cash_dividend"
+    if value is CorporateActionKind.SPINOFF:
+        return "spin_off"
+    if value is CorporateActionKind.SYMBOL_CHANGE:
+        return "symbol_change"
+    return value.value
+
+
+def split_fraction(ratio: Any) -> tuple[int, int] | None:
+    if ratio is None:
+        return None
+    frac = Fraction(ratio).limit_denominator(10_000)
+    if frac.numerator <= 0 or frac.denominator <= 0:
+        raise StorageError(f"split ratio must be positive, got {ratio}")
+    return int(frac.numerator), int(frac.denominator)
+
+
+def action_details(kind: CorporateActionKind | str, *, ratio: Any = None, amount: Any = None) -> dict[str, Any]:
+    typ = action_type_for(kind, ratio=ratio, amount=amount)
+    details: dict[str, Any] = {}
+    if typ == "split":
+        parts = split_fraction(ratio)
+        if parts:
+            details["new_shares_numerator"] = parts[0]
+            details["old_shares_denominator"] = parts[1]
+    elif typ == "cash_dividend" and amount is not None:
+        details["cash_amount"] = str(amount)
+    elif typ == "stock_dividend":
+        parts = split_fraction(ratio)
+        if parts:
+            details["new_shares_numerator"] = parts[0]
+            details["old_shares_denominator"] = parts[1]
+    elif typ == "spin_off" and ratio is not None:
+        details["ratio"] = str(ratio)
+    return details
+
+
+def action_event_key(kind: str, instrument_id: int, ex_date: date) -> str:
+    """Stable event key so repeated upserts land on the same upstream event."""
+    return f"openbars:{kind}:{instrument_id}:{ex_date.isoformat()}"
+
+
 class CompatIdentity:
     """Resolve or create integer instrument ids and covering ``symbol_alias`` rows."""
 
@@ -187,17 +315,10 @@ class CompatIdentity:
         security_type: str,
         exchange: str,
     ) -> int:
-        rows = conn.execute(
-            "SELECT DISTINCT instrument_id FROM symbol_alias WHERE symbol = ? "
-            "AND valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)",
-            [symbol, on, on],
-        ).fetchall()
+        rows = covering_alias_rows(conn, symbol, on)
         ids = {int(r["instrument_id"]) for r in rows}
         if len(ids) > 1:
-            raise StorageError(
-                f"symbol {symbol!r} on {on.isoformat()} maps to more than one instrument; "
-                "pass a numeric instrument_id"
-            )
+            raise AmbiguousInstrumentError(symbol, on, candidates_from_rows(rows))
         if len(ids) == 1:
             return next(iter(ids))
         created = conn.execute(

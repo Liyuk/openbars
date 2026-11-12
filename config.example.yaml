@@ -44,7 +44,8 @@ storage:
   postgres:
     dsn: ${OPENBARS_PG_DSN}
     mode: native           # native | upstream_compat（compat 永不做迁移，只做列级校验）
-    write: false           # 默认只读；写入需显式 true。upstream_compat 在 write: true 时写入已有表
+    write: false           # 默认只读；写入需显式 true。upstream_compat 在 write: true 时写入已有表（含公司行动）
+    # dsn 只在运行时解析（环境变量 / env 文件），不要把真实 DSN 写进仓库
 
 conventions:
   adjustment: split        # raw | split | split_dividend | all（查询时派生，落库只存不复权+公司行动）

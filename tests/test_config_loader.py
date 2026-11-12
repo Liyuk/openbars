@@ -362,3 +362,43 @@ def test_unknown_market_and_interval_messages_list_valid_choices(tmp_path):
         load_settings(write(tmp_path, "markets: [mars]\n"), env={})
     with pytest.raises(ConfigError, match=r"invalid interval '7d'.*1d"):
         load_settings(write(tmp_path, "markets: [us]\nintervals: [7d]\n"), env={})
+
+
+def test_postgres_settings_and_redacted_dsn(tmp_path):
+    dsn = "postgresql://openbars_test:super-secret-dsn-value@127.0.0.1:55442/openbars_test"
+    yaml = """
+markets: [us]
+storage:
+  backend: postgres
+  path: ./pgdata
+  postgres:
+    dsn: ${OPENBARS_PG_DSN}
+    mode: upstream_compat
+    write: true
+"""
+    s = load_settings(write(tmp_path, yaml), env={"OPENBARS_PG_DSN": dsn})
+    assert s.storage_backend == "postgres"
+    assert s.postgres_mode == "upstream_compat" and s.postgres_write is True
+    assert s.postgres_dsn == dsn
+    assert dsn in s.secret_values()
+    text = format_settings(s)
+    assert dsn not in text
+    assert "super-secret-dsn-value" not in text
+    assert "postgres.dsn: set" in text
+    assert "postgres.mode: upstream_compat" in text
+    assert "postgres.write: true" in text
+
+
+def test_postgres_mode_must_be_known(tmp_path):
+    yaml = "markets: [us]\nstorage: {backend: postgres, postgres: {mode: other}}\n"
+    with pytest.raises(ConfigError, match="upstream_compat"):
+        load_settings(write(tmp_path, yaml), env={})
+
+
+def test_open_configured_backend_requires_dsn(tmp_path):
+    from openbars.storage.factory import open_configured_backend
+
+    yaml = "markets: [us]\nstorage: {backend: postgres}\n"
+    s = load_settings(write(tmp_path, yaml), env={})
+    with pytest.raises(ConfigError, match="dsn is required"):
+        open_configured_backend(s, data_dir=tmp_path)

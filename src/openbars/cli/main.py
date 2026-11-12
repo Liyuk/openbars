@@ -33,6 +33,8 @@ from openbars.orchestrator.jobs import JobState
 from openbars.orchestrator.lock import SchedulerLock, SchedulerLocked, scheduler_lock_path
 from openbars.orchestrator.planner import Budget, DefaultPlanner, Plan, RawStoreCoverage
 from openbars.orchestrator.runner import DEFAULT_LEASE_TTL, LocalOrchestrator
+from openbars.storage.compat_write import AmbiguousInstrumentError
+from openbars.storage.errors import StorageError
 from openbars.storage.state import SqliteStateStore
 
 COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow")
@@ -181,6 +183,12 @@ def main(
     except ConfigError as exc:
         out.err(f"error: {exc}")
         return EXIT_USAGE
+    except AmbiguousInstrumentError as exc:
+        out.err(f"error: {exc.format_report()}")
+        return EXIT_ERROR
+    except StorageError as exc:
+        out.err(f"error: {exc}")
+        return EXIT_ERROR
     except SchedulerLocked as exc:
         out.err(f"error: {exc}")
         return EXIT_ERROR
@@ -192,10 +200,16 @@ def main(
 # --- shared -------------------------------------------------------------------------------
 
 
-def _open_backend(path: Path) -> Any:
-    from openbars.storage.parquet_duckdb import open_backend
+def _open_backend(settings: Settings, path: Path, *, write: bool | None = None) -> Any:
+    from openbars.storage.factory import open_configured_backend
 
-    return open_backend(path)
+    return open_configured_backend(settings, data_dir=path, write=write)
+
+
+def _job_state(backend: Any, db: Path):
+    """Prefer the backend's own state store (Postgres native lives in PG; others in SQLite)."""
+    state = getattr(backend, "state", None)
+    return state if state is not None else SqliteStateStore(db)
 
 
 def _crypto_master(settings: Settings, backend: Any) -> Any:
@@ -206,7 +220,10 @@ def _crypto_master(settings: Settings, backend: Any) -> Any:
     if Market.CRYPTO not in settings.selection.markets:
         return None
     master = backend.instruments
-    return master if any(m.instrument_id.startswith("crypto:") for m in master.mappings()) else None
+    listing = getattr(master, "mappings", None)
+    if not callable(listing):
+        return None
+    return master if any(m.instrument_id.startswith("crypto:") for m in listing()) else None
 
 
 def _ingest_pairs(settings: Settings, providers: Mapping[str, Any], backend: Any, now: datetime,
@@ -267,15 +284,21 @@ def _plan(args: argparse.Namespace, settings: Settings, out: _Out, factory: Prov
     providers = factory(settings, None)
     notes = skipped_providers(settings, providers)
     check_ready(settings, providers, strict=False)
-    backend = _open_backend(root)
+    # Dry-run stays read-only even if config has write: true; --submit / run honor the flag.
+    backend = _open_backend(settings, root, write=False if not args.submit else None)
     db = root / "state.db"
     if not args.submit:  # dry run: read-only apart from creating empty storage folders
-        state = SqliteStateStore(db) if db.exists() else None
+        # Parquet: if no state file exists yet, treat every job as new. Postgres already has a store.
+        state = (
+            _job_state(backend, db)
+            if db.exists() or settings.storage_backend == "postgres"
+            else None
+        )
         plan = _make_plan(settings, providers, backend, clock(), _crypto_master(settings, backend))
         _print_plan(out, plan, state, notes)
         out.line("dry run: nothing written (use --submit to queue these jobs)")
         return EXIT_OK
-    state = SqliteStateStore(db)
+    state = _job_state(backend, db)
     with SchedulerLock(scheduler_lock_path(db)):  # singleton: do not plan under a running scheduler
         now = clock()
         _ingest_pairs(settings, providers, backend, now, notes, out)
@@ -300,8 +323,8 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
     probe = factory(settings, None)
     check_ready(settings, probe, strict=True)  # before anything is written
     root.mkdir(parents=True, exist_ok=True)
-    backend = _open_backend(root)
-    state = SqliteStateStore(root / "state.db")
+    backend = _open_backend(settings, root)
+    state = _job_state(backend, root / "state.db")
     policies = effective_policies(settings, probe)
     gate = SqliteQuotaGate(root / "quota.db", policies)
     providers = factory(settings, gate)
@@ -343,6 +366,14 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
     )
     if report.open_circuits:
         out.line(f"circuit open: {', '.join(report.open_circuits)}")
+    if report.dead:
+        seen: set[str] = set()
+        for job in state.list_jobs():
+            err = job.last_error or ""
+            if job.state is not JobState.DEAD or "pass a numeric instrument_id" not in err or err in seen:
+                continue
+            seen.add(err)
+            out.err(f"error: {err}")
     return EXIT_OK
 
 
@@ -350,11 +381,15 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
 
 
 def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
-    db = data_dir(settings, args.data) / "state.db"
-    if not db.exists():
+    root = data_dir(settings, args.data)
+    db = root / "state.db"
+    if settings.storage_backend == "postgres":
+        state = _job_state(_open_backend(settings, root, write=False), db)
+    elif not db.exists():
         out.line(f"no state database at {db} (nothing planned yet)")
         return EXIT_OK
-    state = SqliteStateStore(db)
+    else:
+        state = SqliteStateStore(db)
     counts = state.count_jobs()
     total = sum(counts.values())
     out.line(f"jobs: {total} total")
@@ -470,7 +505,7 @@ def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Call
             return EXIT_USAGE
 
     tolerances = Tolerances.from_settings(settings)
-    backend = _open_backend(root)
+    backend = _open_backend(settings, root, write=False)
     ready = latest_ready_session(clock())
     sel = settings.selection
     bounds = [d for d in (sel.history_end, ready) if d is not None]

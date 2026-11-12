@@ -153,6 +153,19 @@ def _enum(enum_cls: type, raw: Any, what: str) -> Any:
         raise ConfigError(f"invalid {what} {raw!r}; expected one of: {valid}") from None
 
 
+def _as_bool(raw: Any, what: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return False
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    raise ConfigError(f"{what} must be a boolean")
+
+
 def _as_list(raw: Any, what: str) -> list[Any]:
     if raw is None:
         return []
@@ -262,11 +275,23 @@ def parse_settings(data: Any) -> Settings:
         kwargs["nodes"] = tuple(nodes)
     if "adjustment" in conventions:
         kwargs["default_adjustment"] = _enum(Adjustment, conventions["adjustment"], "conventions.adjustment")
+    pg = storage.get("postgres") if isinstance(storage.get("postgres"), Mapping) else {}
+    dsn = pg.get("dsn")
+    dsn_text = str(dsn).strip() if dsn is not None and str(dsn).strip() else None
+    mode = str(pg.get("mode", "native") or "native")
+    if mode not in ("native", "upstream_compat"):
+        raise ConfigError(f"storage.postgres.mode must be native or upstream_compat, not {mode!r}")
+    schema_name = pg.get("schema")
+    schema_text = str(schema_name).strip() if schema_name is not None and str(schema_name).strip() else None
     return Settings(
         selection=selection,
         providers=providers,
         storage_backend=str(storage.get("backend", "parquet_duckdb")),
         storage_path=str(storage.get("path", "./data")),
+        postgres_dsn=dsn_text,
+        postgres_mode=mode,
+        postgres_write=_as_bool(pg.get("write", False), "storage.postgres.write"),
+        postgres_schema=schema_text,
         universe=universe,
         reconcile=dict(_section(data, "reconcile")),
         schedule=dict(_section(data, "schedule")),

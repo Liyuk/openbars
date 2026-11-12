@@ -69,6 +69,7 @@ MODULES = [
     "openbars.storage.base",
     "openbars.storage.parquet_duckdb",
     "openbars.storage.compat_write",
+    "openbars.storage.factory",
     "openbars.storage.postgres",
     "openbars.storage.schema",
     "openbars.storage.rows",

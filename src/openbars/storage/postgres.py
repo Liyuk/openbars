@@ -31,6 +31,7 @@ unit-testable with a fake catalog.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -89,6 +90,9 @@ from openbars.storage.schema import (
 from openbars.storage.state import SqliteStateStore, SqlStateStore
 from openbars.storage.compat_write import (
     CompatIdentity,
+    action_details,
+    action_event_key,
+    action_type_for,
     advisory_lock_key,
     capabilities_json,
     fingerprint_or_raise,
@@ -1004,6 +1008,53 @@ def _lookup_source_bar_id(
     return None
 
 
+_DAILY_BAR_INSERT = (
+    "INSERT INTO daily_bar ("
+    "instrument_id, session_date, provider, feed, adjustment, "
+    "price_basis, adjustment_scope, adjustment_as_of, session_semantics, "
+    "currency, volume_basis, revision, "
+    "open, high, low, close, volume, vwap, source_artifact_id, ingest_run_id"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id"
+)
+
+
+def _ensure_source_bar_id(conn: Any, instrument_id: int, row: Any) -> int:
+    """Return a ``daily_bar.id`` for ``selected_source_bar_id``.
+
+    Reuses a unique match when raw has already been written. If none exists,
+    materializes a ``daily_bar`` from the canonical OHLCV (unknown basis fields)
+    so a canonical-only upsert still has a source id. Does not overwrite an
+    existing raw row's values.
+    """
+    found = _lookup_source_bar_id(
+        conn, instrument_id, row.session_date, row.provider, row.feed, row.adjustment, row.revision,
+    )
+    if found is not None:
+        return found
+    price_basis = getattr(row, "price_basis", "unknown") or "unknown"
+    adjustment_scope = getattr(row, "adjustment_scope", "unknown") or "unknown"
+    session_semantics = getattr(row, "session_semantics", "unknown") or "unknown"
+    volume_basis = getattr(row, "volume_basis", "unknown") or "unknown"
+    rec = conn.execute(
+        _DAILY_BAR_INSERT,
+        [
+            instrument_id, row.session_date, row.provider, row.feed, row.adjustment,
+            price_basis, adjustment_scope, getattr(row, "adjustment_as_of", None),
+            session_semantics, getattr(row, "currency", None), volume_basis, row.revision,
+            row.open, row.high, row.low, row.close, row.volume, getattr(row, "vwap", None),
+            None, None,
+        ],
+    ).fetchone()
+    if rec and rec.get("id") is not None:
+        return int(rec["id"])
+    found = _lookup_source_bar_id(
+        conn, instrument_id, row.session_date, row.provider, row.feed, row.adjustment, row.revision,
+    )
+    if found is None:
+        raise StorageError("failed to allocate selected_source_bar_id for a canonical bar")
+    return found
+
+
 def _bump_watermarks(conn: Any, policy_version: str, session_dates: set[date]) -> None:
     if not session_dates:
         return
@@ -1194,9 +1245,7 @@ class PgCompatCanonicalStore(_Guard):
                     iid = self._identity.resolve(
                         conn, row.instrument_id, symbol=symbol, on=row.session_date,
                     )
-                    source_id = _lookup_source_bar_id(
-                        conn, iid, row.session_date, row.provider, row.feed, row.adjustment, row.revision,
-                    )
+                    source_id = _ensure_source_bar_id(conn, iid, row)
                     conn.execute(
                         _RESEARCH_BAR_UPSERT,
                         [
@@ -1231,6 +1280,22 @@ class PgCompatCanonicalStore(_Guard):
     def scan(self, instrument_ids: Sequence[str], interval: Interval, window: DateRange) -> Iterator[CanonicalBar]:
         for row in self.scan_rows(instrument_ids, interval, window):
             yield row.to_canonical_bar()
+
+
+
+def _same_compat_revision(row: Mapping[str, Any], action_type: str, ex_date: date, iid: int, details: Mapping[str, Any]) -> bool:
+    ids = row["instrument_ids"]
+    if isinstance(ids, str):
+        ids = json.loads(ids)
+    got = row["details"]
+    if isinstance(got, str):
+        got = json.loads(got)
+    return (
+        row["action_type"] == action_type
+        and row["ex_date"] == ex_date
+        and list(ids) == [iid]
+        and dict(got or {}) == dict(details)
+    )
 
 
 class PgCompatInstrumentMaster(_Guard):
@@ -1285,6 +1350,87 @@ class PgCompatInstrumentMaster(_Guard):
                         "AND (valid_to IS NULL OR valid_to = ?)",
                         [mapping.valid_to, iid, mapping.symbol, mapping.valid_from, mapping.valid_to],
                     )
+
+
+    def upsert_corporate_actions(self, actions: Iterable[CorporateAction]) -> None:
+        """Map openbars corporate actions onto the upstream observation / event / revision tables."""
+        self.require_write()
+        items = list(actions)
+        if not items:
+            return
+        with self._session() as conn:
+            for action in items:
+                kind = CorporateActionKind(action.kind)
+                typ = action_type_for(kind, ratio=action.ratio, amount=action.amount)
+                symbol = None if parse_int_id(action.instrument_id) is not None else action.instrument_id
+                iid = self._identity.resolve(
+                    conn, action.instrument_id, symbol=symbol, on=action.ex_date,
+                )
+                details = action_details(kind, ratio=action.ratio, amount=action.amount)
+                event_key = action_event_key(typ, iid, action.ex_date)
+                payload = {
+                    "instrument_id": iid,
+                    "ex_date": action.ex_date.isoformat(),
+                    "kind": typ,
+                    "source": action.source,
+                    "ratio": None if action.ratio is None else str(action.ratio),
+                    "amount": None if action.amount is None else str(action.amount),
+                    "details": details,
+                }
+                payload_hash = hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                existing_obs = conn.execute(
+                    "SELECT id FROM corporate_action_observation "
+                    "WHERE provider = ? AND dataset = ? AND payload_hash = ?",
+                    [action.source, "openbars", payload_hash],
+                ).fetchone()
+                if existing_obs is None:
+                    existing_obs = conn.execute(
+                        "INSERT INTO corporate_action_observation ("
+                        "provider, dataset, external_id, event_type, payload_hash, payload, "
+                        "normalization_status, observed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'normalized', now()) RETURNING id",
+                        [
+                            action.source, "openbars", event_key, typ, payload_hash,
+                            json.dumps(payload),
+                        ],
+                    ).fetchone()
+                obs_id = int(existing_obs["id"])
+                ev = conn.execute(
+                    "SELECT id FROM corporate_action_event WHERE event_key = ?", [event_key]
+                ).fetchone()
+                if ev is None:
+                    ev = conn.execute(
+                        "INSERT INTO corporate_action_event (event_key) VALUES (?) RETURNING id",
+                        [event_key],
+                    ).fetchone()
+                event_id = int(ev["id"])
+                previous = conn.execute(
+                    "SELECT * FROM corporate_action_revision WHERE event_id = ? "
+                    "ORDER BY revision DESC LIMIT 1",
+                    [event_id],
+                ).fetchone()
+                if previous is not None and _same_compat_revision(previous, typ, action.ex_date, iid, details):
+                    continue
+                next_rev = (int(previous["revision"]) + 1) if previous else 1
+                supersedes = previous["id"] if previous is not None else None
+                created = conn.execute(
+                    "INSERT INTO corporate_action_revision ("
+                    "event_id, revision, action_type, verification_status, valid_from, known_at, "
+                    "ex_date, instrument_ids, observation_ids, details, actor, supersedes_id) "
+                    "VALUES (?, ?, ?, 'source_reported', ?, now(), ?, ?, ?, ?, 'openbars', ?) "
+                    "RETURNING id",
+                    [
+                        event_id, next_rev, typ, action.ex_date, action.ex_date,
+                        json.dumps([iid]), json.dumps([obs_id]), json.dumps(details), supersedes,
+                    ],
+                ).fetchone()
+                conn.execute(
+                    "INSERT INTO corporate_action_observation_link (revision_id, observation_id) "
+                    "VALUES (?, ?) ON CONFLICT DO NOTHING",
+                    [int(created["id"]), obs_id],
+                )
 
     def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
         if Market(market) is not _COMPAT_MARKET:

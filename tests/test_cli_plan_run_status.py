@@ -370,3 +370,40 @@ providers:
     assert "key_id: set" in out and "secret_key: set" in out
     assert "--env-file" in out
     assert "feed: sip" in out
+
+
+def test_plan_postgres_without_dsn_is_a_clean_error(tmp_path, capsys):
+    path = tmp_path / "config.yaml"
+    data = tmp_path / "data"
+    path.write_text(
+        f"""
+version: 1
+markets: [us]
+intervals: [1d]
+history: {{start: 2026-03-02, end: null}}
+universe:
+  us:
+    symbols: [TEST1]
+storage:
+  backend: postgres
+  path: {data}
+  postgres:
+    dsn: ${{OPENBARS_PG_DSN}}
+    mode: upstream_compat
+    write: true
+providers:
+  massive:
+    enabled: true
+    api_key: ${{TEST_API_KEY}}
+"""
+    )
+    code = main(
+        ["--config", str(path), "plan"],
+        provider_factory=factory(),
+        clock=lambda: NOW,
+        env={"TEST_API_KEY": SECRET},
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "storage.postgres.dsn is required" in captured.err
+    assert "postgresql://" not in captured.out + captured.err

@@ -153,6 +153,14 @@ class LocalNode:
                 job, requests=requests, written=written, code="post_process_failed",
                 message=str(exc), retryable=True,
             )  # fmt: skip
+        from openbars.storage.compat_write import AmbiguousInstrumentError
+
+        if isinstance(exc, AmbiguousInstrumentError):
+            # Bootstrap hit a reused ticker; retrying will not help. Keep the candidate report.
+            return self._fail(
+                job, requests=requests, written=written, code="ambiguous_instrument",
+                message=exc.format_report(), retryable=False,
+            )  # fmt: skip
         # Unknown failure: keep only the type name (messages may carry request details).
         return self._fail(
             job, requests=requests, written=written, code="unexpected",
