@@ -31,6 +31,7 @@ from typing import Any, Mapping, Sequence
 
 from openbars.core.atomic import atomic_write
 from openbars.core.errors import OpenBarsError
+from openbars.storage.errors import ReadOnlyError
 from openbars.core.models import DateRange, Interval, Market
 
 SENSITIVE_KEY_PARTS = (
@@ -82,8 +83,9 @@ def _digest(text: str) -> str:
 
 
 class RawArchive:
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, read_only: bool = False) -> None:
         self.root = Path(root)
+        self.read_only = read_only
 
     def write(
         self,
@@ -103,6 +105,8 @@ class RawArchive:
         error_code: str | None = None,
         received_at: datetime | None = None,
     ) -> ArchiveResult:
+        if self.read_only:
+            raise ReadOnlyError("backend is read-only; raw archive writes are disabled")
         if not pages:
             raise ValueError("raw provider response pages are required before ingestion")
         if not license_tag:

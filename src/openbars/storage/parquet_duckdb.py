@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import time
 import uuid
+import hashlib
+import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -67,7 +69,7 @@ from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
 from openbars.raw.archive import RawArchive
 from openbars.reconcile.crypto import policy_version_for_market
-from openbars.storage.errors import SchemaVersionError, StorageError
+from openbars.storage.errors import ReadOnlyError, SchemaVersionError, StorageError
 from openbars.storage.rows import (
     normalize_legacy_daily,
     CanonicalBarRow,
@@ -142,6 +144,14 @@ def _mem_connection() -> duckdb.DuckDBPyConnection:
 
 def _sql_str(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _part_ts(path: Path) -> int:
@@ -324,6 +334,7 @@ class _PartitionedTable:
 
     def upsert_table_rows(self, rows: Sequence[Any], to_table: Any) -> int:
         """Write rows (already validated). Returns the number of rows actually written."""
+        self.backend.ensure_writable()
         if not rows:
             return 0
         latest: dict[tuple, Any] = {}
@@ -678,6 +689,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
     # -- writes --
 
     def upsert(self, instruments: Iterable[Instrument], mappings: Iterable[SymbolMapping]) -> None:
+        self.backend.ensure_writable()
         new_instruments = [_instrument_record(i) for i in instruments]
         new_mappings = [_mapping_record(m) for m in mappings]
         with self.backend.lock:
@@ -692,6 +704,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
                 self._write_records("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, [merged_m[k] for k in sorted(merged_m)])
 
     def upsert_corporate_actions(self, actions: Iterable[CorporateAction]) -> None:
+        self.backend.ensure_writable()
         new = [_action_record(a) for a in actions]
         if not new:
             return
@@ -751,6 +764,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
     # -- identity layer: mapping removal, unresolved queue, sightings, upstream ids --
 
     def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None:
+        self.backend.ensure_writable()
         drop = {(m.instrument_id, m.provider, m.symbol, m.valid_from) for m in mappings}
         if not drop:
             return
@@ -762,6 +776,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
             self._write_records("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, kept)
 
     def record_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self.backend.ensure_writable()
         new = list(records)
         if not new:
             return
@@ -777,6 +792,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
         return len(self.unresolved(kind))
 
     def discard_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self.backend.ensure_writable()
         drop = {r.key for r in records}
         if not drop:
             return
@@ -803,6 +819,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
         self._write_records("unresolved", UNRESOLVED_SCHEMA, rows)
 
     def observe(self, observations: Iterable[tuple[str, str, str, date]]) -> None:
+        self.backend.ensure_writable()
         new = list(observations)
         if not new:
             return
@@ -831,6 +848,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
         ]
 
     def set_upstream_id(self, instrument_id: str, upstream_id: int) -> None:
+        self.backend.ensure_writable()
         with self.backend.lock:
             existing = self.upstream_ids()
             _check_upstream(existing, instrument_id, upstream_id)
@@ -882,6 +900,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
         more fractional digits are rounded half-even to 8 digits (BaoStock sends 6). Other
         sources' rows for the same instrument are kept side by side, never merged.
         """
+        self.backend.ensure_writable()
         new = [_factor_record(f) for f in factors]
         if not new:
             return 0
@@ -1367,20 +1386,32 @@ class ParquetDuckDbBackend:
 
     schema_version = SCHEMA_VERSION
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, read_only: bool = False, index_dir: str | Path | None = None) -> None:
         self.root = Path(root)
+        self.read_only = read_only
         self.ref_dir = self.root / "ref"
         self.audit_dir = self.root / "audit"
-        self.catalog_path = self.root / CATALOG_FILE
-        for directory in (self.root, self.ref_dir, self.audit_dir):
-            directory.mkdir(parents=True, exist_ok=True)
-        self.lock = ProcessLock(self.root / LOCK_FILE)
+        if not read_only:
+            for directory in (self.root, self.ref_dir, self.audit_dir):
+                directory.mkdir(parents=True, exist_ok=True)
+        if read_only:
+            cache_root = Path(index_dir) if index_dir is not None else Path.home() / ".cache" / "openbars"
+            cache_key = hashlib.sha256(
+                json.dumps(self._catalog_signature(), sort_keys=True).encode()
+            ).hexdigest()
+            self.catalog_path = cache_root / f"{cache_key}.duckdb"
+            self.lock = _ReadOnlyLock()
+            self.catalog_lock = ProcessLock(self.catalog_path.with_suffix(".lock"))
+        else:
+            self.catalog_path = self.root / CATALOG_FILE
+            self.lock = ProcessLock(self.root / LOCK_FILE)
+            self.catalog_lock = self.lock
         self._verified: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size) already checked
         self.raw = ParquetRawStore(self)
         self.canonical = ParquetCanonicalStore(self)
         self.instruments = ParquetInstrumentMaster(self)
-        self.state = SqliteStateStore(self.root / "state.db")
-        self.archive = RawArchive(self.root / "raw-archive")
+        self.state = _ReadOnlyState() if read_only else SqliteStateStore(self.root / "state.db")
+        self.archive = RawArchive(self.root / "raw-archive", read_only=read_only)
         self.reader = DuckDbBarReader(self)
         self.check_schema_versions()  # refuse to open a tree holding newer-schema files
 
@@ -1392,6 +1423,10 @@ class ParquetDuckDbBackend:
 
     def close(self) -> None:
         """Nothing is held open between calls; present for symmetry with other backends."""
+
+    def ensure_writable(self) -> None:
+        if self.read_only:
+            raise ReadOnlyError("backend is read-only; storage writes are disabled")
 
     # -- schema version guard (docs/architecture.md section 10.6) --
 
@@ -1451,7 +1486,13 @@ class ParquetDuckDbBackend:
         return (self.ref_dir / f"{name}.parquet").exists()
 
     def _catalog_signature(self) -> dict[str, str]:
-        sig = {"root": str(self.root.resolve()), "schema_version": str(SCHEMA_VERSION)}
+        entries: list[tuple[str, str]] = []
+        for base in ("raw", "canonical"):
+            for path in sorted((self.root / base).rglob(PART_GLOB)) if (self.root / base).exists() else ():
+                entries.append((path.relative_to(self.root).as_posix(), _file_digest(path)))
+        for path in sorted(self.ref_dir.glob("*.parquet")) if self.ref_dir.exists() else ():
+            entries.append((path.relative_to(self.root).as_posix(), _file_digest(path)))
+        sig = {"schema_version": str(SCHEMA_VERSION), "content": hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()}
         for spec in LAYERS.values():
             sig[spec.name] = str(self._layer_files_exist(spec))
         for name in _REF_VIEWS:
@@ -1460,30 +1501,49 @@ class ParquetDuckDbBackend:
 
     def rebuild_catalog(self) -> None:
         """Drop and recreate every DuckDB view from the Parquet tree (the file holds no data)."""
-        with self.lock:
+        with self.catalog_lock:
             self.check_schema_versions()  # never let DuckDB silently union a newer-schema file
             sig = self._catalog_signature()
             con = duckdb.connect(str(self.catalog_path))
             try:
                 con.execute("SET TimeZone='UTC'")
+                if self.read_only:
+                    con.execute("DROP TABLE IF EXISTS catalog_views")
+                    con.execute("CREATE TABLE catalog_views (name VARCHAR, sql VARCHAR, path VARCHAR)")
                 for spec in LAYERS.values():
                     con.execute(f"DROP VIEW IF EXISTS {spec.view}")
                     if sig[spec.name] == "True":
                         glob = (self.root / spec.base).resolve().as_posix() + "/**/" + PART_GLOB
-                        source = f"read_parquet({_sql_str(glob)}, filename=true, union_by_name=true)"
-                        con.execute(f"CREATE VIEW {spec.view} AS {_dedup_sql(spec, source)}")
+                        path = spec.base + "/**/" + PART_GLOB
+                        source_path = "__OPENBARS_PATH__" if self.read_only else _sql_str(glob)
+                        source = f"read_parquet({source_path}, filename=true, union_by_name=true)"
+                        sql = _dedup_sql(spec, source)
                     else:
-                        con.execute(f"CREATE VIEW {spec.view} AS {_empty_select(spec.schema)}")
+                        path = None
+                        sql = _empty_select(spec.schema)
+                    if self.read_only:
+                        con.execute("INSERT INTO catalog_views VALUES (?, ?, ?)", [spec.view, sql, path])
+                    else:
+                        con.execute(f"CREATE VIEW {spec.view} AS {sql}")
                 for name in _REF_VIEWS:
                     con.execute(f"DROP VIEW IF EXISTS {name}")
                     if sig[name] == "True":
-                        path = (self.ref_dir / f"{name}.parquet").resolve().as_posix()
-                        con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet({_sql_str(path)})")
+                        path = f"ref/{name}.parquet"
+                        source_path = "__OPENBARS_PATH__" if self.read_only else _sql_str((self.root / path).resolve().as_posix())
+                        sql = f"SELECT * FROM read_parquet({source_path})"
                     else:
-                        con.execute(f"CREATE VIEW {name} AS {_empty_select({**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS, **REF_PARQUET_SCHEMAS}[name])}")
+                        path = None
+                        sql = _empty_select({**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS, **REF_PARQUET_SCHEMAS}[name])
+                    if self.read_only:
+                        con.execute("INSERT INTO catalog_views VALUES (?, ?, ?)", [name, sql, path])
+                    else:
+                        con.execute(f"CREATE VIEW {name} AS {sql}")
                 con.execute("DROP TABLE IF EXISTS catalog_meta")
                 con.execute("CREATE TABLE catalog_meta (key VARCHAR PRIMARY KEY, value VARCHAR)")
-                con.executemany("INSERT INTO catalog_meta VALUES (?, ?)", list(sig.items()))
+                metadata = dict(sig)
+                if self.read_only:
+                    metadata["catalog_format"] = "portable-v1"
+                con.executemany("INSERT INTO catalog_meta VALUES (?, ?)", list(metadata.items()))
             finally:
                 con.close()
 
@@ -1497,6 +1557,8 @@ class ParquetDuckDbBackend:
             finally:
                 con.close()
         except duckdb.Error:
+            return False
+        if self.read_only and stored.pop("catalog_format", None) != "portable-v1":
             return False
         return stored == self._catalog_signature()
 
@@ -1513,11 +1575,30 @@ class ParquetDuckDbBackend:
         con = duckdb.connect(str(self.catalog_path), read_only=True)
         try:
             con.execute("SET TimeZone='UTC'")
+            if self.read_only:
+                for name, view_sql, path in con.execute("SELECT name, sql, path FROM catalog_views").fetchall():
+                    if path is not None:
+                        view_sql = view_sql.replace("__OPENBARS_PATH__", _sql_str((self.root / path).resolve().as_posix()))
+                    con.execute(f"CREATE TEMP VIEW {name} AS {view_sql}")
             return _run_arrow(con, sql, params)
         finally:
             con.close()
 
 
-def open_backend(path: str | Path = "./data") -> ParquetDuckDbBackend:
+class _ReadOnlyLock:
+    def __enter__(self):
+        raise ReadOnlyError("backend is read-only; storage writes are disabled")
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _ReadOnlyState:
+    def __getattr__(self, name: str):
+        def reject(*args: object, **kwargs: object):
+            raise ReadOnlyError(f"backend is read-only; state operation {name} is unavailable")
+        return reject
+
+
+def open_backend(path: str | Path = "./data", *, read_only: bool = False, index_dir: str | Path | None = None) -> ParquetDuckDbBackend:
     """Open (creating if needed) the default Parquet + DuckDB backend at ``path``."""
-    return ParquetDuckDbBackend(path)
+    return ParquetDuckDbBackend(path, read_only=read_only, index_dir=index_dir)

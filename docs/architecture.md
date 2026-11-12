@@ -475,6 +475,7 @@ data/
 - `compact()`：把每个分区内的所有 part 合并成**一个**去重后的 part（原子写入，再删除输入）。合并产物保留最新输入的排序位次，因此并发写入的更新 part 仍然胜出；崩溃发生在“新 part 已落盘、旧 part 未删”之间时，数据冗余但读取结果一致。
 - 维护命令（#127，`src/openbars/storage/maintenance.py`、`cli/storage.py`）：`openbars compact` 默认只读出计划（分区、part 数、去重后行数、预计体积），`--apply` 才调用 `compact()`；`openbars usage` 按 layer / market / interval / year（raw 另按 provider）统计；`openbars retention` 仅在配置了 `storage.retention` 时生效，只能删除 raw 层整年 `year=` 分区（canonical / ref 永不删除），先列候选、`--apply` 才删且持写锁；`openbars backup` 持写锁复制数据目录（SQLite 用在线备份，跳过 `.lock`、`.tmp`、点文件和可重建的 catalog）。均不改去重语义、不提升 `SCHEMA_VERSION`，Postgres 路径不变。
 - 写入者用 `data/.lock`（`flock`）串行化；读取不加锁。
+- Python 可通过 `open_backend(path, read_only=True, index_dir=...)` 只读打开数据树。只读 backend 不创建目录、不打开 `state.db`，也不会在数据树写入 DuckDB catalog、锁或临时文件；写入与状态操作抛出 `ReadOnlyError`。catalog 和其锁放在默认用户缓存 `~/.cache/openbars`（可由 `index_dir` 覆盖）。catalog 签名由 schema 版本及相对 Parquet 文件名与文件内容摘要组成，不含挂载点绝对路径；因 DuckDB 视图引用文件路径，挂载位置变化时会在外部缓存中重建视图。
 - 新增的新 revision（`revision` 属于键的一部分）是独立的行，不会覆盖旧 revision。（这一条只对 raw 成立；canonical 的键不含 `revision`，新 revision 覆盖同键旧行，时点读取见 §10.4 `available_by`。）
 
 ### 10.2 数值与模型对应
