@@ -411,6 +411,7 @@ class BarReader(Protocol):
 
 - 粒度是 `Interval` 枚举 + provider 能力声明，不是代码分支。v0.1 只有 `1d` 的 provider 实现与测试；`1h`/`1m` 等的模型、分区、口径字段已就位。
 - 开启某粒度时：Planner 只会把 Job 路由给声明了该粒度的源；QuotaGate 用同一份额度（日线和小时线共享一个 provider 的额度），因此 `plan` 会显示叠加后的占用。
+- **yfinance 小时线空结果（#152）**：`1h` 走 `Ticker.history(raise_errors=True)`，不走 `yf.download`（后者会把错误吞成空表）。Yahoo 明确表示该窗口没有数据（`YFPricesMissingError`，无 `status_code`、原因为“无数据”类）时，该 symbol 计入 `skipped["no_data"]`，不算失败；全部 symbol 都没数据时返回空的成功批次。限流、时区缺失、带 HTTP 状态码或其他原因的错误照旧报错；不带该信号的空表仍是 `empty_result`。日线路径不变。
 - **派生粒度**：`Resampler` 接口支持由细到粗合成（如 Alpaca 30m → 1h，按 `us_hourly_alignment` 对齐 9:30），派生 bar 标注 `source=derived:<base>`。
 - 存储分区包含 `interval`，不同粒度互不干扰。
 

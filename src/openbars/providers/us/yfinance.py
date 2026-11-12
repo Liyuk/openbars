@@ -146,7 +146,62 @@ def _yfinance_download(ticker: str, **kwargs: Any) -> Any:
             "or pass a download callable",
             retryable=False,
         ) from None
+    if kwargs.get("interval") == "1h":
+        return _yfinance_hourly_history(yfinance, ticker, **kwargs)
     return yfinance.download(ticker, **kwargs)
+
+
+class YFinanceNoData(Exception):
+    """Yahoo answered, but has no price rows for the requested range (#152).
+
+    Raised by the hourly download path (or an injected download) for a *legitimate* empty
+    answer, e.g. a session in which the symbol did not trade. The adapter treats it as an empty,
+    successful result for that symbol, unlike transport / rate-limit / unknown-symbol errors.
+    """
+
+
+# Yahoo ``chart.error`` descriptions that mean "nothing in this range" rather than a bad request.
+_NO_DATA_REASONS = ("no data", "data doesn't exist", "data does not exist", "no price data")
+
+
+def _yfinance_hourly_history(yfinance: Any, ticker: str, **kwargs: Any) -> Any:
+    """``Ticker.history`` with errors raised, so "no rows" can be told apart from failures.
+
+    ``yfinance.download`` swallows every per-ticker error into an empty frame (a rate limit and a
+    quiet session look the same); ``history(raise_errors=True)`` raises ``YFPricesMissingError``
+    only when Yahoo returned no prices. That error -- without an HTTP status, and with either no
+    Yahoo reason or a "no data" reason -- becomes ``YFinanceNoData``; ``YFTzMissingError``
+    (unknown / delisted symbol), rate limits and everything else propagate as before.
+    """
+    import warnings
+
+    exceptions = getattr(yfinance, "exceptions", None)
+    missing = getattr(exceptions, "YFPricesMissingError", None)
+    tz_missing = getattr(exceptions, "YFTzMissingError", None)
+    args = {k: kwargs[k] for k in ("start", "end", "interval", "prepost", "auto_adjust", "actions", "timeout") if k in kwargs}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)  # raise_errors is deprecated, still honoured
+            return yfinance.Ticker(ticker).history(raise_errors=True, **args)
+    except Exception as exc:  # noqa: BLE001 - narrowed below
+        if missing is None or not isinstance(exc, missing):
+            raise
+        if tz_missing is not None and isinstance(exc, tz_missing):
+            raise
+        if is_no_data_error(exc):
+            raise YFinanceNoData(ticker) from None
+        raise
+
+
+def is_no_data_error(exc: BaseException) -> bool:
+    """A ``YFPricesMissingError``-like error that means "no rows", not a failed request."""
+    text = str(exc).lower()
+    if "status_code" in text:
+        return False  # an HTTP error from Yahoo, not an empty answer
+    reason = getattr(exc, "yahoo_reason", None)
+    if reason is None:
+        return True
+    return any(marker in str(reason).lower() for marker in _NO_DATA_REASONS)
 
 
 @dataclass(frozen=True)
@@ -538,6 +593,9 @@ class YFinanceProvider:
                 break
             try:
                 rows = _rows(download(to_yahoo_ticker(symbol), **kwargs))
+            except YFinanceNoData:
+                skipped["no_data"] = skipped.get("no_data", 0) + 1  # legitimate empty answer (#152)
+                continue
             except ProviderError as exc:
                 if exc.code == NOT_INSTALLED_CODE:
                     raise
