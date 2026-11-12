@@ -25,6 +25,22 @@ D = date
 ASOF = D(2024, 1, 10)
 
 
+@pytest.fixture(params=["memory", "parquet", pytest.param("postgres", marks=pytest.mark.postgres_live)])
+def master(request, tmp_path):
+    if request.param == "memory":
+        yield MemoryInstrumentMaster()
+    elif request.param == "parquet":
+        yield open_backend(tmp_path / "data").instruments
+    else:  # native Postgres in a throwaway schema (skipped without OPENBARS_TEST_PG_DSN)
+        from pg_helpers import throwaway_schema
+
+        from openbars.storage.postgres import PostgresBackend
+
+        dsn = request.getfixturevalue("pg_dsn")
+        with throwaway_schema(dsn) as schema:
+            yield PostgresBackend(dsn, mode="native", write=True, schema=schema).instruments
+
+
 def binance(base="TEST", quote="USDT", **kw):
     return CryptoPairListing("BINANCE", base, quote, "binance", f"{base}{quote}", **kw)
 
@@ -66,8 +82,8 @@ def test_parse_rejects_non_pair_ids(bad):
         parse_crypto_instrument_id(bad)
 
 
-def test_two_venues_are_two_instruments():
-    m = MemoryInstrumentMaster()
+def test_two_venues_are_two_instruments(master):
+    m = master
     s = ingest_crypto_pairs(m, [binance(), coinbase()], as_of=ASOF)
     assert (s.created, s.reused, s.unresolved) == (2, 0, 0)
     a, b = (m.get(f"crypto:spot:{v}:TEST-USDT") for v in ("binance", "coinbase"))
@@ -81,8 +97,8 @@ def test_two_venues_are_two_instruments():
     assert a.external_ids["venue"] == "binance" and a.external_ids["provider_symbol"] == "TESTUSDT"
 
 
-def test_same_venue_different_quote_are_two_instruments():
-    m = MemoryInstrumentMaster()
+def test_same_venue_different_quote_are_two_instruments(master):
+    m = master
     ingest_crypto_pairs(m, [binance(quote="USDT"), binance(quote="USDC")], as_of=ASOF)
     ids = sorted(i.instrument_id for i in m.instruments())
     assert ids == ["crypto:spot:binance:TEST-USDC", "crypto:spot:binance:TEST-USDT"]
@@ -90,8 +106,8 @@ def test_same_venue_different_quote_are_two_instruments():
     assert {i.currency for i in m.instruments()} == {"USDT", "USDC"}
 
 
-def test_pair_read_back_from_instrument_not_symbol():
-    m = MemoryInstrumentMaster()
+def test_pair_read_back_from_instrument_not_symbol(master):
+    m = master
     # venue-native symbol deliberately does not contain a splittable base/quote
     ingest_crypto_pairs(m, [CryptoPairListing("binance", "ZZZ", "USDC", "binance", "Q1X9")], as_of=ASOF)
     inst = m.get("crypto:spot:binance:ZZZ-USDC")
@@ -107,8 +123,8 @@ def test_pair_read_back_from_instrument_not_symbol():
         pair_assets(bad)
 
 
-def test_reingest_is_idempotent():
-    m = MemoryInstrumentMaster()
+def test_reingest_is_idempotent(master):
+    m = master
     rows = [binance(name="Test"), coinbase()]
     ingest_crypto_pairs(m, rows, as_of=ASOF)
     before_i, before_m = sorted(m.instruments(), key=lambda i: i.instrument_id), sorted(
@@ -120,16 +136,16 @@ def test_reingest_is_idempotent():
     assert len(before_i) == 2 and len(before_m) == 2
 
 
-def test_duplicate_rows_in_one_batch_reuse():
-    m = MemoryInstrumentMaster()
+def test_duplicate_rows_in_one_batch_reuse(master):
+    m = master
     s = ingest_crypto_pairs(m, [binance(), binance(name="Test")], as_of=ASOF)
     assert (s.created, s.reused) == (1, 1)
     assert len(m.instruments()) == 1 and len(m.mappings()) == 1
     assert m.instruments()[0].name == "Test"
 
 
-def test_listed_on_earlier_wins_and_mapping_start():
-    m = MemoryInstrumentMaster()
+def test_listed_on_earlier_wins_and_mapping_start(master):
+    m = master
     ingest_crypto_pairs(m, [binance(listed_on=D(2023, 5, 1))], as_of=ASOF)
     assert m.mappings()[0].valid_from == D(2023, 5, 1)
     ingest_crypto_pairs(m, [binance(listed_on=D(2023, 6, 1))], as_of=ASOF)
@@ -139,8 +155,8 @@ def test_listed_on_earlier_wins_and_mapping_start():
     assert m.instruments()[0].listed_on == D(2023, 1, 1)
 
 
-def test_resolve_is_venue_specific_and_no_generic_mapping():
-    m = MemoryInstrumentMaster()
+def test_resolve_is_venue_specific_and_no_generic_mapping(master):
+    m = master
     ingest_crypto_pairs(m, [binance(), coinbase()], as_of=ASOF)
     on = D(2024, 3, 1)
     assert m.resolve("TESTUSDT", on=on, provider="binance", market=Market.CRYPTO) == "crypto:spot:binance:TEST-USDT"
@@ -153,8 +169,8 @@ def test_resolve_is_venue_specific_and_no_generic_mapping():
     assert m.resolve("TESTUSDT", on=on, provider="binance", market=Market.US) is None
 
 
-def test_delisting_closes_mapping_window():
-    m = MemoryInstrumentMaster()
+def test_delisting_closes_mapping_window(master):
+    m = master
     ingest_crypto_pairs(m, [binance(listed_on=D(2023, 1, 1))], as_of=ASOF)
     s = ingest_crypto_pairs(m, [binance(active=False, delisted_on=D(2024, 2, 1))], as_of=D(2024, 2, 5))
     assert s.delisted == 1 and s.created == 0
@@ -171,24 +187,24 @@ def test_delisting_closes_mapping_window():
     assert s.delisted == 0 and m.mappings() == [mp]
 
 
-def test_inactive_without_date_uses_as_of():
-    m = MemoryInstrumentMaster()
+def test_inactive_without_date_uses_as_of(master):
+    m = master
     ingest_crypto_pairs(m, [binance(listed_on=D(2023, 1, 1))], as_of=ASOF)
     ingest_crypto_pairs(m, [binance(active=False)], as_of=D(2024, 4, 1))
     assert m.instruments()[0].delisted_on == D(2024, 4, 1)
     assert m.mappings()[0].valid_to == D(2024, 4, 1)
 
 
-def test_new_inactive_pair_gets_closed_window():
-    m = MemoryInstrumentMaster()
+def test_new_inactive_pair_gets_closed_window(master):
+    m = master
     ingest_crypto_pairs(m, [binance(active=False, listed_on=D(2023, 1, 1), delisted_on=D(2023, 9, 1))], as_of=ASOF)
     (mp,) = m.mappings()
     assert (mp.valid_from, mp.valid_to) == (D(2023, 1, 1), D(2023, 9, 1))
     assert m.resolve("TESTUSDT", on=D(2024, 1, 1), provider="binance", market=Market.CRYPTO) is None
 
 
-def test_relisting_reuses_id_with_new_window():
-    m = MemoryInstrumentMaster()
+def test_relisting_reuses_id_with_new_window(master):
+    m = master
     ingest_crypto_pairs(m, [binance(listed_on=D(2023, 1, 1))], as_of=ASOF)
     ingest_crypto_pairs(m, [binance(active=False, delisted_on=D(2023, 6, 30))], as_of=ASOF)
     ingest_crypto_pairs(m, [binance()], as_of=D(2024, 1, 1))
@@ -200,8 +216,8 @@ def test_relisting_reuses_id_with_new_window():
         (D(2023, 1, 1), D(2023, 6, 30)), (D(2024, 1, 1), None)]
 
 
-def test_recycled_symbol_does_not_inherit_old_id():
-    m = MemoryInstrumentMaster()
+def test_recycled_symbol_does_not_inherit_old_id(master):
+    m = master
     old = CryptoPairListing("binance", "TEST", "USDT", "binance", "SYM1", listed_on=D(2023, 1, 1))
     ingest_crypto_pairs(m, [old], as_of=ASOF)
     ingest_crypto_pairs(m, [CryptoPairListing("binance", "TEST", "USDT", "binance", "SYM1",
@@ -215,8 +231,8 @@ def test_recycled_symbol_does_not_inherit_old_id():
     assert r(D(2024, 2, 1)) is None
 
 
-def test_symbol_conflict_in_batch_is_unresolved_not_merged():
-    m = MemoryInstrumentMaster()
+def test_symbol_conflict_in_batch_is_unresolved_not_merged(master):
+    m = master
     rows = [
         CryptoPairListing("binance", "TEST", "USDT", "binance", "SYMX"),
         CryptoPairListing("binance", "ZZZ", "USDT", "binance", "SYMX"),
@@ -228,15 +244,15 @@ def test_symbol_conflict_in_batch_is_unresolved_not_merged():
     assert [r.reason_code for r in m.unresolved("listing")] == [SYMBOL_CONFLICT]
 
 
-def test_symbol_open_on_other_pair_in_master_is_unresolved():
-    m = MemoryInstrumentMaster()
+def test_symbol_open_on_other_pair_in_master_is_unresolved(master):
+    m = master
     ingest_crypto_pairs(m, [CryptoPairListing("binance", "TEST", "USDT", "binance", "SYMX")], as_of=ASOF)
     s = ingest_crypto_pairs(m, [CryptoPairListing("binance", "ZZZ", "USDT", "binance", "SYMX")], as_of=ASOF)
     assert s.unresolved == 1 and s.created == 0 and len(m.instruments()) == 1
 
 
-def test_same_symbol_text_on_different_providers_is_fine():
-    m = MemoryInstrumentMaster()
+def test_same_symbol_text_on_different_providers_is_fine(master):
+    m = master
     rows = [
         CryptoPairListing("binance", "TEST", "USDT", "binance", "TESTUSDT"),
         CryptoPairListing("coinbase", "ZZZ", "USDT", "coinbase", "TESTUSDT"),
@@ -246,8 +262,8 @@ def test_same_symbol_text_on_different_providers_is_fine():
     assert m.resolve("TESTUSDT", on=ASOF, provider="coinbase", market=Market.CRYPTO) == "crypto:spot:coinbase:ZZZ-USDT"
 
 
-def test_invalid_rows_are_unresolved_batch_continues():
-    m = MemoryInstrumentMaster()
+def test_invalid_rows_are_unresolved_batch_continues(master):
+    m = master
     rows = [
         CryptoPairListing("binance", "TE-ST", "USDT", "binance", "BAD1"),
         CryptoPairListing("", "TEST", "USDT", "binance", "BAD2"),
@@ -260,20 +276,23 @@ def test_invalid_rows_are_unresolved_batch_continues():
     assert len(m.instruments()) == 1 and len(m.unresolved("listing")) == 4
 
 
-def test_us_instruments_untouched():
-    m = MemoryInstrumentMaster()
+def test_us_instruments_untouched(master):
+    m = master
     us = Instrument("us:eq:SEQ0001", Market.US, AssetClass.EQUITY, "USD", name="Acme", exchange="XNAS")
     from openbars.core.models import SymbolMapping
 
     m.upsert([us], [SymbolMapping("us:eq:SEQ0001", "TESTUSDT", D(2020, 1, 1), None, "alpaca")])
     ingest_crypto_pairs(m, [binance(), coinbase()], as_of=ASOF)
-    assert m.get("us:eq:SEQ0001") == us
+    got = m.get("us:eq:SEQ0001")
+    assert got is not None
+    assert (got.instrument_id, got.market, got.asset_class, got.currency, got.name, got.exchange) == (
+        us.instrument_id, us.market, us.asset_class, us.currency, us.name, us.exchange)
     assert m.resolve("TESTUSDT", on=ASOF, provider="alpaca", market=Market.US) == "us:eq:SEQ0001"
     assert m.resolve("TESTUSDT", on=ASOF, provider="binance", market=Market.CRYPTO) == "crypto:spot:binance:TEST-USDT"
 
 
-def test_parquet_master_roundtrip(tmp_path):
-    store = open_backend(tmp_path / "data").instruments
+def test_master_roundtrip(master):
+    store = master
     s = ingest_crypto_pairs(store, [binance(listed_on=D(2023, 1, 1)), coinbase(), binance(quote="USDC")], as_of=ASOF)
     assert s.created == 3
     assert ingest_crypto_pairs(store, [binance(listed_on=D(2023, 1, 1)), coinbase()], as_of=ASOF).created == 0

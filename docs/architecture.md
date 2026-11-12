@@ -132,6 +132,7 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - 同一交易所、同一 base、不同 quote（`TEST-USDT` vs `TEST-USDC`）也是两个 instrument。
 - **映射只写 provider 专属 symbol**（`binance` + `TESTUSDT`、`coinbase` + `TEST-USDT`），不写通用 `"*"` 的 `BASE-QUOTE`：两个交易所共用这种显示形式，`"*"` 会造成歧义甚至把它们并成一个。`resolve("TESTUSDT", provider="binance", market=CRYPTO)` 因此只会命中 Binance 的交易对。
 - **入库**（`ingest_crypto_pairs(master, listings, as_of=…)`，输入 `CryptoPairListing`）：按确定性 id 查找，已存在则复用（名称更新、`listed_on` 取较早者），并确认/开启该 `(provider, symbol)` 的映射；退市（`active=False` 或带 `delisted_on`）写 `delisted_on` 并关闭该 provider symbol 的开放窗口（`valid_to` 含当日）；已退市的交易对被再次报为活跃时复用同一 id，在已关闭窗口之后开新窗口。非法 venue/base/quote、同一批内 `(provider, symbol)` 被不同交易对认领、或该 symbol 已在另一交易对上开放，均进 `unresolved`（计数并写入队列，不抛异常、不合并）。同一 master 里的美股 instrument 不受影响。
+- **测试覆盖**：入库 / resolve / 退市关窗 / 幂等重入库等用例对内存、Parquet、Postgres native 三种 master 参数化运行；Postgres 部分标记 `postgres_live`，需设置 `OPENBARS_TEST_PG_DSN`（每个用例使用临时 schema），默认测试套件会跳过。
 - 不改编排器（本版未接入）；不改 instruments 表 schema / `SCHEMA_VERSION`，也不新增列。
 
 ### 3.3 Bar
