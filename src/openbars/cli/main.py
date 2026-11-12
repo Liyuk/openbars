@@ -416,24 +416,31 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
     root = data_dir(settings, args.data)
     db = root / "state.db"
     if settings.storage_backend == "postgres":
-        state = _job_state(_open_backend(settings, root, write=False), db)
+        backend = _open_backend(settings, root, write=False)
+        state = _job_state(backend, db)
     elif not db.exists():
+        state = None
         out.line(f"no state database at {db} (nothing planned yet)")
         out.line("configured providers: " + (", ".join(sorted(settings.providers)) or "(none)"))
-        return EXIT_OK
     else:
         state = SqliteStateStore(db)
-    from openbars.core.models import DateRange
 
-    backend = _open_backend(settings, root, write=False)
     out.line("raw coverage (observed bar dates; not a completeness guarantee):")
-    for provider in sorted(settings.providers):
-        for market in sorted(settings.selection.markets, key=lambda item: item.value):
-            for interval in sorted(settings.selection.intervals, key=lambda item: item.value):
-                bars = backend.raw.scan(provider, market, interval, DateRange(date.min, date.max))
-                days = [bar.session_date or bar.ts_start.date() for bar in bars]
-                coverage = f"{min(days)}..{max(days)} ({len(days)} bars)" if days else "none"
-                out.line(f"  {provider} {market.value}/{interval.value}: {coverage}")
+    if settings.storage_backend == "postgres":
+        out.line("  coverage summary not available for this backend")
+    else:
+        from types import SimpleNamespace
+        from openbars.storage.parquet_duckdb import ParquetRawStore, check_parquet_versions
+
+        raw = ParquetRawStore(SimpleNamespace(root=root, check_versions=check_parquet_versions))
+        for provider in sorted(settings.providers):
+            for market in sorted(settings.selection.markets, key=lambda item: item.value):
+                for interval in sorted(settings.selection.intervals, key=lambda item: item.value):
+                    first, last, sessions, rows = raw.coverage_summary(provider, market, interval)
+                    coverage = f"{first}..{last} ({rows} bars, {sessions} sessions)" if rows else "none"
+                    out.line(f"  {provider} {market.value}/{interval.value}: {coverage}")
+    if state is None:
+        return EXIT_OK
     counts = state.count_jobs()
     total = sum(counts.values())
     out.line(f"jobs: {total} total")

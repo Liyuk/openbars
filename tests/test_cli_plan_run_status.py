@@ -455,6 +455,7 @@ def test_hourly_cli_reports_raw_coverage_and_resume(tmp_path, capsys):
     assert "raw coverage" in out and "us/1h" in out and "2026-03-09" in out
     assert len(provider.requests) == 1
     assert any("interval=1h" in str(path) for path in (tmp_path / "data").rglob("*.parquet"))
+    assert not list((tmp_path / "data" / "canonical").rglob("*.parquet"))
 
 
 def test_mixed_intervals_plan_and_status(tmp_path, capsys):
@@ -486,3 +487,56 @@ def test_mixed_intervals_plan_and_status(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "1d: 2026-03-09" in out and "1h: 2026-03-09" in out
     assert "twelve_data:" in out and SECRET not in out
+
+
+def test_status_summarizes_large_raw_store_without_state_or_scan(tmp_path, capsys, monkeypatch):
+    import duckdb
+    from openbars.storage.parquet_duckdb import ParquetRawStore
+
+    assert cli(["run", "--max-jobs", "1"], tmp_path) == 0
+    capsys.readouterr()
+    part = next((tmp_path / "data" / "raw").rglob("*.parquet"))
+    synthetic = part.with_name("part-9999999999999999999-synthetic.parquet")
+    con = duckdb.connect()
+    con.execute("COPY (SELECT * REPLACE (symbol_as_returned || i::VARCHAR AS symbol_as_returned) FROM read_parquet(?) CROSS JOIN range(20000) t(i)) TO ? (FORMAT PARQUET)", [str(part), str(synthetic)])
+    con.close()
+    (tmp_path / "data" / "state.db").unlink()
+    monkeypatch.setattr(ParquetRawStore, "scan", lambda *a, **k: pytest.fail("full scan called"))
+    assert cli(["status"], tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "no state database" in out
+    assert "massive us/1d: 2026-03-09" in out
+    assert "40002 bars" in out
+    assert "1 sessions" in out
+
+
+def test_hourly_pagination_resumes_saved_cursor(tmp_path, clock):
+    from dataclasses import replace
+    from datetime import date
+    from test_orchestrator import Env
+    from openbars.core.models import DateRange, Market
+    from openbars.orchestrator.jobs import Job, JobKind, make_job_id
+
+    def interrupt(req, number):
+        if number == 2:
+            raise ProviderError("timeout", "interrupted", retryable=True)
+
+    class Hourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1)
+
+    provider = Hourly(page_size=1, behavior=interrupt, interval=Interval.H1)
+    env = Env(tmp_path, clock, [provider])
+    window = DateRange(date(2026, 3, 3), date(2026, 3, 5))
+    symbols = ("TEST1",)
+    job = Job(make_job_id(JobKind.BACKFILL, "fake", Market.US, Interval.H1, symbols, window),
+              JobKind.BACKFILL, "fake", Market.US, Interval.H1, symbols, window)
+    env.orch.submit([job])
+    env.orch.run()
+    assert env.state(job).state is JobState.FAILED
+    assert env.store.load_checkpoint(job.job_id).cursor == "1"
+    clock.advance(seconds=5)
+    env.orch.run()
+    assert env.state(job).state is JobState.DONE
+    assert [request.cursor for request in provider.requests] == [None, "1", "1", "2"]
+    assert len(env.raw.rows) == 3
