@@ -26,3 +26,10 @@ repos:
         entry: data files must not be committed
         language: fail
         files: '\.(parquet|duckdb|sqlite3?|feather|arrow|csv\.gz)$'
+      - id: local-check
+        name: openbars local checks (pytest, sanitization, gitleaks)
+        entry: bash scripts/check.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -371,7 +371,7 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 
 - `tests/golden/research_daily_v2/`：合成代码（如 `ZZZA`）、合成价格的输入 → 期望的规范层行（含 `selection_reason`、`quality_status`、`capabilities`、`source_fingerprint`）。覆盖：仅主源；主次一致；主次分歧（`divergent`）；佐证 quorum 判定次源出错；兼容缺口填充；yfinance / twelve_data 兜底的能力差异；`volume_missing`；R4 覆盖（替换 / 标记）；非交易日拒收；代码复用的别名有效期；拆股后 `adjustment_as_of` 混用。
 - 金标准由维护者在私有环境用 upstream 纯函数对同一合成输入生成后冻结；openbars 测试要求逐字段一致，`source_fingerprint` 一致。
-- `tests/compat/upstream_schema.sql`：仅包含相关表的 DDL（无数据、无私有命名），CI 用 Postgres service 建表后跑 `upstream_compat` 适配器的读写与 introspection 测试。
+- `tests/compat/upstream_schema.sql`：仅包含相关表的 DDL（无数据、无私有命名），测试时用 Postgres 建表后跑 `upstream_compat` 适配器的读写与 introspection 测试。
 - 禁止使用真实行情数据或 provider 抓包作为夹具（见 `docs/sanitization.md`）。
 
 ## 12. 代码结构

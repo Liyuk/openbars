@@ -6,8 +6,8 @@ openbars 的数据层代码来自一套**上游内部实现**（下称 upstream�
 
 | 护栏 | 位置 | 何时运行 | 检查什么 |
 | --- | --- | --- | --- |
-| gitleaks | `.gitleaks.toml` | pre-commit、CI（全历史 + 工作区） | 默认规则 + 行情源凭据（Alpaca、Massive/Polygon、Twelve Data、Alpha Vantage、Tushare、Binance/OKX 等）、URL 中的 `apikey=` |
-| 禁词检查 | `scripts/check_sanitized.py` | pre-commit、CI（工作区 + 全历史）、手动 `--stdin` | 本机 home 路径、私有目录、内网/overlay 网络地址与域名、个人邮箱、疑似凭据赋值、私有词（哈希） |
+| gitleaks | `.gitleaks.toml` | pre-commit、本地 `scripts/check.sh`（全历史 + 工作区） | 默认规则 + 行情源凭据（Alpaca、Massive/Polygon、Twelve Data、Alpha Vantage、Tushare、Binance/OKX 等）、URL 中的 `apikey=` |
+| 禁词检查 | `scripts/check_sanitized.py` | pre-commit、本地 `scripts/check.sh`（工作区 + 全历史）、手动 `--stdin` | 本机 home 路径、私有目录、内网/overlay 网络地址与域名、个人邮箱、疑似凭据赋值、私有词（哈希） |
 | 数据文件拦截 | `.pre-commit-config.yaml` | pre-commit | 拒绝提交 parquet / duckdb / sqlite 等数据文件 |
 | `.gitignore` | 仓库根 | 始终 | `.env*`、`config.yaml`、`data/` 不入库 |
 
@@ -38,10 +38,12 @@ echo "新词" | python3 scripts/check_sanitized.py --hash-term >> scripts/saniti
 
 ## 3. 日常流程
 
-1. 安装钩子：`pipx install pre-commit && pre-commit install`（本机需有 Go 以构建 gitleaks 钩子，或自行安装 gitleaks 后改用 `language: system`）。
+日常一键检查在仓库根目录执行 `./scripts/check.sh`：依次跑 `uv run pytest`、`uv run python scripts/check_sanitized.py`（工作区 + `--history` 全历史）和 gitleaks（全历史 + 工作区，用 `.gitleaks.toml`）。本机有 `gitleaks` 就直接用，否则用 Docker 镜像 `zricethezav/gitleaks:v8.30.1`。仓库仍保留 `.github/workflows/ci.yml`，但触发器只有 `workflow_dispatch`，不会在 push / PR 时自动跑，以免消耗付费 GitHub Actions 分钟数。日常不要依赖 Actions。
+
+1. 安装钩子（可选）：`pipx install pre-commit && pre-commit install && pre-commit install --hook-types pre-push`（本机需有 Go 以构建 gitleaks 钩子，或自行安装 gitleaks 后改用 `language: system`）。pre-push 钩子会调用 `scripts/check.sh`。
 2. 搬运 upstream 代码时，先在私有笔记中登记来源，再按 §2 逐条处理，PR 描述只写功能来源（“沿用上游内部实现的 X 逻辑”）。
 3. 发 issue / PR / Discussion 正文前：`pbpaste | python3 scripts/check_sanitized.py --stdin`。
-4. CI 中 `sanitization` 与 `gitleaks` 两个 job 必须通过才能合并。
+4. 合并前必须本地跑通 `./scripts/check.sh`。GitHub Actions 仅可手动触发，日常不使用。
 
 ## 4. 转公开前检查清单
 
@@ -52,5 +54,5 @@ echo "新词" | python3 scripts/check_sanitized.py --hash-term >> scripts/saniti
 - [ ] **编辑历史**：GitHub 会保留 issue / PR / Discussion 正文与评论的历史版本，有读权限的人都能看到。脱敏前写过内部信息的条目，需在网页“edited”下拉中逐条删除旧版本（或关闭后新建干净的条目）。
 - [ ] 仓库中无数据文件、无真实 provider 响应；测试夹具均为合成数据。
 - [ ] README 中的 provider 条款说明完整：openbars 不分发数据，用户自带 key，遵守各源条款。
-- [ ] GitHub 仓库设置：开启 secret scanning 与 push protection；Actions 中不存在需要的 secret。
+- [ ] GitHub 仓库设置：开启 secret scanning 与 push protection；如手动触发 Actions，其中不配置任何 secret。
 - [ ] 维护者复核 `scripts/sanitize_hashes.txt` 覆盖了当前全部私有词。

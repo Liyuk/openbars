@@ -1,9 +1,10 @@
+# Manual only. Do not add push, pull_request, or schedule triggers:
+# automatic runs would consume paid GitHub Actions minutes.
+# Daily checks: scripts/check.sh
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
