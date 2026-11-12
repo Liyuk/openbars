@@ -17,10 +17,30 @@ reference, prices to ``0.01`` yuan, **ROUND_HALF_UP**, never banker's rounding):
     main        ±10%
     ChiNext     ±20% from 2020-08-24 (inclusive), ±10% before
     STAR        ±20% from the board launch 2019-07-22
-    ST          ±5% (``is_st``; the issue's "ST usually ±5%"). Simplification: one flat ratio
-                (``st_ratio``, default 5%); rules that later changed per board (e.g. ChiNext /
-                STAR ST names at ±20%, or the main-board risk-warning list moving to ±10% in
-                2025) are not modelled by date, so pass ``is_st`` only where ±5% applies.
+    ST / *ST    by board and date, see "ST (risk-warning) stocks" below
+
+ST (risk-warning) stocks -- ``is_st``, BaoStock ``isST=1``. Rules as of 2026-11, by board and date;
+the IPO no-limit windows below still come first (``limit_ratio`` returns ``None``)::
+
+    main board  until 2026-07-05 (inclusive)   ±5%   (the earlier 交易规则)
+                from  2026-07-06 (inclusive)   ±10%  same as the board
+    ChiNext     before 2020-08-24              ±5%
+                from  2020-08-24 (inclusive)   ±20%  same as the board
+    STAR        always                         ±20%  (the board did not exist before 2019-07-22)
+    Beijing     out of scope
+
+Official sources (also next to the constants):
+
+* Main board: 《上海证券交易所交易规则（2026年修订）》上证发〔2026〕41号, in force 2026-07-06;
+  SSE announcement https://www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20260424_10816474.shtml
+  (主板风险警示股票价格涨跌幅限制比例由5%调整为10%). The Shenzhen Stock Exchange issued a
+  matching 2026 revision of its 交易规则.
+* ChiNext: 《深圳证券交易所创业板交易特别规定》深证上〔2020〕515号 第2.1条, in force 2020-08-24;
+  SZSE notice of 2020-07-10: once the Special Provisions take effect, the daily price limit of
+  创业板风险警示股票 is 20%. Before that date ChiNext risk-warning stocks were ±5%.
+* STAR: 《上海证券交易所科创板股票交易特别规定》第十八条 (竞价涨跌幅比例为20%); SSE Q&A of
+  2024-04-12 on introducing ST: a STAR company put under ST does not move to the risk-warning
+  board and its price limit stays 20%.
 
 IPO / new listings follow the rule *in force at listing* (``listed_on``); "sessions" are XSHG
 trading days (``openbars.calendars.cn``), the listing day being session 1:
@@ -67,6 +87,7 @@ __all__ = [
     "CnBoard",
     "IPO_UNLIMITED_SESSIONS",
     "MAIN_REGISTRATION_DATE",
+    "MAIN_ST_REFORM_DATE",
     "STAR_LAUNCH_DATE",
     "board_of_code",
     "board_of_symbol",
@@ -82,10 +103,16 @@ __all__ = [
 ]
 
 STAR_LAUNCH_DATE = date(2019, 7, 22)
+# ChiNext: 《深圳证券交易所创业板交易特别规定》深证上〔2020〕515号 第2.1条 took effect 2020-08-24;
+# SZSE notice 2020-07-10: 创业板风险警示股票涨跌幅限制比例 becomes 20% (±5% before).
 CHINEXT_REFORM_DATE = date(2020, 8, 24)
 MAIN_REGISTRATION_DATE = date(2023, 4, 10)
 IPO_UNLIMITED_SESSIONS = 5  # no-limit sessions after listing under registration-system rules
-ST_RATIO = Decimal("0.05")
+# ST price-limit rules, see the module docstring for the official sources.
+# Main board: 上证发〔2026〕41号 《上海证券交易所交易规则（2026年修订）》, in force 2026-07-06:
+# 主板风险警示股票涨跌幅 5% -> 10% (SSE announcement c_20260424_10816474; SZSE revised alike).
+MAIN_ST_REFORM_DATE = date(2026, 7, 6)
+ST_RATIO = Decimal("0.05")  # main board until 2026-07-05, ChiNext before 2020-08-24
 _TICK = Decimal("0.01")
 _IPO_LOOKAHEAD_DAYS = 30  # five sessions never span more calendar days (Spring Festival included)
 
@@ -171,13 +198,18 @@ def limit_ratio(
     is_st: bool = False,
     listed_on: date | None = None,
     sessions: Sequence[date] | None = None,
-    st_ratio: Decimal = ST_RATIO,
+    st_ratio: Decimal | None = None,
 ) -> Decimal | None:
     """Daily limit ratio (``Decimal("0.1")`` = ±10%) or ``None`` when no limit applies.
 
     ``None``: inside the IPO no-limit window, or a STAR session before the board launch. See the
     module docstring for the rules; ``sessions`` / the calendar only matter within ~30 days of
     ``listed_on``.
+
+    ``is_st`` follows the dated, per-board ST rules (ChiNext ±5% before 2020-08-24 then ±20%;
+    STAR always ±20%; main board ±5% until 2026-07-05 then ±10%). ``st_ratio`` is a **test-only
+    override**: when given it replaces the ratio of an ST stock whatever the board and date;
+    production callers leave it ``None``.
     """
     board = CnBoard(board)
     if board is CnBoard.STAR and session_date < STAR_LAUNCH_DATE:
@@ -185,7 +217,13 @@ def limit_ratio(
     if _ipo_unlimited(board, listed_on, session_date, sessions):
         return None
     if is_st:
-        return st_ratio
+        if st_ratio is not None:
+            return st_ratio
+        if board is CnBoard.STAR:
+            return Decimal("0.2")  # STAR ST names stay at 20%
+        if board is CnBoard.CHINEXT:
+            return Decimal("0.2") if session_date >= CHINEXT_REFORM_DATE else ST_RATIO
+        return Decimal("0.1") if session_date >= MAIN_ST_REFORM_DATE else ST_RATIO
     if board is CnBoard.MAIN:
         return Decimal("0.1")
     if board is CnBoard.CHINEXT:
