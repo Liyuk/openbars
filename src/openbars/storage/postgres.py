@@ -17,9 +17,11 @@ Two schema modes (docs/architecture.md section 11.3):
     (``.problems``: missing table / missing column / type mismatch) is raised on any
     difference. Reads map upstream rows onto the openbars row types (see ``_compat_*``
     for the documented placeholders - upstream has no ``ts_start`` / ``fetch_id`` /
-    ``price_source``). Writes are not implemented in this mode yet (shadow runs are
-    read-only; see 11.4), so ``write=True`` is rejected. Jobs, checkpoints and
-    fetch_log live in a local SQLite ``state_path`` because upstream owns no such tables.
+    ``price_source``). Writes are enabled only when ``write=True``: they map openbars
+    rows onto the existing upstream tables (no DDL), allocate integer instrument ids,
+    bump research-series watermarks, and take the published per-session advisory lock.
+    ``write=False`` stays read-only. Jobs, checkpoints and fetch_log live in a local
+    SQLite ``state_path`` because upstream owns no such tables.
 
 Connections are short-lived and opened by ``connect`` (default: ``psycopg`` from the
 ``postgres`` extra). Read-only backends open read-only transactions. Everything that
@@ -85,6 +87,16 @@ from openbars.storage.schema import (
     state_ddl,
 )
 from openbars.storage.state import SqliteStateStore, SqlStateStore
+from openbars.storage.compat_write import (
+    CompatIdentity,
+    advisory_lock_key,
+    capabilities_json,
+    fingerprint_or_raise,
+    parse_int_id,
+    parse_optional_int_ref,
+    quality_status_of,
+    security_type_for,
+)
 
 
 class PgMode(str, Enum):
@@ -482,6 +494,7 @@ class PgRawStore(_Guard):
         ingest_run_id: str | None = None,
         validate: bool = True,
     ) -> int:
+        self.require_write()
         rows = raw_rows_from_batch(batch, source_artifact_ref=source_artifact_ref, ingest_run_id=ingest_run_id)
         return self.append_rows(rows, validate=validate)
 
@@ -877,7 +890,7 @@ class PgStateStore(SqlStateStore, _Guard):
         super().finish_fetch(*args, **kwargs)
 
 
-# --- upstream_compat (read-only mapping) -------------------------------------------------
+# --- upstream_compat (read/write mapping) -------------------------------------------------
 
 _COMPAT_MARKET = Market.US
 _FLAG_BY_STATUS = {"divergent": "divergent", "spike_suspect": "spike_suspect", "volume_missing": "volume_missing"}
@@ -961,14 +974,144 @@ def _int_ids(ids: Sequence[str]) -> list[int]:
     return [int(i) for i in ids if str(i).lstrip("-").isdigit()]
 
 
-class PgCompatRawStore:
-    """Read-only view of upstream ``daily_bar`` (US daily bars)."""
+def _require_us_daily(market: Market | str | None, interval: Interval | str, *, what: str) -> None:
+    if Interval(interval) is not Interval.D1 or (market is not None and Market(market) is not _COMPAT_MARKET):
+        raise StorageError(f"upstream_compat {what} only supports US daily bars")
 
-    def __init__(self, session: _Session) -> None:
+
+def _require_volume(volume: Any, *, what: str) -> Any:
+    if volume is None:
+        raise StorageError(f"upstream_compat {what} requires a non-null volume")
+    return volume
+
+
+def _lookup_source_bar_id(
+    conn: Any,
+    instrument_id: int,
+    session_date: date,
+    provider: str,
+    feed: str,
+    adjustment: str,
+    revision: int,
+) -> int | None:
+    rows = conn.execute(
+        "SELECT id FROM daily_bar WHERE instrument_id = ? AND session_date = ? "
+        "AND provider = ? AND feed = ? AND adjustment = ? AND revision = ?",
+        [instrument_id, session_date, provider, feed, adjustment, revision],
+    ).fetchall()
+    if len(rows) == 1:
+        return int(rows[0]["id"])
+    return None
+
+
+def _bump_watermarks(conn: Any, policy_version: str, session_dates: set[date]) -> None:
+    if not session_dates:
+        return
+    conn.execute(
+        "INSERT INTO research_series_watermark (policy_version, version, updated_at) "
+        "VALUES (?, 1, now()) "
+        "ON CONFLICT (policy_version) DO UPDATE SET "
+        "version = research_series_watermark.version + 1, updated_at = now()",
+        [policy_version],
+    )
+    for session_date in sorted(session_dates):
+        conn.execute(
+            "INSERT INTO research_series_date_watermark (policy_version, session_date, version, updated_at) "
+            "VALUES (?, ?, 1, now()) "
+            "ON CONFLICT (policy_version, session_date) DO UPDATE SET "
+            "version = research_series_date_watermark.version + 1, updated_at = now()",
+            [policy_version, session_date],
+        )
+
+
+_DAILY_BAR_UPSERT = (
+    "INSERT INTO daily_bar ("
+    "instrument_id, session_date, provider, feed, adjustment, "
+    "price_basis, adjustment_scope, adjustment_as_of, session_semantics, "
+    "currency, volume_basis, revision, "
+    "open, high, low, close, volume, vwap, source_artifact_id, ingest_run_id"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT (instrument_id, session_date, provider, feed, adjustment, revision) DO UPDATE SET "
+    "price_basis = EXCLUDED.price_basis, adjustment_scope = EXCLUDED.adjustment_scope, "
+    "adjustment_as_of = EXCLUDED.adjustment_as_of, session_semantics = EXCLUDED.session_semantics, "
+    "currency = EXCLUDED.currency, volume_basis = EXCLUDED.volume_basis, "
+    "open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close, "
+    "volume = EXCLUDED.volume, vwap = EXCLUDED.vwap, "
+    "source_artifact_id = EXCLUDED.source_artifact_id, ingest_run_id = EXCLUDED.ingest_run_id "
+    "RETURNING id"
+)
+
+_RESEARCH_BAR_UPSERT = (
+    "INSERT INTO research_daily_bar ("
+    "instrument_id, session_date, policy_version, selected_source_bar_id, "
+    "provider, feed, adjustment, revision, "
+    "open, high, low, close, volume, selection_reason, quality_status, "
+    "capabilities, source_fingerprint, generated_at"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+    "ON CONFLICT (instrument_id, session_date, policy_version) DO UPDATE SET "
+    "selected_source_bar_id = EXCLUDED.selected_source_bar_id, "
+    "provider = EXCLUDED.provider, feed = EXCLUDED.feed, adjustment = EXCLUDED.adjustment, "
+    "revision = EXCLUDED.revision, open = EXCLUDED.open, high = EXCLUDED.high, "
+    "low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume, "
+    "selection_reason = EXCLUDED.selection_reason, quality_status = EXCLUDED.quality_status, "
+    "capabilities = EXCLUDED.capabilities, source_fingerprint = EXCLUDED.source_fingerprint, "
+    "generated_at = EXCLUDED.generated_at "
+    "RETURNING id"
+)
+
+
+class PgCompatRawStore(_Guard):
+    """View of upstream ``daily_bar`` (US daily bars). Writes require ``write=True``."""
+
+    def __init__(self, session: _Session, write: bool, identity: CompatIdentity) -> None:
+        super().__init__(write)
         self._session = session
+        self._identity = identity
 
-    def append(self, *a: Any, **k: Any) -> int:
-        raise ReadOnlyError("upstream_compat does not support writes yet")
+    def append(
+        self,
+        batch: RawBatch,
+        *,
+        source_artifact_ref: str | None = None,
+        ingest_run_id: str | None = None,
+        validate: bool = True,
+    ) -> int:
+        self.require_write()
+        rows = raw_rows_from_batch(batch, source_artifact_ref=source_artifact_ref, ingest_run_id=ingest_run_id)
+        return self.append_rows(rows, validate=validate)
+
+    def append_rows(self, rows: Sequence[RawBarRow], *, validate: bool = True) -> int:
+        self.require_write()
+        if validate:
+            check_rows(rows, "raw")
+        if not rows:
+            return 0
+        with self._session() as conn:
+            written = 0
+            for row in rows:
+                _require_us_daily(row.market, row.interval, what="raw append")
+                _require_volume(row.volume, what="raw append")
+                iid = self._identity.resolve(
+                    conn,
+                    row.instrument_id,
+                    symbol=row.symbol_as_returned,
+                    on=row.session_date,
+                    exchange="UNKNOWN",
+                )
+                artifact_id = parse_optional_int_ref(row.source_artifact_ref)
+                run_id = parse_optional_int_ref(row.ingest_run_id)
+                conn.execute(
+                    _DAILY_BAR_UPSERT,
+                    [
+                        iid, row.session_date, row.provider, row.feed, row.adjustment,
+                        row.price_basis, row.adjustment_scope, row.adjustment_as_of,
+                        row.session_semantics, row.currency, row.volume_basis, row.revision,
+                        row.open, row.high, row.low, row.close, row.volume, row.vwap,
+                        artifact_id, run_id,
+                    ],
+                )
+                written += 1
+            return written
 
     def scan_rows(self, provider: str | None, market: Market, interval: Interval, window: DateRange, *,
                   instrument_ids: Sequence[str] | None = None, **_: Any) -> list[RawBarRow]:
@@ -997,16 +1140,76 @@ class PgCompatRawStore:
             yield row.to_raw_bar()
 
 
-class PgCompatCanonicalStore:
-    """Read-only view of upstream ``research_daily_bar``."""
+class PgCompatCanonicalStore(_Guard):
+    """View of upstream ``research_daily_bar``. Writes require ``write=True``."""
 
-    def __init__(self, session: _Session) -> None:
+    def __init__(self, session: _Session, write: bool, identity: CompatIdentity) -> None:
+        super().__init__(write)
         self._session = session
+        self._identity = identity
 
-    def upsert(self, *a: Any, **k: Any) -> int:
-        raise ReadOnlyError("upstream_compat does not support writes yet")
+    def upsert(
+        self,
+        bars: Sequence[CanonicalBar],
+        *,
+        policy_version: str = DEFAULT_POLICY_VERSION,
+        selection_reason: str = "unspecified",
+        capabilities: Sequence[str] = (),
+        market: Market | None = None,
+    ) -> int:
+        now = datetime.now(UTC)
+        rows = [
+            CanonicalBarRow.from_canonical(
+                cb,
+                market=market or _COMPAT_MARKET,
+                policy_version=policy_version,
+                selection_reason=selection_reason,
+                capabilities=capabilities,
+                generated_at=now,
+            )
+            for cb in bars
+        ]
+        return self.upsert_rows(rows)
 
-    upsert_rows = upsert
+    def upsert_rows(self, rows: Sequence[CanonicalBarRow]) -> int:
+        self.require_write()
+        check_rows(rows, "canonical")
+        if not rows:
+            return 0
+        grouped: dict[tuple[str, date], list[CanonicalBarRow]] = {}
+        for row in rows:
+            _require_us_daily(row.market, row.interval, what="canonical upsert")
+            _require_volume(row.volume, what="canonical upsert")
+            fingerprint_or_raise(row)
+            grouped.setdefault((row.policy_version, row.session_date), []).append(row)
+        written = 0
+        with self._session() as conn:
+            for policy_version, session_date in sorted(grouped):
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    [advisory_lock_key(policy_version, session_date)],
+                )
+                for row in grouped[(policy_version, session_date)]:
+                    symbol = row.instrument_id if parse_int_id(row.instrument_id) is None else None
+                    iid = self._identity.resolve(
+                        conn, row.instrument_id, symbol=symbol, on=row.session_date,
+                    )
+                    source_id = _lookup_source_bar_id(
+                        conn, iid, row.session_date, row.provider, row.feed, row.adjustment, row.revision,
+                    )
+                    conn.execute(
+                        _RESEARCH_BAR_UPSERT,
+                        [
+                            iid, row.session_date, row.policy_version, source_id,
+                            row.provider, row.feed, row.adjustment, row.revision,
+                            row.open, row.high, row.low, row.close, row.volume,
+                            row.selection_reason, quality_status_of(row),
+                            capabilities_json(row), fingerprint_or_raise(row), row.generated_at,
+                        ],
+                    )
+                    written += 1
+                _bump_watermarks(conn, policy_version, {session_date})
+        return written
 
     def scan_rows(self, instrument_ids: Sequence[str] | None, interval: Interval, window: DateRange, *,
                   market: Market | None = None, policy_version: str | None = DEFAULT_POLICY_VERSION) -> list[CanonicalBarRow]:
@@ -1030,14 +1233,58 @@ class PgCompatCanonicalStore:
             yield row.to_canonical_bar()
 
 
-class PgCompatInstrumentMaster:
+class PgCompatInstrumentMaster(_Guard):
     """Point-in-time symbol lookup over upstream ``symbol_alias`` (US only, provider-agnostic)."""
 
-    def __init__(self, session: _Session) -> None:
+    def __init__(self, session: _Session, write: bool, identity: CompatIdentity) -> None:
+        super().__init__(write)
         self._session = session
+        self._identity = identity
 
-    def upsert(self, *a: Any, **k: Any) -> None:
-        raise ReadOnlyError("upstream_compat does not support writes yet")
+    def upsert(self, instruments: Iterable[Instrument], mappings: Iterable[SymbolMapping]) -> None:
+        self.require_write()
+        inst_list = list(instruments)
+        map_list = list(mappings)
+        inst_by_id = {i.instrument_id: i for i in inst_list}
+        with self._session() as conn:
+            for inst in inst_list:
+                on = inst.listed_on or date(1970, 1, 1)
+                maps = [m for m in map_list if m.instrument_id == inst.instrument_id]
+                symbol = maps[0].symbol if maps else (
+                    None if parse_int_id(inst.instrument_id) is not None else inst.instrument_id
+                )
+                if symbol is None and inst.listed_on is None and not maps:
+                    on = date(1970, 1, 1)
+                self._identity.resolve(
+                    conn,
+                    inst.instrument_id,
+                    symbol=symbol,
+                    on=on,
+                    asset_class=AssetClass(inst.asset_class).value,
+                    security_type=security_type_for(inst.asset_class),
+                    exchange=inst.exchange or "UNKNOWN",
+                )
+            for mapping in map_list:
+                inst = inst_by_id.get(mapping.instrument_id)
+                exchange = (inst.exchange if inst is not None else None) or "UNKNOWN"
+                asset_class = AssetClass(inst.asset_class).value if inst is not None else "equity"
+                security = security_type_for(inst.asset_class) if inst is not None else "common_stock"
+                iid = self._identity.resolve(
+                    conn,
+                    mapping.instrument_id,
+                    symbol=mapping.symbol,
+                    on=mapping.valid_from,
+                    asset_class=asset_class,
+                    security_type=security,
+                    exchange=exchange,
+                )
+                if mapping.valid_to is not None:
+                    conn.execute(
+                        "UPDATE symbol_alias SET valid_to = ? "
+                        "WHERE instrument_id = ? AND symbol = ? AND valid_from = ? "
+                        "AND (valid_to IS NULL OR valid_to = ?)",
+                        [mapping.valid_to, iid, mapping.symbol, mapping.valid_from, mapping.valid_to],
+                    )
 
     def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
         if Market(market) is not _COMPAT_MARKET:
@@ -1050,7 +1297,6 @@ class PgCompatInstrumentMaster:
             ).fetchall()
         ids = {str(r["instrument_id"]) for r in records}
         return next(iter(ids)) if len(ids) == 1 else None
-
 
 # --- backend -----------------------------------------------------------------------------
 
@@ -1082,18 +1328,14 @@ class PostgresBackend:
         self._session = _Session(connect)
         self.schema_version = SCHEMA_VERSION
         if self.mode is PgMode.UPSTREAM_COMPAT:
-            if write:
-                raise StorageError(
-                    "upstream_compat is read-only for now: writes arrive with the shadow-run switch-over "
-                    "(architecture.md 11.4); open with write=False"
-                )
             if state_path is None:
                 raise StorageError("upstream_compat needs state_path for the local SQLite state store")
             with self._session() as conn:
                 check_upstream_compat(introspect_catalog(conn))  # never runs DDL
-            self.raw = PgCompatRawStore(self._session)
-            self.canonical = PgCompatCanonicalStore(self._session)
-            self.instruments = PgCompatInstrumentMaster(self._session)
+            identity = CompatIdentity()
+            self.raw = PgCompatRawStore(self._session, write, identity)
+            self.canonical = PgCompatCanonicalStore(self._session, write, identity)
+            self.instruments = PgCompatInstrumentMaster(self._session, write, identity)
             self.state = SqliteStateStore(state_path)
         else:
             if write:

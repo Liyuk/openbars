@@ -1,6 +1,6 @@
 [project]
 name = "openbars"
-version = "0.0.1"
+version = "0.1.0"
 description = "Free, multi-market, multi-source OHLCV bar collection, cleaning and reconciliation into one canonical dataset."
 readme = "README.md"
 license = "Apache-2.0"

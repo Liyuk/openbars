@@ -174,12 +174,29 @@ def test_compat_backend_raises_structured_error(tmp_path):
     assert exc.value.problems[0].column == "quality_status"
 
 
-def test_compat_rejects_write_and_needs_state_path(tmp_path):
+def test_compat_write_constructs_but_readonly_store_rejects(tmp_path):
     factory = lambda: FakeConn(fake_catalog(UPSTREAM_REQUIRED), [])  # noqa: E731
-    with pytest.raises(StorageError, match="read-only"):
-        PostgresBackend(mode="upstream_compat", write=True, connect=factory, state_path=tmp_path / "s.db")
+    writable = PostgresBackend(
+        mode="upstream_compat", write=True, connect=factory, state_path=tmp_path / "s.db"
+    )
+    assert writable.write is True
+    readonly = PostgresBackend(
+        mode="upstream_compat", write=False, connect=factory, state_path=tmp_path / "r.db"
+    )
+    with pytest.raises(ReadOnlyError):
+        readonly.raw.append_rows([])
+    with pytest.raises(ReadOnlyError):
+        readonly.canonical.upsert_rows([])
+    with pytest.raises(ReadOnlyError):
+        readonly.instruments.upsert([], [])
+
+
+def test_compat_needs_state_path(tmp_path):
+    factory = lambda: FakeConn(fake_catalog(UPSTREAM_REQUIRED), [])  # noqa: E731
     with pytest.raises(StorageError, match="state_path"):
         PostgresBackend(mode="upstream_compat", connect=factory)
+    with pytest.raises(StorageError, match="state_path"):
+        PostgresBackend(mode="upstream_compat", write=True, connect=factory)
 
 
 def test_native_readonly_verifies_but_never_creates():
