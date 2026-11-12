@@ -60,7 +60,7 @@ from openbars.core.models import (
 )
 from openbars.normalize.actions import stale_bar_indexes
 from openbars.normalize.adjust import adjust_rows, requires_derivation, with_flags
-from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
+from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin, select_mappings
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
 from openbars.raw.archive import RawArchive
@@ -655,9 +655,9 @@ class ParquetInstrumentMaster(_ResolveMixin):
         self._load()
         return list(self._instruments.values())
 
-    def mappings(self) -> list[SymbolMapping]:
+    def mappings(self, provider: str | None = None) -> list[SymbolMapping]:
         self._load()
-        return [m for ms in self._by_symbol.values() for m in ms]
+        return select_mappings((m for ms in self._by_symbol.values() for m in ms), provider)
 
     # -- identity layer: mapping removal, unresolved queue, sightings, upstream ids --
 

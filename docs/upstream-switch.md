@@ -108,7 +108,7 @@ observation / event / revision tables (`event_key` =
 ## 中文摘要
 
 `upstream_compat` 在 `write: true` 时写入既有表，永不做迁移；启动时做列级校验。
-字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表，并可通过 `corporate_actions()` 读回最新修订。`storage.postgres.quota: postgres` 时 CLI 与 upstream 共用 `provider_request_gate` / `usage`（默认仍是本地 sqlite）。
+字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表，并可通过 `corporate_actions()` 读回最新修订；无法识别的行动类型会记入本地 unresolved 并告警，不会静默跳过。`mappings(provider=…)` 支持按 provider 筛选（别名本身仍是 `*`）。compat master 已是完整 `InstrumentStore`，unresolved / observe 等放在本地 `identity.db`。`storage.postgres.quota: postgres` 时 CLI 与 upstream 共用 `provider_request_gate` / `usage`（默认仍是本地 sqlite）。
 `openbars plan` / `run` 已支持 `storage.backend: postgres`：DSN 只在运行时解析且不会打印；dry-run `plan` 只读，`plan --submit` 与 `run` 按 `write` 写入。compat 模式下 jobs 仍在本地 SQLite。
 切换前先影子对账，再在临时库验证外部读取 SQL；切到共用表时与 upstream 投影器共用
 `research-daily:{policy}:{date}` 的 advisory lock，并依赖水位表让缓存失效。

@@ -32,6 +32,7 @@ from openbars.storage.compat_write import (
     security_type_for,
     split_fraction,
 )
+from openbars.normalize.instruments import UnresolvedRecord, select_mappings
 from openbars.storage.errors import StorageError
 from openbars.storage.postgres import PostgresBackend
 from openbars.storage.rows import CanonicalBarRow, RawBarRow
@@ -105,6 +106,15 @@ def test_revision_maps_back_to_corporate_actions():
     assert len(actions) == 1
     assert actions[0].instrument_id == "42" and actions[0].kind is CorporateActionKind.SPLIT
     assert actions[0].ratio == Decimal("4") and actions[0].source == "prov_a"
+
+
+def test_select_mappings_keeps_wildcard_and_exact_provider():
+    generic = SymbolMapping("1", "ZZZA", date(2020, 1, 1), provider="*")
+    specific = SymbolMapping("1", "ZZZA", date(2020, 1, 1), provider="prov_a")
+    other = SymbolMapping("2", "ZZZB", date(2020, 1, 1), provider="prov_b")
+    assert select_mappings([generic, specific, other]) == [generic, specific, other]
+    assert select_mappings([generic, specific, other], "prov_a") == [generic, specific]
+    assert select_mappings([generic, specific, other], "prov_b") == [generic, other]
 
 
 def _raw(**kw) -> RawBarRow:
@@ -398,8 +408,96 @@ def test_live_compat_mappings_lists_symbol_aliases(pg_dsn, tmp_path):
         assert maps[0].symbol == "ZZZA"
         assert maps[0].valid_from == date(2020, 1, 1) and maps[0].valid_to is None
         assert maps[0].provider == "*"
-        # used by crypto CLI planning: mappings() must exist even when there are no crypto: ids
+        # aliases are provider-agnostic, so a provider filter still returns them
+        assert backend.instruments.mappings(provider="prov_a") == maps
+        insts = backend.instruments.instruments()
+        assert [i.instrument_id for i in insts] == ["10"]
+        assert insts[0].market is Market.US and insts[0].exchange == "TESTX"
+        assert insts[0].listed_on == date(2020, 1, 1) and insts[0].delisted_on is None
+        assert backend.instruments.get("10") is not None
+        assert backend.instruments.upstream_ids()["10"] == 10
         assert not any(m.instrument_id.startswith("crypto:") for m in maps)
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_compat_instrument_store_side_tables(pg_dsn, tmp_path):
+    import psycopg
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    schema = f"openbars_compat_s_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+            conn.execute("INSERT INTO instrument (id, asset_class, security_type) VALUES (10, 'equity', 'common_stock')")
+            conn.execute(
+                "INSERT INTO symbol_alias (instrument_id, symbol, exchange, valid_from, valid_from_basis, verification_status) "
+                "VALUES (10, 'ZZZA', 'TESTX', '2020-01-01', 'listing', 'verified')"
+            )
+        master = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=True, schema=schema, state_path=tmp_path / "state.db"
+        ).instruments
+        rec = UnresolvedRecord(
+            "corporate_action", "unknown_action_type", "10", "prov_a", date(2024, 1, 2), Market.US, "mystery"
+        )
+        master.record_unresolved([rec])
+        assert master.unresolved_count() == 1
+        assert master.unresolved("corporate_action")[0].detail == "mystery"
+        master.discard_unresolved(master.unresolved())
+        assert master.unresolved_count() == 0
+        master.observe([("10", "ZZZA", "prov_a", date(2024, 2, 1))])
+        master.observe([("10", "ZZZA", "prov_a", date(2024, 3, 1))])
+        assert master.observations() == [("10", "ZZZA", "prov_a", date(2024, 3, 1))]
+        master.set_upstream_id("local-x", 99)
+        assert master.upstream_ids()["10"] == 10 and master.upstream_ids()["local-x"] == 99
+        master.remove_mappings(master.mappings())
+        assert master.mappings() == []
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_unknown_corporate_action_type_is_recorded_and_warned(pg_dsn, tmp_path):
+    import json
+    import warnings
+
+    import psycopg
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    schema = f"openbars_compat_u_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+            ev = conn.execute(
+                "INSERT INTO corporate_action_event (event_key) VALUES ('upstream:mystery:10:2024-07-01') RETURNING id"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO corporate_action_revision ("
+                "event_id, revision, action_type, verification_status, valid_from, known_at, "
+                "ex_date, instrument_ids, observation_ids, details, actor) "
+                "VALUES (%s, 1, 'mystery_event', 'source_reported', %s, now(), %s, %s, %s, %s, 'upstream')",
+                (ev, date(2024, 7, 1), date(2024, 7, 1), json.dumps([10]), json.dumps([]), json.dumps({})),
+            )
+        backend = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=False, schema=schema, state_path=tmp_path / "state.db"
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            actions = backend.instruments.corporate_actions()
+        assert actions == []
+        assert any("mystery_event" in str(w.message) and "unknown corporate action type" in str(w.message) for w in caught)
+        queued = backend.instruments.unresolved("corporate_action")
+        assert len(queued) == 1
+        assert queued[0].reason_code == "unknown_action_type"
+        assert queued[0].detail == "mystery_event"
+        assert queued[0].symbol == "10"
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA "{schema}" CASCADE')

@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -55,7 +57,7 @@ from openbars.core.models import (
     RawBar,
     SymbolMapping,
 )
-from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
+from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin, select_mappings
 from openbars.providers.base import RawBatch
 from openbars.storage.errors import (
     ReadOnlyError,
@@ -88,6 +90,7 @@ from openbars.storage.schema import (
     state_ddl,
 )
 from openbars.storage.state import SqliteStateStore, SqlStateStore
+from openbars.storage.compat_side import CompatSideStore
 from openbars.storage.compat_write import (
     CompatIdentity,
     action_details,
@@ -95,6 +98,7 @@ from openbars.storage.compat_write import (
     action_type_for,
     actions_from_revision,
     advisory_lock_key,
+    kind_from_action_type,
     capabilities_json,
     fingerprint_or_raise,
     parse_int_id,
@@ -746,12 +750,12 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
             records = conn.execute("SELECT * FROM instruments ORDER BY instrument_id").fetchall()
         return [_instrument_from_record(r) for r in records]
 
-    def mappings(self) -> list[SymbolMapping]:
+    def mappings(self, provider: str | None = None) -> list[SymbolMapping]:
         with self._session() as conn:
             records = conn.execute(
                 "SELECT * FROM symbol_mappings ORDER BY symbol, valid_from, instrument_id, provider"
             ).fetchall()
-        return [_mapping_from_record(r) for r in records]
+        return select_mappings((_mapping_from_record(r) for r in records), provider)
 
     def resolve_any(self, item: str, *, on: date, market: Market | None = None) -> str:
         if self.get(item) is not None:
@@ -1299,13 +1303,32 @@ def _same_compat_revision(row: Mapping[str, Any], action_type: str, ex_date: dat
     )
 
 
-class PgCompatInstrumentMaster(_Guard):
-    """Point-in-time symbol lookup over upstream ``symbol_alias`` (US only, provider-agnostic)."""
+_LOG = logging.getLogger("openbars.storage.compat")
 
-    def __init__(self, session: _Session, write: bool, identity: CompatIdentity) -> None:
+
+def _compat_asset_class(value: object) -> AssetClass:
+    token = str(value or "").strip().lower()
+    for item in AssetClass:
+        if item.value == token:
+            return item
+    return AssetClass.EQUITY
+
+
+class PgCompatInstrumentMaster(_Guard):
+    """Point-in-time symbol lookup over upstream ``symbol_alias`` (US only, provider-agnostic).
+
+    Identity extras that upstream does not have (unresolved queue, sightings, explicit
+    upstream-id links) live in a local SQLite file; the constructor never issues DDL
+    against Postgres.
+    """
+
+    def __init__(
+        self, session: _Session, write: bool, identity: CompatIdentity, *, side_path: str | Path
+    ) -> None:
         super().__init__(write)
         self._session = session
         self._identity = identity
+        self._side = CompatSideStore(side_path)
 
     def upsert(self, instruments: Iterable[Instrument], mappings: Iterable[SymbolMapping]) -> None:
         self.require_write()
@@ -1445,14 +1468,19 @@ class PgCompatInstrumentMaster(_Guard):
         ids = {str(r["instrument_id"]) for r in records}
         return next(iter(ids)) if len(ids) == 1 else None
 
-    def mappings(self) -> list[SymbolMapping]:
-        """Every covering ``symbol_alias`` as a provider-agnostic ``SymbolMapping`` (``provider="*"``)."""
+    def mappings(self, provider: str | None = None) -> list[SymbolMapping]:
+        """Every ``symbol_alias`` as a provider-agnostic ``SymbolMapping`` (``provider="*"``).
+
+        ``provider`` keeps rows visible to that name (exact match or ``"*"``). Because
+        upstream aliases have no provider column, all rows are ``"*"`` and remain
+        visible under any filter.
+        """
         with self._session() as conn:
             records = conn.execute(
                 "SELECT instrument_id, symbol, valid_from, valid_to FROM symbol_alias "
                 "ORDER BY symbol, valid_from, instrument_id"
             ).fetchall()
-        return [
+        rows = [
             SymbolMapping(
                 instrument_id=str(r["instrument_id"]),
                 symbol=str(r["symbol"]),
@@ -1462,9 +1490,110 @@ class PgCompatInstrumentMaster(_Guard):
             )
             for r in records
         ]
+        return select_mappings(rows, provider)
+
+    def get(self, instrument_id: str) -> Instrument | None:
+        numeric = parse_int_id(instrument_id)
+        if numeric is None:
+            return None
+        with self._session() as conn:
+            r = conn.execute("SELECT * FROM instrument WHERE id = ?", [numeric]).fetchone()
+        if r is None:
+            return None
+        listed, delisted, exchange = self._listing_bounds().get(str(numeric), (None, None, None))
+        return self._instrument_from_row(r, listed_on=listed, delisted_on=delisted, exchange=exchange)
+
+    def instruments(self) -> list[Instrument]:
+        bounds = self._listing_bounds()
+        with self._session() as conn:
+            records = conn.execute("SELECT * FROM instrument ORDER BY id").fetchall()
+        out = []
+        for r in records:
+            listed, delisted, exchange = bounds.get(str(r["id"]), (None, None, None))
+            out.append(self._instrument_from_row(r, listed_on=listed, delisted_on=delisted, exchange=exchange))
+        return out
+
+    def _listing_bounds(self) -> dict[str, tuple[date | None, date | None, str | None]]:
+        with self._session() as conn:
+            records = conn.execute(
+                "SELECT instrument_id, min(valid_from) AS listed_on, "
+                "CASE WHEN count(*) FILTER (WHERE valid_to IS NULL) = 0 THEN max(valid_to) END AS delisted_on, "
+                "(array_agg(exchange ORDER BY valid_from DESC))[1] AS exchange "
+                "FROM symbol_alias GROUP BY instrument_id"
+            ).fetchall()
+        return {
+            str(r["instrument_id"]): (r["listed_on"], r["delisted_on"], r["exchange"])
+            for r in records
+        }
+
+    def _instrument_from_row(
+        self, r: Any, *, listed_on: date | None, delisted_on: date | None, exchange: str | None
+    ) -> Instrument:
+        iid = str(r["id"])
+        primary = r["primary_exchange"] if "primary_exchange" in r.keys() else None
+        return Instrument(
+            instrument_id=iid,
+            market=_COMPAT_MARKET,
+            asset_class=_compat_asset_class(r["asset_class"]),
+            currency="USD",
+            exchange=exchange or primary,
+            listed_on=listed_on,
+            delisted_on=delisted_on,
+            external_ids={"upstream_id": iid},
+        )
+
+    def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None:
+        self.require_write()
+        rows = [[parse_int_id(m.instrument_id) or m.instrument_id, m.symbol, m.valid_from] for m in mappings]
+        if not rows:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "DELETE FROM symbol_alias WHERE instrument_id = ? AND symbol = ? AND valid_from = ?",
+                rows,
+            )
+
+    def record_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self._side.record_unresolved(records)
+
+    def unresolved(self, kind: str | None = None) -> list[UnresolvedRecord]:
+        return self._side.unresolved(kind)
+
+    def unresolved_count(self, kind: str | None = None) -> int:
+        return self._side.unresolved_count(kind)
+
+    def discard_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        self._side.discard_unresolved(records)
+
+    def observe(self, observations: Iterable[tuple[str, str, str, date]]) -> None:
+        self._side.observe(observations)
+
+    def observations(self) -> list[tuple[str, str, str, date]]:
+        return self._side.observations()
+
+    def set_upstream_id(self, instrument_id: str, upstream_id: int) -> None:
+        numeric = parse_int_id(instrument_id)
+        if numeric is not None and numeric != int(upstream_id):
+            raise ValueError(
+                f"{instrument_id} is already the upstream bigint; cannot relink to {upstream_id}"
+            )
+        existing = self.upstream_ids()
+        _check_upstream(existing, instrument_id, upstream_id)
+        self._side.set_upstream_id(instrument_id, upstream_id)
+
+    def upstream_ids(self) -> dict[str, int]:
+        with self._session() as conn:
+            records = conn.execute("SELECT id FROM instrument").fetchall()
+        out = {str(r["id"]): int(r["id"]) for r in records}
+        out.update(self._side.upstream_ids())
+        return out
 
     def corporate_actions(self, instrument_ids: Sequence[str] | None = None) -> list[CorporateAction]:
-        """Latest revision of each upstream event, mapped back to openbars ``CorporateAction``."""
+        """Latest revision of each upstream event, mapped back to openbars ``CorporateAction``.
+
+        Unknown ``action_type`` values are not silently dropped: they are recorded in the
+        local unresolved queue (``reason_code=unknown_action_type``) and a warning is emitted.
+        """
         wanted = None if instrument_ids is None else {str(i) for i in instrument_ids}
         with self._session() as conn:
             records = conn.execute(
@@ -1477,16 +1606,49 @@ class PgCompatInstrumentMaster(_Guard):
                 "ORDER BY r.event_id, r.revision DESC, o.id"
             ).fetchall()
         out: list[CorporateAction] = []
+        unknown: list[UnresolvedRecord] = []
         for r in records:
-            for action in actions_from_revision(
-                action_type=r["action_type"],
+            typ = r["action_type"]
+            mapped = actions_from_revision(
+                action_type=typ,
                 ex_date=r["ex_date"],
                 instrument_ids=r["instrument_ids"],
                 details=r["details"],
                 source=r["source"],
-            ):
-                if wanted is None or action.instrument_id in wanted:
-                    out.append(action)
+            )
+            if mapped:
+                for action in mapped:
+                    if wanted is None or action.instrument_id in wanted:
+                        out.append(action)
+                continue
+            if kind_from_action_type(typ) is not None:
+                continue
+            raw_ids = r["instrument_ids"]
+            if isinstance(raw_ids, str):
+                import json as _json
+                raw_ids = _json.loads(raw_ids)
+            ids = [str(i) for i in (raw_ids or [])]
+            if wanted is not None and ids and not (wanted & set(ids)):
+                continue
+            msg = (
+                f"unknown corporate action type {typ!r} on {r['ex_date']} "
+                f"instrument_ids={ids or raw_ids!r}; recorded as unresolved"
+            )
+            warnings.warn(msg, UserWarning, stacklevel=2)
+            _LOG.warning(msg)
+            unknown.append(
+                UnresolvedRecord(
+                    kind="corporate_action",
+                    reason_code="unknown_action_type",
+                    symbol=ids[0] if ids else "",
+                    provider=(r["source"] or "unknown"),
+                    session_date=r["ex_date"],
+                    market=_COMPAT_MARKET,
+                    detail=str(typ),
+                )
+            )
+        if unknown:
+            self._side.record_unresolved(unknown)
         out.sort(key=lambda a: (a.instrument_id, a.ex_date, a.kind.value, a.source))
         return out
 
@@ -1527,7 +1689,9 @@ class PostgresBackend:
             identity = CompatIdentity()
             self.raw = PgCompatRawStore(self._session, write, identity)
             self.canonical = PgCompatCanonicalStore(self._session, write, identity)
-            self.instruments = PgCompatInstrumentMaster(self._session, write, identity)
+            self.instruments = PgCompatInstrumentMaster(
+                self._session, write, identity, side_path=Path(state_path).with_name("identity.db")
+            )
             self.state = SqliteStateStore(state_path)
         else:
             if write:
