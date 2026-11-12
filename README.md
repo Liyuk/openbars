@@ -4,7 +4,9 @@
 >
 > **免费、多市场、多数据源的 K 线采集、清洗与合并框架，产出一份可审计的唯一数据源。**
 
-**Status / 状态：pre-alpha** — 架构与接口设计阶段，尚无可用实现。API 随时会变。
+**Status / 状态：pre-alpha** — 美股日线的本地链路（`plan` / `run` / `status` / `verify`）已在本仓库可用；其余市场与粒度仍在路线图中。API 随时会变。
+
+*US daily local path (`plan` / `run` / `status` / `verify`) is available in this tree; other markets and intervals come later. Pre-alpha: the API may change.*
 
 ---
 
@@ -28,6 +30,44 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 
 美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线；小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md) 与 [docs/architecture.md](docs/architecture.md)。
 
+### 快速开始
+
+需要 Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)。以下以美股日线为例：
+
+```bash
+uv sync --all-extras                 # 安装（含 Parquet / DuckDB）
+cp config.example.yaml config.yaml   # config.yaml 已在 .gitignore 中
+
+# 密钥：进程环境优先；也可用 dotenv（不要提交该文件）
+#   --env-file path/to/.env
+#   或 export OPENBARS_ENV_FILE=path/to/.env
+#   或在 config.yaml 写 env_file: .env
+# 也接受 ALPACA_API_KEY / ALPACA_API_SECRET 作为
+# ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY 的别名（仅当规范名未设置时）。
+export MASSIVE_API_KEY="<your-massive-key>"
+export ALPACA_API_KEY_ID="<your-alpaca-key-id>"
+export ALPACA_API_SECRET_KEY="<your-alpaca-secret>"
+
+# 可选：在 config.yaml 里指定股票池（Alpaca / yfinance 的任务需要显式 symbols；
+# Massive 按交易日整市场抓取）
+#   universe:
+#     us:
+#       symbols: [AAA, BBB]
+
+uv run openbars config --config config.yaml   # 查看生效配置（所有 key 脱敏为 set/missing）
+uv run openbars plan   --config config.yaml   # 预览任务与请求预算（不写入）
+uv run openbars run    --config config.yaml   # 规划、入队并执行，直到队列空闲；可随时重跑续抓
+uv run openbars status --config config.yaml   # 任务状态、失败/死信、断点
+uv run openbars verify --config config.yaml   # 覆盖率与多源一致性报告（只读）
+```
+
+- 再次提醒：openbars 不分发任何数据，一切由你用自己的 key（BYOK）在本地抓取，请遵守各数据源的服务条款（详见下方声明）。
+- 数据写在 `storage.path`（默认 `./data/`，已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
+- 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
+- `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。内容：预期交易日（XNYS）× 标的的覆盖率、各来源（provider / feed / 复权）汇总、两源可比较时的 OHLC 与成交量一致率（默认容差价格 0.5%、成交量 5%，可由 `reconcile.tolerances` 调整；IEX 与 SIP 等不可比的序列记为 `not_comparable`，不计入分歧）、质量标记一致率（仅当有多个 projection 时，否则 `n/a`），并附“最近 N 个交易日”分段（`--recent N`）。`--start/--end` 限定窗口，`--json reports/verify.json` 把报告写到数据目录下。
+- 默认规划器把每个交易日分给最便宜的来源，所以多源重叠需要你显式抓取一部分（例如给第二个来源排审计任务）后，`verify` 才有可比较的样本。
+- 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
+
 ### 数据条款声明（重要）
 
 - **openbars 不分发、不托管任何行情数据。** 仓库里只有代码、规则与文档。
@@ -48,6 +88,44 @@ openbars is a **local-first market data warehouse framework**, not yet another d
 3. **Clean and reconcile**: instrument master (stable IDs + symbol validity ranges), trading calendars, parameterized price adjustment, gap detection, multi-source arbitration and quality flags, producing one **canonical** dataset with provenance and an audit trail.
 
 Default storage is Parquet + DuckDB; Postgres is optional. Read through the Python library, with an optional HTTP API.
+
+### Quick start
+
+Needs Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). US daily bars as the example:
+
+```bash
+uv sync --all-extras                 # install (includes Parquet / DuckDB)
+cp config.example.yaml config.yaml   # config.yaml is git-ignored
+
+# Keys: process environment wins; a dotenv file is also accepted (do not commit it)
+#   --env-file path/to/.env
+#   or export OPENBARS_ENV_FILE=path/to/.env
+#   or set env_file: .env in config.yaml
+# ALPACA_API_KEY / ALPACA_API_SECRET are accepted as aliases for
+# ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY when the canonical name is unset.
+export MASSIVE_API_KEY="<your-massive-key>"
+export ALPACA_API_KEY_ID="<your-alpaca-key-id>"
+export ALPACA_API_SECRET_KEY="<your-alpaca-secret>"
+
+# Optional: pin a symbol universe in config.yaml (Alpaca / yfinance jobs need explicit
+# symbols; Massive fetches the whole market per session)
+#   universe:
+#     us:
+#       symbols: [AAA, BBB]
+
+uv run openbars config --config config.yaml   # print effective settings (secrets redacted as set/missing)
+uv run openbars plan   --config config.yaml   # preview jobs and request budget (writes nothing)
+uv run openbars run    --config config.yaml   # plan, queue and execute until idle; safe to re-run / resume
+uv run openbars status --config config.yaml   # job states, dead jobs, checkpoints
+uv run openbars verify --config config.yaml   # coverage and cross-source agreement report (read-only)
+```
+
+- Reminder: openbars distributes no data; everything is fetched locally with your own keys (BYOK), and you must follow each provider's terms (see the disclaimer below).
+- Data lands in `storage.path` (default `./data/`, git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
+- Non-daily intervals imply a large request budget and need an explicit `--accept-budget`.
+- `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It shows coverage of expected XNYS sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory.
+- The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
+- The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
 
 ### Data terms disclaimer
 

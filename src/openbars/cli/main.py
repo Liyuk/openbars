@@ -1,8 +1,8 @@
-"""`openbars` CLI: ``plan`` (dry run), ``run`` (plan + submit + execute), ``status``.
+"""`openbars` CLI: ``plan`` (dry run), ``run`` (plan + submit + execute), ``status``, ``verify``, ``config``.
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
-credential values.
+credential values. ``verify`` is a read-only report over the stored bars.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from openbars.cli.wiring import (
     effective_policies,
     skipped_providers,
 )
+from openbars.config.display import format_settings
 from openbars.config.loader import load_settings
 from openbars.config.schema import Settings
 from openbars.core.errors import ConfigError
@@ -31,7 +32,7 @@ from openbars.orchestrator.planner import Budget, DefaultPlanner, Plan, RawStore
 from openbars.orchestrator.runner import DEFAULT_LEASE_TTL, LocalOrchestrator
 from openbars.storage.state import SqliteStateStore
 
-COMMANDS = ("init", "plan", "run", "backfill", "verify", "status")
+COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
 
@@ -63,23 +64,39 @@ def _fmt_duration(delta: timedelta) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _iso_date(text: str) -> date:
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {text!r}") from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha)")
     parser.add_argument("--version", action="version", version=f"openbars {__version__}")
     parser.add_argument("--config", default="./config.yaml", help="config file (default ./config.yaml)")
     parser.add_argument("--data", default=None, help="storage directory (overrides storage.path)")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="dotenv file with provider keys (overrides OPENBARS_ENV_FILE and config env_file)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     def common(p: argparse.ArgumentParser) -> None:
         # Accept the global options after the subcommand too, without overriding them.
         p.add_argument("--config", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         p.add_argument("--data", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        p.add_argument("--env-file", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
-    for name, help_text in (
-        ("init", "not implemented yet"),
-        ("verify", "not implemented yet (see issue #13)"),
-    ):
-        common(sub.add_parser(name, help=help_text))
+    common(sub.add_parser("init", help="not implemented yet"))
+
+    verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars")
+    common(verify)
+    verify.add_argument("--start", type=_iso_date, default=None, help="first session (default: history.start or oldest stored)")
+    verify.add_argument("--end", type=_iso_date, default=None, help="last session (default: latest ready session)")
+    verify.add_argument("--recent", type=int, default=20, help="also report the last N sessions (0 = off, default 20)")
+    verify.add_argument("--json", default=None, metavar="PATH", help="also write the report as JSON under the data dir")
 
     plan = sub.add_parser("plan", help="show the jobs and request budget (dry run; --submit to queue them)")
     common(plan)
@@ -99,6 +116,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="job counts by state, dead jobs, checkpoints")
     common(status)
+
+    show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
+    common(show)
     return parser
 
 
@@ -115,18 +135,22 @@ def main(
     if args.command is None:
         parser.print_help()
         return EXIT_OK
-    if args.command in ("init", "verify"):
-        print(f"openbars {args.command}: not implemented yet (pre-alpha)", file=sys.stderr)
+    if args.command == "init":
+        print("openbars init: not implemented yet (pre-alpha)", file=sys.stderr)
         return EXIT_USAGE
 
     out = _Out()
     try:
-        settings = load_settings(args.config, env=env)
+        settings = load_settings(args.config, env=env, env_file=getattr(args, "env_file", None))
         out = _Out(settings.secret_values())
         factory = provider_factory or build_providers
         now = clock or (lambda: datetime.now(UTC))
+        if args.command == "config":
+            return _show_config(args, settings, out)
         if args.command == "status":
             return _status(args, settings, out)
+        if args.command == "verify":
+            return _verify(args, settings, out, now)
         if args.command == "plan":
             return _plan(args, settings, out, factory, now)
         return _run(args, settings, out, factory, now)
@@ -318,6 +342,99 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
     for cp in in_progress[:LIST_LIMIT]:
         out.line(f"  {cp.job_id} cursor={cp.cursor}")
     out.line("circuits: tracked in the running process only (none persisted)")
+    return EXIT_OK
+
+
+# --- config --------------------------------------------------------------------------------
+
+
+def _show_config(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
+    out.line(format_settings(settings, config_path=args.config).rstrip())
+    return EXIT_OK
+
+
+# --- verify -------------------------------------------------------------------------------
+
+
+
+def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Callable[[], datetime]) -> int:
+    import json
+
+    from openbars.calendars import XNYSCalendar
+    from openbars.core.models import DateRange, Market
+    from openbars.orchestrator.planner import latest_ready_session
+    from openbars.orchestrator.verify import (
+        Tolerances,
+        build_aliases,
+        format_report,
+        load_canonical,
+        load_raw_bars,
+        stored_session_range,
+        verify,
+    )
+
+    if Market.US not in settings.selection.markets:
+        out.err("error: verify supports the us market only (XNYS calendar); add 'us' to markets")
+        return EXIT_USAGE
+    if args.recent < 0:
+        out.err("error: --recent must be >= 0")
+        return EXIT_USAGE
+    root = data_dir(settings, args.data)
+    if not root.is_dir():
+        out.err(f"error: no data directory at {root}; run `openbars run` first")
+        return EXIT_ERROR
+    json_path = None
+    if args.json:
+        json_path = (root / args.json).resolve()  # relative paths live under the data dir
+        if not json_path.is_relative_to(root.resolve()):
+            out.err("error: --json must point inside the data directory")
+            return EXIT_USAGE
+
+    tolerances = Tolerances.from_settings(settings)
+    backend = _open_backend(root)
+    ready = latest_ready_session(clock())
+    sel = settings.selection
+    bounds = [d for d in (sel.history_end, ready) if d is not None]
+    end = args.end or (min(bounds) if bounds else None)
+    start = args.start or sel.history_start
+    probe = DateRange(start or date(1970, 1, 1), end or clock().date())
+    stored = stored_session_range(backend, Market.US, probe)
+    if stored is None:
+        out.err(f"error: no stored bars in {root} for the requested window; run `openbars run` first")
+        return EXIT_ERROR
+    window = DateRange(start or stored.start, end or stored.end)
+    if window.end < window.start:
+        out.err(f"error: empty window {window.start}..{window.end}")
+        return EXIT_USAGE
+
+    raw = load_raw_bars(backend, Market.US, window)
+    canonical = load_canonical(backend, Market.US, window)
+    notes = []
+    symbols = settings.universe.get(Market.US, ())
+    if symbols:
+        universe = list(symbols)
+    else:
+        master = backend.instruments.instruments()
+        universe = [i.instrument_id for i in master if i.market is Market.US]
+        if not universe:
+            universe = sorted({b.key for b in raw} | {c.key for c in canonical})
+            notes.append("no universe configured or registered: using every symbol found in the store")
+    aliases = build_aliases(
+        backend.instruments, [*universe, *(b.key for b in raw), *(c.key for c in canonical)],
+        on=window.end, market=Market.US,
+    )  # fmt: skip
+    report = verify(
+        raw, canonical, calendar=XNYSCalendar(), window=window, universe=universe,
+        tolerances=tolerances, aliases=aliases, recent_sessions=args.recent or None,
+    )  # fmt: skip
+    for line in [*format_report(report), *(f"note: {n}" for n in notes)]:
+        out.line(line)
+    if json_path is not None:
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = report.to_dict()
+        payload["notes"] = [*payload["notes"], *notes]
+        json_path.write_text(out._scrub(json.dumps(payload, indent=2, sort_keys=True)) + "\n", encoding="utf-8")
+        out.line(f"wrote {json_path}")
     return EXIT_OK
 
 

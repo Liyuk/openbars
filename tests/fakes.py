@@ -110,7 +110,7 @@ class FakeProvider:
         return ()
 
     # -- data ---------------------------------------------------------------------------
-    def bar(self, symbol: str, day: date, fetch_id: str) -> RawBar:
+    def bar(self, symbol: str, day: date, fetch_id: str) -> RawBar | None:
         base = Decimal(10 + sum(map(ord, symbol)) % 50) + Decimal(day.toordinal() % 7) / 4
         return RawBar(
             provider=self.id,
@@ -139,9 +139,10 @@ class FakeProvider:
         symbols = request.symbols or self.whole_market_symbols
         fetch_id = f"{self.id}-{call_no}"
         bars = [
-            self.bar(sym, day, fetch_id)
+            bar
             for day in weekdays_between(request.window.start, request.window.end)
             for sym in symbols
+            if (bar := self.bar(sym, day, fetch_id)) is not None  # subclasses may skip a cell
         ]
         next_cursor = None
         if self.page_size:

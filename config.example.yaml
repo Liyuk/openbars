@@ -1,5 +1,13 @@
 # openbars example configuration. Copy to config.yaml (git-ignored).
 # Secrets are referenced as ${ENV_VAR}; never write keys inline.
+#
+# Optional dotenv file (never commit it). Resolution, highest wins:
+#   1. process environment
+#   2. env file (--env-file, else OPENBARS_ENV_FILE, else this key)
+#   3. ${VAR:-default} below
+# Literal values here are used as written.
+# `openbars config` prints the effective settings; secret values are redacted.
+# env_file: .env
 version: 1
 
 # 选择市场（多选）: us | crypto | cn | hk
@@ -65,7 +73,7 @@ reconcile:
       volume: [alpaca]     # 只用同一 feed
   tolerances:
     price_rel: 0.005
-    volume_rel: 0.10
+    volume_rel: 0.05         # research-daily-v2 defaults: price 0.5%, volume 5% (read by `openbars verify`)
 
 # 采集节点：本机或远程（例如需要国内网络的 A 股/港股）
 nodes:
