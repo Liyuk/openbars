@@ -47,6 +47,17 @@ from openbars.providers.base import (
     SourceCapability,
 )
 from openbars.providers.http import decimal_value, digest_payload
+from openbars.providers.us.hourly import (
+    YFINANCE_HOURLY_WINDOW_DAYS,
+    HourlyGrid,
+    SubBar,
+    clip_hourly_window,
+    hourly_options,
+    hourly_series,
+    place_on_grid,
+    require_session_open,
+    to_raw_bar,
+)
 from openbars.quota.gate import QuotaGate
 from openbars.quota.policy import QuotaPolicy, RateLimit
 
@@ -299,6 +310,16 @@ class YFinanceProvider:
                 adjusted_modes=frozenset({Adjustment.RAW}),
                 **shared,
             ),
+            # US 1h: Yahoo serves hourly bars for ~730 days, starting at 09:30 New York.
+            SourceCapability(
+                market=Market.US,
+                terms=_terms(
+                    "Unofficial Yahoo 1h data (session_open grid, last ~730 days). Personal use only."
+                ),
+                adjusted_modes=frozenset({Adjustment.SPLIT}),
+                rolling_window=timedelta(days=YFINANCE_HOURLY_WINDOW_DAYS),
+                **{**shared, "interval": Interval.H1},
+            ),
         )
 
     def quota_policy(self) -> QuotaPolicy:
@@ -330,6 +351,8 @@ class YFinanceProvider:
         return self.fetch_bars_result(request).batch
 
     def fetch_bars_result(self, request: FetchRequest) -> YFinanceResult:
+        if request.market is Market.US and request.interval is Interval.H1:
+            return self._fetch_hourly_result(request)
         if (
             request.market not in (Market.US, Market.HK)
             or request.interval is not Interval.D1
@@ -452,6 +475,148 @@ class YFinanceProvider:
             error=error,
         )
         return YFinanceResult(batch, dict(errors), dict(skipped))
+
+    def _fetch_hourly_result(self, request: FetchRequest) -> YFinanceResult:
+        """US 1h bars (``interval="1h"``); kept only when they start on a grid slot."""
+        feed = (request.feed or FEED).strip().lower()
+        if feed != FEED:
+            raise ProviderError("invalid_request", f"unsupported feed {feed!r}", retryable=False)
+        adjustment = request.adjustment or ADJUSTMENT
+        adjustment = (
+            (adjustment.value if isinstance(adjustment, Adjustment) else adjustment).strip().lower()
+        )
+        if adjustment != ADJUSTMENT:
+            raise ProviderError(
+                "invalid_request", f"unsupported adjustment {adjustment!r}", retryable=False
+            )
+        options = hourly_options(request)
+        require_session_open(PROVIDER_ID, options)
+        now = self._clock()
+        window = clip_hourly_window(
+            request.window,
+            provider=PROVIDER_ID,
+            now=now,
+            rolling_days=YFINANCE_HOURLY_WINDOW_DAYS,
+        )
+        grid = HourlyGrid(window, options)
+        symbols = [s for chunk in self.chunk_symbols(request.symbols) for s in chunk]
+        if not symbols:
+            raise ProviderError("invalid_request", "no symbols requested", retryable=False)
+        first = self._decode_cursor(request.cursor, len(symbols))
+        download = self._download or _yfinance_download
+        series = hourly_series(
+            BarSeriesCatalog.resolve(YFINANCE_YAHOO_SPLIT, interval=Interval.H1), options
+        )
+        fetch_id = self._fetch_id()
+        kwargs: dict[str, Any] = {
+            "start": window.start.isoformat(),
+            "end": (window.end + timedelta(days=1)).isoformat(),  # Yahoo's end is exclusive
+            "interval": "1h",
+            "prepost": options.include_extended_hours,
+            "auto_adjust": False,
+            "actions": False,
+            "progress": False,
+            "threads": False,
+            "timeout": DOWNLOAD_TIMEOUT_SECONDS,
+            "group_by": "ticker",
+        }
+        bars: list[RawBar] = []
+        errors: dict[str, ProviderError] = {}
+        skipped: dict[str, int] = {}
+        next_cursor: str | None = None
+        for index in range(first, len(symbols)):
+            symbol = symbols[index]
+            try:
+                self._quota_gate.acquire(PROVIDER_ID)
+                if self._before_request is not None:
+                    self._before_request()
+            except QuotaExhausted as exc:
+                errors[symbol] = ProviderError(
+                    "quota_exhausted", str(exc), retryable=True, retry_at=exc.retry_at
+                )
+                next_cursor = str(index)
+                break
+            try:
+                rows = _rows(download(to_yahoo_ticker(symbol), **kwargs))
+            except ProviderError as exc:
+                if exc.code == NOT_INSTALLED_CODE:
+                    raise
+                errors[symbol] = exc
+                continue
+            except Exception as exc:  # noqa: BLE001 - classified, never leaked raw
+                errors[symbol] = self._symbol_error(exc)
+                continue
+            subs = self._hourly_sub_bars(rows, skipped)
+            placed = place_on_grid(subs, grid, now=now, skipped=skipped)
+            if not placed:
+                errors[symbol] = ProviderError(
+                    "empty_result", f"no hourly bars returned for {symbol}", retryable=False
+                )
+                continue
+            bars.extend(
+                to_raw_bar(
+                    gb, provider=PROVIDER_ID, symbol=symbol, fetch_id=fetch_id, feed=FEED, series=series
+                )
+                for gb in placed
+            )
+        error = self._combine(errors)
+        if not bars and error is not None:
+            raise error
+        bars.sort(key=lambda b: (b.symbol_as_returned, b.ts_start))
+        batch = RawBatch(
+            provider=PROVIDER_ID,
+            fetch_id=fetch_id,
+            request=request,
+            bars=tuple(bars),
+            next_cursor=next_cursor,
+            error=error,
+        )
+        return YFinanceResult(batch, dict(errors), dict(skipped))
+
+    @staticmethod
+    def _hourly_sub_bars(rows: list[dict[str, Any]], skipped: dict[str, int]) -> list[SubBar]:
+        def skip(reason: str) -> None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+
+        out: list[SubBar] = []
+        for row in rows:
+            if all(_is_missing(row.get(name)) for name in _OHLCV):
+                skip("nan_row")
+                continue
+            stamp = next((row[k] for k in ("datetime", "date") if k in row), None)
+            if isinstance(stamp, str):
+                try:
+                    stamp = datetime.fromisoformat(stamp.strip())
+                except ValueError:
+                    stamp = None
+            if hasattr(stamp, "to_pydatetime"):  # pandas Timestamp
+                stamp = stamp.to_pydatetime()
+            if not isinstance(stamp, datetime) or stamp.tzinfo is None or stamp.utcoffset() is None:
+                skip("invalid_row")  # an hourly bar needs a zone-aware start
+                continue
+            try:
+                values = {
+                    name: _quantized(
+                        row.get(name), name, VOLUME_SCALE if name == "volume" else PRICE_SCALE
+                    )
+                    for name in _OHLCV
+                }
+            except (ValueError, TypeError, ProviderError):
+                skip("invalid_row")
+                continue
+            payload = {k: ("" if _is_missing(v) else str(v)) for k, v in sorted(row.items())}
+            out.append(
+                SubBar(
+                    ts_start=stamp.astimezone(UTC),
+                    open=values["open"],
+                    high=values["high"],
+                    low=values["low"],
+                    close=values["close"],
+                    volume=values["volume"],
+                    payload=payload,
+                )
+            )
+        return out
 
     @staticmethod
     def _decode_cursor(cursor: str | None, count: int) -> int:

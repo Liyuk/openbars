@@ -46,7 +46,21 @@ from openbars.providers.http import (
     integer_value,
     require_object,
 )
-from openbars.providers.us.alpaca_time import historical_end_parameter, normalize_feed
+from openbars.providers.us.alpaca_time import (
+    SIP_RECENT_DATA_DELAY,
+    historical_end_parameter,
+    normalize_feed,
+)
+from openbars.providers.us.hourly import (
+    ALPACA_HOURLY_HISTORY_START,
+    HourlyGrid,
+    aggregate_to_grid,
+    clip_hourly_window,
+    hourly_options,
+    hourly_series,
+    sub_bar_from_json,
+    to_raw_bar,
+)
 from openbars.quota.gate import QuotaGate
 from openbars.quota.policy import QuotaPolicy, RateLimit
 
@@ -68,6 +82,9 @@ MAX_SYMBOLS_PER_REQUEST = 200
 MAX_BARS_PER_REQUEST = 10000
 CORPORATE_ACTIONS_LIMIT = 1000
 HISTORY_START = date(2016, 1, 1)
+# 1h is built from 30-minute bars so session_open (09:30) slots can be cut exactly.
+HOURLY_TIMEFRAME = "30Min"
+_SUB_BAR = timedelta(minutes=30)
 DEFAULT_FEED = "sip"
 SUPPORTED_FEEDS = ("sip", "iex")
 SUPPORTED_ADJUSTMENTS = ("split", "raw")
@@ -217,7 +234,7 @@ class AlpacaProvider(HttpProviderAdapter):
             SourceCapability(
                 provider=PROVIDER_ID,
                 market=Market.US,
-                interval=Interval.D1,
+                interval=interval,
                 asset_classes=frozenset({AssetClass.EQUITY, AssetClass.ETF}),
                 history_start=HISTORY_START,
                 batch=BatchShape.MULTI_SYMBOL,
@@ -227,6 +244,7 @@ class AlpacaProvider(HttpProviderAdapter):
                 feed=f"alpaca:{feed}",
                 terms=terms,
             )
+            for interval in (Interval.D1, Interval.H1)
             for feed in SUPPORTED_FEEDS
         )
 
@@ -298,6 +316,8 @@ class AlpacaProvider(HttpProviderAdapter):
 
     # -- bars ----------------------------------------------------------------------------
     def fetch_bars(self, request: FetchRequest) -> RawBatch:
+        if request.market is Market.US and request.interval is Interval.H1:
+            return self._fetch_hourly(request)
         if request.market is not Market.US or request.interval is not Interval.D1:
             raise ProviderError(
                 "unsupported_request", "Alpaca adapter serves US 1d bars only", retryable=False
@@ -348,6 +368,120 @@ class AlpacaProvider(HttpProviderAdapter):
         if not bars:
             raise ProviderError("empty_result", "Alpaca returned no bars", retryable=False)
         return RawBatch(provider=PROVIDER_ID, fetch_id=fetch_id, request=request, bars=tuple(bars))
+
+    def _fetch_hourly(self, request: FetchRequest) -> RawBatch:
+        """30-minute bars summed onto the XNYS hourly grid (regular session by default)."""
+        feed = normalize_feed(request.feed or DEFAULT_FEED)
+        if feed not in SUPPORTED_FEEDS:
+            raise ProviderError("invalid_request", f"unsupported feed {feed!r}", retryable=False)
+        adjustment = self._adjustment(request.adjustment)
+        chunks = self._chunks(request.symbols)
+        options = hourly_options(request)
+        now = self._clock()
+        window = clip_hourly_window(
+            request.window, provider=PROVIDER_ID, now=now, history_start=ALPACA_HOURLY_HISTORY_START
+        )
+        grid = HourlyGrid(window, options)
+        if not grid:
+            raise ProviderError("empty_result", "no XNYS sessions in the window", retryable=False)
+        # SIP: the most recent ~15 minutes are not served on the free plan.
+        latest = now - SIP_RECENT_DATA_DELAY if feed == "sip" else now
+        end = min(grid.end, latest)
+        if end <= grid.start:
+            raise ProviderError("data_not_ready", "no completed hourly slot yet", retryable=True)
+        stamp = "%Y-%m-%dT%H:%M:%SZ"
+        start_param = grid.start.astimezone(timezone.utc).strftime(stamp)
+        end_param = end.astimezone(timezone.utc).replace(microsecond=0).strftime(stamp)
+        series = hourly_series(
+            BarSeriesCatalog.resolve(SourceIdentity(PROVIDER_ID, feed, adjustment), interval=Interval.H1),
+            options,
+        )
+        fetch_id = self._fetch_id()
+        first, token = _decode_cursor(request.cursor, len(chunks))
+        if token is not None:  # hourly resumes at a chunk boundary only
+            raise ProviderError("invalid_request", "malformed fetch cursor", retryable=False)
+        headers = self._headers()
+        bars: list[RawBar] = []
+        skipped: dict[str, int] = {}
+        for index in range(first, len(chunks)):
+            chunk = chunks[index]
+            allowed = set(chunk)
+            subs: dict[str, list[Any]] = {}
+            page: str | None = None
+            guard = TokenLoopGuard()
+            try:
+                while True:
+                    params = {
+                        "symbols": ",".join(chunk),
+                        "timeframe": HOURLY_TIMEFRAME,
+                        "start": start_param,
+                        "end": end_param,
+                        "feed": feed,
+                        "adjustment": adjustment,
+                        "limit": str(MAX_BARS_PER_REQUEST),
+                    }
+                    if page:
+                        params["page_token"] = page
+                    payload = self.json_object(self.get(BARS_URL, params=params, headers=headers))
+                    if "bars" not in payload:
+                        raise _invalid("response has no 'bars' member")
+                    container = payload["bars"]
+                    by_symbol = {} if container is None else require_object(container, "bars")
+                    for symbol, items in by_symbol.items():
+                        if symbol not in allowed:
+                            raise _invalid("response contains a symbol that was not requested")
+                        if not isinstance(items, list):
+                            raise _invalid("bars for a symbol are not an array")
+                        for item in items:
+                            subs.setdefault(symbol, []).append(self._sub_bar(item))
+                    following = payload.get("next_page_token")
+                    if following is None:
+                        break
+                    page = guard.accept(following)
+            except (ProviderError, QuotaExhausted) as exc:
+                # A half-read chunk is dropped whole: never emit a partial hour.
+                if not bars:
+                    raise
+                error = self._as_provider_error(exc) if isinstance(exc, QuotaExhausted) else exc
+                return RawBatch(
+                    provider=PROVIDER_ID,
+                    fetch_id=fetch_id,
+                    request=request,
+                    bars=tuple(bars),
+                    next_cursor=_encode_cursor(index, None),
+                    error=error,
+                )
+            for symbol in chunk:
+                for grid_bar in aggregate_to_grid(
+                    subs.get(symbol, ()), grid, sub_length=_SUB_BAR, now=end, skipped=skipped
+                ):
+                    bars.append(
+                        to_raw_bar(
+                            grid_bar,
+                            provider=PROVIDER_ID,
+                            symbol=symbol,
+                            fetch_id=fetch_id,
+                            feed=feed,
+                            series=series,
+                        )
+                    )
+        if not bars:
+            raise ProviderError("empty_result", "Alpaca returned no hourly bars", retryable=False)
+        return RawBatch(provider=PROVIDER_ID, fetch_id=fetch_id, request=request, bars=tuple(bars))
+
+    @staticmethod
+    def _sub_bar(item: Any) -> Any:
+        obj = require_object(item, "bar")
+        stamp = obj.get("t")
+        if not isinstance(stamp, str):
+            raise _invalid("bar timestamp is missing or not a string")
+        try:
+            ts = datetime.fromisoformat(stamp)
+        except ValueError:
+            raise _invalid("bar timestamp is not ISO 8601") from None
+        if ts.tzinfo is None or ts.utcoffset() is None:
+            raise _invalid("bar timestamp has no UTC offset")
+        return sub_bar_from_json(obj, ts.astimezone(timezone.utc))
 
     @staticmethod
     def _adjustment(value: str | Adjustment | None) -> str:

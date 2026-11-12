@@ -34,7 +34,12 @@ from openbars.core.models import (
     Market,
     RawBar,
 )
-from openbars.core.series import MASSIVE_EOD_SPLIT, BarSeriesCatalog, BarSeriesIdentity
+from openbars.core.series import (
+    MASSIVE_AGGS_SPLIT,
+    MASSIVE_EOD_SPLIT,
+    BarSeriesCatalog,
+    BarSeriesIdentity,
+)
 from openbars.normalize.instruments import InstrumentMaster
 from openbars.providers.adapter import HttpProviderAdapter
 from openbars.providers.base import (
@@ -52,6 +57,16 @@ from openbars.providers.http import (
     digest_payload,
     integer_value,
     require_object,
+)
+from openbars.providers.us.hourly import (
+    MASSIVE_HOURLY_WINDOW_DAYS,
+    HourlyGrid,
+    aggregate_to_grid,
+    clip_hourly_window,
+    hourly_options,
+    hourly_series,
+    sub_bar_from_json,
+    to_raw_bar,
 )
 from openbars.providers.us.massive_window import (
     NEW_YORK,
@@ -76,6 +91,10 @@ API_HOST = "api.massive.com"
 BASE_URL = f"https://{API_HOST}"
 GROUPED_URL = BASE_URL + "/v2/aggs/grouped/locale/us/market/stocks/{session}"
 TICKER_RANGE_PATH = "/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
+# 1h is built from 30-minute aggregates so session_open (09:30) slots can be cut exactly.
+TICKER_HOURLY_PATH = "/v2/aggs/ticker/{symbol}/range/30/minute/{start}/{end}"
+HOURLY_FEED = MASSIVE_AGGS_SPLIT.feed
+_SUB_BAR = timedelta(minutes=30)
 SPLITS_PATH = "/stocks/v1/splits"
 TICKER_EVENTS_PATH = "/vX/reference/tickers/{symbol}/events"
 TICKERS_PATH = "/v3/reference/tickers"
@@ -257,6 +276,22 @@ class MassiveProvider(HttpProviderAdapter):
                 feed=f"{PROVIDER_ID}:{DEFAULT_FEED}",
                 terms=terms,
             ),
+            # 1h: per-ticker 30-minute aggregates summed onto the XNYS hourly grid.
+            SourceCapability(
+                provider=PROVIDER_ID,
+                market=Market.US,
+                interval=Interval.H1,
+                asset_classes=frozenset({AssetClass.EQUITY, AssetClass.ETF}),
+                history_start=None,
+                rolling_window=timedelta(days=MASSIVE_HOURLY_WINDOW_DAYS),
+                latency=TYPICAL_LATENCY,
+                batch=BatchShape.PER_SYMBOL,
+                max_symbols_per_request=1,
+                max_bars_per_request=TICKER_RANGE_LIMIT,
+                adjusted_modes=frozenset({Adjustment.SPLIT}),
+                feed=f"{PROVIDER_ID}:{HOURLY_FEED}",
+                terms=terms,
+            ),
         )
 
     def quota_policy(self) -> QuotaPolicy:
@@ -379,6 +414,8 @@ class MassiveProvider(HttpProviderAdapter):
 
     # -- bars ------------------------------------------------------------------------------
     def fetch_bars(self, request: FetchRequest) -> RawBatch:
+        if request.market is Market.US and request.interval is Interval.H1:
+            return self._fetch_ticker_hourly(request)
         self._check_market(request)
         feed = self._feed(request.feed)
         adjustment = self._adjustment(request.adjustment)
@@ -607,6 +644,108 @@ class MassiveProvider(HttpProviderAdapter):
         if not bars:
             raise ProviderError("empty_result", "Massive returned no bars", retryable=False)
         return RawBatch(provider=PROVIDER_ID, fetch_id=fetch_id, request=request, bars=tuple(bars))
+
+    # C. ticker hourly: explicit symbols, 30-minute aggregates summed onto the hourly grid
+    def _fetch_ticker_hourly(self, request: FetchRequest) -> RawBatch:
+        feed = (request.feed or HOURLY_FEED).strip().lower()
+        if feed.startswith(f"{PROVIDER_ID}:"):
+            feed = feed[len(PROVIDER_ID) + 1 :]
+        if feed != HOURLY_FEED or self._adjustment(request.adjustment) != "split":
+            raise ProviderError("invalid_request", "unsupported feed/adjustment", retryable=False)
+        symbols = _clean_symbols(request.symbols)
+        if not symbols:
+            raise ProviderError(
+                "invalid_request", "Massive 1h needs explicit symbols", retryable=False
+            )
+        self._require_key()
+        options = hourly_options(request)
+        now = self._clock()
+        window = clip_hourly_window(
+            request.window, provider=PROVIDER_ID, now=now, rolling_days=MASSIVE_HOURLY_WINDOW_DAYS
+        )
+        grid = HourlyGrid(window, options)
+        if not grid:
+            raise ProviderError("empty_result", "no XNYS sessions in the window", retryable=False)
+        series = hourly_series(
+            BarSeriesCatalog.resolve(MASSIVE_AGGS_SPLIT, interval=Interval.H1), options
+        )
+        fetch_id = self._fetch_id()
+        first, resume_url = _decode_cursor(request.cursor, len(symbols))
+        if resume_url is not None:  # hourly resumes at a symbol boundary only
+            raise ProviderError("invalid_request", "malformed fetch cursor", retryable=False)
+        bars: list[RawBar] = []
+        skipped: dict[str, int] = {}
+        for index in range(first, len(symbols)):
+            symbol = symbols[index]
+            url = BASE_URL + TICKER_HOURLY_PATH.format(
+                symbol=quote(symbol, safe=""),
+                start=window.start.isoformat(),
+                end=window.end.isoformat(),
+            )
+            params = {"adjusted": "true", "sort": "asc", "limit": str(TICKER_RANGE_LIMIT)}
+            path_ok = self._path_matcher(
+                "", "v2", "aggs", "ticker", symbol, "range", "30", "minute", None, None
+            )
+            subs = []
+            try:
+                for payload in self._pages(
+                    url,
+                    params,
+                    lambda p, ok=path_ok: ok(p) and _range_tail_ok(p),
+                    index=index,
+                    resume_url=None,
+                    progress=_Progress(),
+                ):
+                    subs.extend(self._parse_hourly_page(payload, symbol))
+            except (ProviderError, QuotaExhausted) as exc:
+                # A half-read symbol is dropped whole: never emit a partial hour.
+                return self._partial_or_raise(
+                    exc, bars, request, fetch_id, _encode_cursor(index, None)
+                )
+            for grid_bar in aggregate_to_grid(
+                subs, grid, sub_length=_SUB_BAR, now=now, skipped=skipped
+            ):
+                instrument_id = None
+                if self._master is not None:
+                    instrument_id = self._master.resolve(
+                        symbol, on=grid_bar.slot.session_date, provider=PROVIDER_ID, market=Market.US
+                    )
+                bars.append(
+                    to_raw_bar(
+                        grid_bar,
+                        provider=PROVIDER_ID,
+                        symbol=symbol,
+                        fetch_id=fetch_id,
+                        feed=feed,
+                        series=series,
+                        instrument_id=instrument_id,
+                    )
+                )
+        if not bars:
+            raise ProviderError("empty_result", "Massive returned no hourly bars", retryable=False)
+        return RawBatch(provider=PROVIDER_ID, fetch_id=fetch_id, request=request, bars=tuple(bars))
+
+    def _parse_hourly_page(self, payload: Mapping[str, Any], symbol: str) -> list[Any]:
+        self._check_status(payload, allowed=("OK", "DELAYED"))
+        if payload.get("adjusted") is not True:
+            raise ProviderError(
+                "adjustment_mismatch", "response is not split-adjusted", retryable=False
+            )
+        returned = payload.get("ticker")
+        if returned is not None and returned != symbol:
+            raise _invalid("response ticker does not match the requested symbol")
+        results = payload.get("results")
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise _invalid("results is not an array")
+        self._check_count(payload, len(results))
+        out = []
+        for item in results:
+            obj = require_object(item, "bar")
+            ts = _millis_to_utc(obj.get("t"), "t")
+            out.append(sub_bar_from_json(obj, ts))
+        return out
 
     def _parse_ticker_page(
         self,

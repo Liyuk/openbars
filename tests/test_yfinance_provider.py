@@ -69,7 +69,9 @@ def provider(download=None, **kw) -> YFinanceProvider:
 # -- capabilities ---------------------------------------------------------------------------
 def test_capabilities_and_quota():
     p = provider()
-    caps = {c.market: c for c in p.capabilities()}
+    caps = {c.market: c for c in p.capabilities() if c.interval is Interval.D1}
+    (hourly,) = [c for c in p.capabilities() if c.interval is Interval.H1]
+    assert hourly.market is Market.US and hourly.rolling_window == timedelta(days=729)
     cap = caps[Market.US]
     assert Market.HK in caps
     assert (p.id, cap.provider, cap.feed) == ("yfinance", "yfinance", "yahoo")
