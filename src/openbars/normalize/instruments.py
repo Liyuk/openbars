@@ -108,7 +108,9 @@ class InstrumentStore(InstrumentMaster, Protocol):
 
     def instruments(self) -> list[Instrument]: ...
 
-    def mappings(self) -> list[SymbolMapping]: ...
+    def mappings(self, provider: str | None = None) -> list[SymbolMapping]:
+        """All mappings, or those visible to ``provider`` (exact match or ``"*"``)."""
+        ...
 
     def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None: ...
 
@@ -350,8 +352,8 @@ class MemoryInstrumentMaster(_ResolveMixin):
     def instruments(self) -> list[Instrument]:
         return list(self._instruments.values())
 
-    def mappings(self) -> list[SymbolMapping]:
-        return list(self._mappings.values())
+    def mappings(self, provider: str | None = None) -> list[SymbolMapping]:
+        return select_mappings(self._mappings.values(), provider)
 
     def record_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
         for r in records:
@@ -382,6 +384,14 @@ class MemoryInstrumentMaster(_ResolveMixin):
 
     def upstream_ids(self) -> dict[str, int]:
         return dict(self._upstream)
+
+
+def select_mappings(mappings: Iterable[SymbolMapping], provider: str | None = None) -> list[SymbolMapping]:
+    """If ``provider`` is set, keep rows whose provider is that name or ``"*"``."""
+    rows = list(mappings)
+    if provider is None:
+        return rows
+    return [m for m in rows if m.provider in (provider, "*")]
 
 
 def _check_upstream(existing: Mapping[str, int], instrument_id: str, upstream_id: int) -> None:
