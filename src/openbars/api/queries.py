@@ -58,10 +58,10 @@ def parse_interval(value: str | None) -> Interval:
     if value is None or not str(value).strip():
         return Interval.D1
     text = str(value).strip()
-    for item in Interval:
+    for item in (Interval.D1, Interval.H1):
         if item.value == text or item.name.lower() == text.lower():
             return item
-    raise QueryError(f"unknown interval {value!r}")
+    raise QueryError(f"unknown interval {value!r}; expected 1d or 1h")
 
 
 def parse_adjustment(value: str | None) -> Adjustment:
@@ -167,7 +167,7 @@ def _scan_canonical(
     window = _wide_window(start, end)
     pv: str | None
     if policy_version in {AUTO_POLICY_VERSION, "auto"}:
-        pv = _policy_for(market, instrument_ids)
+        pv = None if interval == Interval.H1 else _policy_for(market, instrument_ids)
     else:
         pv = policy_version
     return list(
@@ -183,6 +183,7 @@ def _from_canonical_row(row: Any) -> dict[str, Any]:
         "instrument_id": getattr(row, "instrument_id", None),
         "session_date": _iso_date(session),
         "ts_start": getattr(row, "ts_start", None).isoformat() if getattr(row, "ts_start", None) else None,
+        "session": getattr(row, "session", None),
         "open": dec_str(getattr(row, "open", None)),
         "high": dec_str(getattr(row, "high", None)),
         "low": dec_str(getattr(row, "low", None)),
@@ -229,6 +230,10 @@ def load_canonical(
     market: Market | None = None,
 ) -> list[dict[str, Any]]:
     """Load canonical bars via ``BarReader`` when present, else ``scan_rows``."""
+    if interval == Interval.H1:
+        return [_from_canonical_row(row) for row in _scan_canonical(
+            backend, instrument_ids, interval=interval, start=start, end=end, market=market
+        )]
     reader = getattr(backend, "reader", None)
     if reader is not None and hasattr(reader, "bars"):
         result = reader.bars(
@@ -318,11 +323,11 @@ def last_session_for(backend: Any, instrument_id: str, market: Market | None) ->
     return max(days) if days else None
 
 
-def list_markets(backend: Any) -> list[dict[str, Any]]:
+def list_markets(backend: Any, *, interval: Interval = Interval.D1) -> list[dict[str, Any]]:
     """Coverage summary for each market that has stored canonical bars."""
     out: list[dict[str, Any]] = []
     for market in Market:
-        rows = _scan_canonical(backend, None, market=market)
+        rows = _scan_canonical(backend, None, market=market, interval=interval)
         if not rows:
             continue
         instruments: set[str] = set()
@@ -472,7 +477,10 @@ def _from_raw_row(row: Any, instrument_id: str) -> dict[str, Any]:
     for field in ("open", "high", "low", "close"):
         if getattr(row, field, None) is None:
             missing.append(field)
+    extra = getattr(row, "extra", None) or {}
     return {
+        "session": extra.get("session"),
+        "ts_end": extra.get("ts_end"),
         "instrument_id": getattr(row, "instrument_id", None) or instrument_id,
         "session_date": _iso_date(getattr(row, "session_date", None)),
         "ts_start": getattr(row, "ts_start", None).isoformat() if getattr(row, "ts_start", None) else None,
@@ -539,6 +547,13 @@ def list_bars(
     # Bound the default window to stored data so we do not emit decades of gaps.
     if start is None or end is None:
         stored = _scan_canonical(backend, [iid], interval=interval, market=market)
+        if not stored and interval == Interval.H1:
+            stored = list(backend.raw.scan_rows(None, market, interval, _wide_window(), instrument_ids=[iid]))
+        if not stored and source_name != SOURCE_CANONICAL:
+            stored = _raw_rows(backend, iid, source_name, market=market, interval=interval, start=None, end=None)
+        if not stored and interval == Interval.H1:
+            start = start or end or date.today()
+            end = end or start
         if stored:
             days = [r.session_date for r in stored if getattr(r, "session_date", None) is not None]
             if start is None and days:
@@ -552,6 +567,8 @@ def list_bars(
 
     calendar = calendar_for(market)
     n_sessions = _count_sessions(calendar, start, end)
+    if interval == Interval.H1 and n_sessions * 7 > MAX_BARS:
+        raise QueryError(f"window has too many hourly slots (max {MAX_BARS}); pass a smaller start/end")
     if n_sessions > MAX_BARS:
         raise QueryError(
             f"window has {n_sessions} sessions (max {MAX_BARS}); pass a smaller start/end"
@@ -592,7 +609,14 @@ def list_bars(
                 present.add(day)
             bars.append(rec)
 
-    bars.sort(key=lambda rec: rec.get("session_date") or "")
+    bars.sort(key=lambda rec: rec.get("ts_start") or rec.get("session_date") or "")
+    missing_hours = []
+    if interval == Interval.H1 and hasattr(calendar, "hourly_slots"):
+        present_ts = {datetime.fromisoformat(b["ts_start"]).timestamp() for b in bars if b.get("ts_start")}
+        for day in session_list:
+            for slot in calendar.hourly_slots(day):
+                if slot.ts_start.timestamp() not in present_ts:
+                    missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
     missing = [d.isoformat() for d in session_list if d not in present]
     symbol_name = _symbol_for(iid, _mappings(backend), on=end)
     if symbol_name is None and inst is not None:
@@ -608,7 +632,9 @@ def list_bars(
         "start": start.isoformat(),
         "end": end.isoformat(),
         "bars": bars,
-        "missing_sessions": missing,
+        "missing_sessions": missing if interval == Interval.D1 else [],
+        "missing_hours": missing_hours,
+        "note": "No canonical hourly bars are available." if interval == Interval.H1 and source_name == SOURCE_CANONICAL and not bars else None,
     }
 
 
@@ -617,6 +643,7 @@ def list_flags(
     *,
     market: Market | None = None,
     flag: str | None = None,
+    interval: Interval = Interval.D1,
     start: date | None = None,
     end: date | None = None,
     limit: int = DEFAULT_FLAG_LIMIT,
@@ -632,7 +659,7 @@ def list_flags(
     items: list[dict[str, Any]] = []
     counts = {name: 0 for name in KNOWN_FLAGS}
     for mkt in markets:
-        rows = _scan_canonical(backend, None, start=start, end=end, market=mkt)
+        rows = _scan_canonical(backend, None, interval=interval, start=start, end=end, market=mkt)
         for row in rows:
             names = _flag_names(getattr(row, "flags", None))
             if not names:
@@ -649,6 +676,8 @@ def list_flags(
                     "symbol": _symbol_for(iid, mappings, on=getattr(row, "session_date", None)),
                     "market": mkt.value,
                     "session_date": _iso_date(getattr(row, "session_date", None)),
+                    "ts_start": row.ts_start.isoformat() if getattr(row, "ts_start", None) else None,
+                    "session": getattr(row, "session", None),
                     "flags": names,
                 }
             )

@@ -9,6 +9,10 @@
       "nav.flags": "Flags",
       "header.readonly": "Local read-only UI. Not a public API.",
       "footer.api": "Routes under /api/v1 are for this local UI only and are not a stable public API.",
+      "interval.label": "Interval",
+      "chart.hours": "Missing hours",
+      "chart.hourly_bars": "Hourly bars (New York time)",
+      "chart.no_hourly": "No canonical hourly bars are available.",
       "dash.title": "Coverage dashboard",
       "dash.lede": "Read-only view of stored bars, quality flags, and quota usage. This page never fetches or writes data.",
       "dash.markets": "Markets",
@@ -68,6 +72,10 @@
       "nav.flags": "质量标记",
       "header.readonly": "本机只读界面，不是公开 API。",
       "footer.api": "/api/v1 仅供本机页面内部使用，本版不承诺稳定。",
+      "interval.label": "周期",
+      "chart.hours": "缺失时段",
+      "chart.hourly_bars": "小时线（纽约时间）",
+      "chart.no_hourly": "暂无规范层小时线。",
       "dash.title": "覆盖看板",
       "dash.lede": "只读查看已存 K 线覆盖、质量标记和额度用量。本页不会抓取或写入数据。",
       "dash.markets": "市场",
@@ -211,10 +219,21 @@
     where.innerHTML = '<p class="err">' + escapeHtml(err && err.message ? err.message : t("err.generic")) + "</p>";
   }
 
+  function intervalControl(value) {
+    return '<label>' + t("interval.label") + '<select id="interval"><option value="1d">1d</option><option value="1h"' + (value === "1h" ? " selected" : "") + '>1h</option></select></label>';
+  }
+
+  function formatTime(value, session) {
+    if (!value) return "";
+    return new Intl.DateTimeFormat(lang === "zh" ? "zh-CN" : "en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value)) + (session ? " (" + session + ")" : "");
+  }
+
   function renderDashboard(root) {
+    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
     root.innerHTML =
       "<h1>" + t("dash.title") + "</h1>" +
       '<p class="lede">' + t("dash.lede") + "</p>" +
+      intervalControl(interval) +
       "<h2>" + t("dash.markets") + "</h2>" +
       '<div id="markets" class="grid"></div>' +
       "<h2>" + t("dash.flags") + "</h2>" +
@@ -222,7 +241,8 @@
       "<h2>" + t("dash.quota") + "</h2>" +
       '<div id="quota" class="card"></div>';
 
-    Promise.all([apiGet("/api/v1/markets"), apiGet("/api/v1/flags?limit=1"), apiGet("/api/v1/quota")])
+    document.getElementById("interval").addEventListener("change", function () { location.search = "?interval=" + this.value; });
+    Promise.all([apiGet("/api/v1/markets?interval=" + interval), apiGet("/api/v1/flags?limit=1&interval=" + interval), apiGet("/api/v1/quota")])
       .then(function (results) {
         var markets = results[0].markets || [];
         var flags = results[1];
@@ -253,7 +273,7 @@
         }).join("");
         document.getElementById("flag-summary").innerHTML =
           (parts || '<p class="empty">' + t("dash.flags_empty") + "</p>") +
-          '<p class="note"><a href="/flags">' + t("nav.flags") + "</a></p>";
+          '<p class="note"><a href="/flags?interval=' + interval + '">' + t("nav.flags") + "</a></p>";
 
         var quotaBox = document.getElementById("quota");
         if (!quota.available || !(quota.providers || []).length) {
@@ -274,11 +294,13 @@
   }
 
   function renderFlags(root) {
+    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
     root.innerHTML =
       "<h1>" + t("flags.title") + "</h1>" +
       '<p class="lede">' + t("flags.lede") + "</p>" +
-      '<div id="flags-table" class="card"></div>';
-    apiGet("/api/v1/flags?limit=200").then(function (body) {
+      intervalControl(interval) + '<div id="flags-table" class="card"></div>';
+    document.getElementById("interval").addEventListener("change", function () { location.search = "?interval=" + this.value; });
+    apiGet("/api/v1/flags?limit=200&interval=" + interval).then(function (body) {
       var box = document.getElementById("flags-table");
       var items = body.items || [];
       if (!items.length) {
@@ -286,7 +308,7 @@
         return;
       }
       var rows = items.map(function (item) {
-        return "<tr><td>" + escapeHtml(item.session_date || "") + "</td><td>" +
+        return "<tr><td>" + escapeHtml(interval === "1h" ? formatTime(item.ts_start, item.session) : item.session_date || "") + "</td><td>" +
           escapeHtml((item.market || "").toUpperCase()) + "</td><td class=\"mono\">" +
           escapeHtml(item.symbol || "") + "</td><td class=\"mono\">" +
           escapeHtml(item.instrument_id || "") + "</td><td>" + flagBadges(item.flags) + "</td></tr>";
@@ -309,7 +331,7 @@
     root.innerHTML =
       "<h1>" + t("chart.title") + "</h1>" +
       '<p class="lede">' + t("chart.lede") + "</p>" +
-      '<form class="toolbar" id="chart-form">' +
+      '<form class="toolbar" id="chart-form">' + intervalControl(q.get("interval")) +
         "<label>" + t("chart.symbol") + '<input name="q" id="chart-q" value="' + escapeHtml(initial) + '" placeholder="TEST1" autocomplete="off"></label>' +
         "<label>" + t("chart.source") + '<select name="source" id="chart-source"><option value="canonical">canonical</option></select></label>' +
         "<label>" + t("chart.start") + '<input name="start" id="chart-start" type="date" value="' + escapeHtml(q.get("start") || "") + '"></label>' +
@@ -372,6 +394,8 @@
     if (q.indexOf(":") !== -1) params.set("id", q);
     else params.set("symbol", q);
     params.set("source", source);
+    var interval = document.getElementById("interval").value;
+    params.set("interval", interval);
     if (start) params.set("start", start);
     if (end) params.set("end", end);
     history.replaceState(null, "", "/chart?" + params.toString());
@@ -380,21 +404,26 @@
       if (body.end) document.getElementById("chart-end").value = body.end;
       fillSources(body.available_sources, body.source);
       var isCanonical = body.source === "canonical";
-      note.textContent = isCanonical ? t("chart.canonical_note") : t("chart.raw_note");
-      var missing = body.missing_sessions || [];
+      note.textContent = body.note ? t("chart.no_hourly") : (isCanonical ? t("chart.canonical_note") : t("chart.raw_note"));
+      var missing = interval === "1h" ? (body.missing_hours || []) : (body.missing_sessions || []);
       var bars = body.bars || [];
-      drawChart(bars, missing, isCanonical);
+      drawChart(bars, missing, isCanonical, interval);
       var bits = [];
       if (missing.length) {
-        bits.push("<div class=\"notice\"><strong>" + t("chart.gaps") + " (" + missing.length + "):</strong> " +
-          escapeHtml(missing.join(", ")) + "</div>");
+        bits.push("<div class=\"notice\"><strong>" + (interval === "1h" ? t("chart.hours") : t("chart.gaps")) + " (" + missing.length + "):</strong> " +
+          escapeHtml(missing.map(function (m) { return interval === "1h" ? formatTime(m.ts_start, m.session) : m; }).join(", ")) + "</div>");
       }
       var fieldGaps = bars.filter(function (b) { return (b.missing_fields || []).length; });
       if (fieldGaps.length) {
         bits.push("<div class=\"notice\"><strong>" + t("chart.missing_fields") + ":</strong> " +
           fieldGaps.map(function (b) {
-            return escapeHtml(b.session_date) + " (" + escapeHtml((b.missing_fields || []).join(", ")) + ")";
+            return escapeHtml(interval === "1h" ? formatTime(b.ts_start, b.session) : b.session_date) + " (" + escapeHtml((b.missing_fields || []).join(", ")) + ")";
           }).join("; ") + "</div>");
+      }
+      if (interval === "1h" && bars.length) {
+        bits.push("<h2>" + t("chart.hourly_bars") + "</h2><ul>" + bars.map(function (b) {
+          return "<li>" + escapeHtml(formatTime(b.ts_start, b.session)) + " " + flagBadges(b.flags) + "</li>";
+        }).join("") + "</ul>");
       }
       if (!bars.length) bits.unshift('<p class="empty">' + t("chart.empty") + "</p>");
       meta.innerHTML = bits.join("");
@@ -403,7 +432,9 @@
     });
   }
 
-  function drawChart(bars, missing, isCanonical) {
+  function drawChart(bars, missing, isCanonical, interval) {
+    var hourly = interval === "1h";
+    function timeOf(item) { return hourly ? Math.floor(new Date(item.ts_start).getTime() / 1000) : (typeof item === "string" ? item : item.session_date); }
     var host = document.getElementById("chart");
     if (!window.LightweightCharts) {
       host.textContent = t("err.generic");
@@ -417,10 +448,11 @@
     chartApi = LightweightCharts.createChart(host, {
       width: host.clientWidth || 800,
       height: 440,
+      localization: hourly ? { timeFormatter: function (time) { return formatTime(time * 1000); } } : {},
       layout: { background: { color: "#ffffff" }, textColor: "#1a2332" },
       grid: { vertLines: { color: "#eef1f4" }, horzLines: { color: "#eef1f4" } },
       rightPriceScale: { borderColor: "#d8dee6" },
-      timeScale: { borderColor: "#d8dee6", timeVisible: false }
+      timeScale: { borderColor: "#d8dee6", timeVisible: hourly, tickMarkFormatter: hourly ? function (time) { return formatTime(time * 1000); } : undefined }
     });
     candleSeries = chartApi.addCandlestickSeries({
       upColor: "#087f5b",
@@ -430,9 +462,9 @@
       wickDownColor: "#b42318"
     });
     var byDay = {};
-    bars.forEach(function (b) { byDay[b.session_date] = b; });
-    var days = bars.map(function (b) { return b.session_date; }).concat(missing || []);
-    days.sort();
+    bars.forEach(function (b) { byDay[timeOf(b)] = b; });
+    var days = bars.map(timeOf).concat((missing || []).map(timeOf));
+    days.sort(function (a, b) { return a < b ? -1 : a > b ? 1 : 0; });
     var data = [];
     var seen = {};
     days.forEach(function (day) {
@@ -454,7 +486,7 @@
     var markers = [];
     (missing || []).forEach(function (day) {
       markers.push({
-        time: day,
+        time: timeOf(day),
         position: "belowBar",
         color: "#b54708",
         shape: "circle",
@@ -465,7 +497,7 @@
       bars.forEach(function (b) {
         if (!(b.flags || []).length) return;
         markers.push({
-          time: b.session_date,
+          time: timeOf(b),
           position: "aboveBar",
           color: "#b42318",
           shape: "arrowDown",
@@ -476,7 +508,7 @@
       bars.forEach(function (b) {
         if (!(b.missing_fields || []).length) return;
         markers.push({
-          time: b.session_date,
+          time: timeOf(b),
           position: "aboveBar",
           color: "#b54708",
           shape: "arrowDown",
