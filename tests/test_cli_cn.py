@@ -113,3 +113,28 @@ def test_second_run_refetches_nothing(tmp_path, capsys):
     assert cli(["run"], tmp_path, factory) == 0
     assert "plan: 0 jobs" in capsys.readouterr().out
     assert (len(fake.requests), len(fake.factor_requests)) == (bars, factors)
+
+
+def test_verify_cn_only_config_reports_xshg_raw_limit_up_and_the_halt(tmp_path, capsys):
+    fake, factory = make_factory()
+    assert cli(["run"], tmp_path, factory) == 0
+    capsys.readouterr()
+    assert cli(["verify", "--json", "reports/verify.json"], tmp_path, factory) == 0
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "us market only" not in captured.err + out
+    assert "market cn" in out and "cn-daily-v1" in out and "XSHG" in out
+    assert "2026-03-02..2026-03-06" in out and "expected sessions 5" in out
+    assert "stored RAW" in out  # QFQ / HFQ are not what verify scores
+    assert "suspended 1 (expected)" in out and "missing 0" in out  # the halted Wednesday is no ordinary hole
+    assert "LIMIT_UP=1" in out
+    assert "canonical status: complete=4" in out
+
+    import json
+
+    report = json.loads((tmp_path / "data" / "reports" / "verify.json").read_text())
+    assert report["market"] == "cn" and report["policy_version"] == "cn-daily-v1"  # single market: plain object
+    whole = report["periods"][0]
+    assert whole["coverage"]["raw_cells"] == 5 and whole["coverage"]["canonical_cells"] == 4
+    assert whole["coverage"]["suspended_cells"] == 1 and whole["coverage"]["missing_cells"] == 0
+    assert whole["quality"]["flags"] == {"LIMIT_UP": 1}

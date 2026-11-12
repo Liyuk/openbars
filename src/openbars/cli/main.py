@@ -2,8 +2,9 @@
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
-credential values. ``plan`` / ``run`` serve every market in ``markets`` (us, crypto, cn); ``verify``
-is a read-only report over the stored US bars.
+credential values. ``plan`` / ``run`` serve every market in ``markets`` (us, crypto, cn, hk); ``verify``
+is a read-only report over the stored bars of every configured market, each on its own calendar
+and ``policy_version``.
 """
 
 from __future__ import annotations
@@ -99,12 +100,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init", help="write config.yaml and .env from the examples (never overwrites)")
     init.add_argument("directory", nargs="?", default=".", help="target directory (default .)")
 
-    verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars (us market only)")
+    verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars, per configured market (us, crypto, cn, hk)")
     common(verify)
     verify.add_argument("--start", type=_iso_date, default=None, help="first session (default: history.start or oldest stored)")
-    verify.add_argument("--end", type=_iso_date, default=None, help="last session (default: latest ready session)")
+    verify.add_argument("--end", type=_iso_date, default=None, help="last session (default: latest ready session of each market)")
     verify.add_argument("--recent", type=int, default=20, help="also report the last N sessions (0 = off, default 20)")
-    verify.add_argument("--json", default=None, metavar="PATH", help="also write the report as JSON under the data dir")
+    verify.add_argument("--json", default=None, metavar="PATH", help="also write the report as JSON under the data dir (several markets: {\"markets\": {name: report}})")
 
     plan = sub.add_parser("plan", help="show the jobs and request budget (dry run; --submit to queue them)")
     common(plan)
@@ -492,7 +493,7 @@ def _shadow(args: argparse.Namespace, settings: Settings, out: _Out, factory: Pr
 def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Callable[[], datetime]) -> int:
     import json
 
-    from openbars.calendars import XNYSCalendar
+    from openbars.calendars import CALENDAR_NAMES, calendar_for_market
     from openbars.core.models import DateRange, Market
     from openbars.orchestrator.planner import latest_ready_session
     from openbars.orchestrator.verify import (
@@ -501,12 +502,15 @@ def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Call
         format_report,
         load_canonical,
         load_raw_bars,
+        market_notes,
         stored_session_range,
         verify,
     )
+    from openbars.reconcile.crypto import policy_version_for_market
 
-    if Market.US not in settings.selection.markets:
-        out.err("error: verify supports the us market only (XNYS calendar); add 'us' to markets")
+    markets = [m for m in Market if m in settings.selection.markets]
+    if not markets:
+        out.err("error: verify needs at least one market in markets (us, crypto, cn, hk)")
         return EXIT_USAGE
     if args.recent < 0:
         out.err("error: --recent must be >= 0")
@@ -524,48 +528,73 @@ def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Call
 
     tolerances = Tolerances.from_settings(settings)
     backend = _open_backend(settings, root, write=False)
-    ready = latest_ready_session(clock())
     sel = settings.selection
-    bounds = [d for d in (sel.history_end, ready) if d is not None]
-    end = args.end or (min(bounds) if bounds else None)
-    start = args.start or sel.history_start
-    probe = DateRange(start or date(1970, 1, 1), end or clock().date())
-    stored = stored_session_range(backend, Market.US, probe)
-    if stored is None:
+    now = clock()
+    blocks: list[tuple[Market, list[str], dict[str, Any]]] = []
+    skipped: dict[str, str] = {}
+    for market in markets:
+        calendar = calendar_for_market(market)
+        policy = policy_version_for_market(market)
+        ready = latest_ready_session(now, market)
+        bounds = [d for d in (sel.history_end, ready) if d is not None]
+        end = args.end or (min(bounds) if bounds else None)
+        start = args.start or sel.history_start
+        probe = DateRange(start or date(1970, 1, 1), end or now.date())
+        stored = stored_session_range(backend, market, probe)
+        if stored is None:
+            skipped[market.value] = "no stored bars for the requested window"
+            continue
+        window = DateRange(start or stored.start, end or stored.end)
+        if window.end < window.start:
+            out.err(f"error: empty window {window.start}..{window.end}")
+            return EXIT_USAGE
+
+        raw = load_raw_bars(backend, market, window)
+        canonical = load_canonical(backend, market, window)
+        notes = list(market_notes(market))
+        symbols = settings.universe.get(market, ())
+        if symbols:
+            universe = list(symbols)
+        else:
+            master = backend.instruments.instruments()
+            universe = [i.instrument_id for i in master if i.market is market]
+            if not universe:
+                universe = sorted({b.key for b in raw} | {c.key for c in canonical})
+                notes.append("no universe configured or registered: using every symbol found in the store")
+        aliases = build_aliases(
+            backend.instruments, [*universe, *(b.key for b in raw), *(c.key for c in canonical)],
+            on=window.end, market=market,
+        )  # fmt: skip
+        report = verify(
+            raw, canonical, calendar=calendar, window=window, universe=universe,
+            tolerances=tolerances, aliases=aliases, recent_sessions=args.recent or None,
+            policy_version=policy,
+        )  # fmt: skip
+        header = f"== market {market.value}: calendar {CALENDAR_NAMES[market]}, policy {policy} =="
+        lines = [header, *format_report(report), *(f"note: {n}" for n in notes)]
+        payload = report.to_dict()
+        payload["market"] = market.value
+        payload["calendar"] = CALENDAR_NAMES[market]
+        payload["notes"] = [*payload["notes"], *notes]
+        blocks.append((market, lines, payload))
+
+    if not blocks:
         out.err(f"error: no stored bars in {root} for the requested window; run `openbars run` first")
         return EXIT_ERROR
-    window = DateRange(start or stored.start, end or stored.end)
-    if window.end < window.start:
-        out.err(f"error: empty window {window.start}..{window.end}")
-        return EXIT_USAGE
-
-    raw = load_raw_bars(backend, Market.US, window)
-    canonical = load_canonical(backend, Market.US, window)
-    notes = []
-    symbols = settings.universe.get(Market.US, ())
-    if symbols:
-        universe = list(symbols)
-    else:
-        master = backend.instruments.instruments()
-        universe = [i.instrument_id for i in master if i.market is Market.US]
-        if not universe:
-            universe = sorted({b.key for b in raw} | {c.key for c in canonical})
-            notes.append("no universe configured or registered: using every symbol found in the store")
-    aliases = build_aliases(
-        backend.instruments, [*universe, *(b.key for b in raw), *(c.key for c in canonical)],
-        on=window.end, market=Market.US,
-    )  # fmt: skip
-    report = verify(
-        raw, canonical, calendar=XNYSCalendar(), window=window, universe=universe,
-        tolerances=tolerances, aliases=aliases, recent_sessions=args.recent or None,
-    )  # fmt: skip
-    for line in [*format_report(report), *(f"note: {n}" for n in notes)]:
-        out.line(line)
+    for _, lines, _payload in blocks:
+        for line in lines:
+            out.line(line)
+    for name, reason in skipped.items():
+        out.line(f"note: market {name}: {reason}; skipped (run `openbars run` first)")
     if json_path is not None:
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = report.to_dict()
-        payload["notes"] = [*payload["notes"], *notes]
-        json_path.write_text(out._scrub(json.dumps(payload, indent=2, sort_keys=True)) + "\n", encoding="utf-8")
+        if len(markets) == 1:
+            document: dict[str, Any] = blocks[0][2]  # single market: the plain report object
+        else:
+            document = {"markets": {m.value: payload for m, _lines, payload in blocks}}
+            if skipped:
+                document["skipped"] = skipped
+        json_path.write_text(out._scrub(json.dumps(document, indent=2, sort_keys=True)) + "\n", encoding="utf-8")
         out.line(f"wrote {json_path}")
     return EXIT_OK
 
