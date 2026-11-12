@@ -1,0 +1,229 @@
+[
+  {
+    "name": "primary_only",
+    "bars": [
+      {
+        "source": "massive/eod/split",
+        "close": "100",
+        "volume": 1000000
+      }
+    ],
+    "expected": {
+      "selection_reason": "primary_source",
+      "quality_status": "complete",
+      "price_source": "massive/eod/split",
+      "volume_source": "massive/eod/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc",
+        "consolidated_volume",
+        "split_adjusted_volume"
+      ],
+      "sources_seen": [
+        "massive/eod/split"
+      ]
+    }
+  },
+  {
+    "name": "primary_secondary_divergent",
+    "bars": [
+      {
+        "source": "massive/eod/split",
+        "close": "100",
+        "volume": 1000000
+      },
+      {
+        "source": "alpaca/sip/split",
+        "close": "100",
+        "volume": 1200000
+      }
+    ],
+    "expected": {
+      "selection_reason": "primary_source",
+      "quality_status": "divergent",
+      "price_source": "massive/eod/split",
+      "volume_source": "massive/eod/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc"
+      ],
+      "sources_seen": [
+        "massive/eod/split",
+        "alpaca/sip/split"
+      ]
+    }
+  },
+  {
+    "name": "primary_corroborated",
+    "bars": [
+      {
+        "source": "massive/eod/split",
+        "close": "100",
+        "volume": 1000000
+      },
+      {
+        "source": "alpaca/sip/split",
+        "close": "100",
+        "volume": 1200000
+      },
+      {
+        "source": "yfinance/yahoo/split",
+        "close": "100",
+        "volume": 1000000
+      },
+      {
+        "source": "twelve_data/daily/split",
+        "close": "100",
+        "volume": 1000000
+      }
+    ],
+    "expected": {
+      "selection_reason": "primary_source_corroborated",
+      "quality_status": "complete",
+      "price_source": "massive/eod/split",
+      "volume_source": "massive/eod/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc",
+        "consolidated_volume",
+        "split_adjusted_volume"
+      ],
+      "sources_seen": [
+        "massive/eod/split",
+        "alpaca/sip/split",
+        "twelve_data/daily/split",
+        "yfinance/yahoo/split"
+      ]
+    }
+  },
+  {
+    "name": "sip_gap_fill",
+    "bars": [
+      {
+        "source": "alpaca/sip/split",
+        "close": "100",
+        "volume": 1000000
+      }
+    ],
+    "expected": {
+      "selection_reason": "compatible_gap_fill",
+      "quality_status": "complete",
+      "price_source": "alpaca/sip/split",
+      "volume_source": "alpaca/sip/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc",
+        "consolidated_volume",
+        "split_adjusted_volume"
+      ],
+      "sources_seen": [
+        "alpaca/sip/split"
+      ]
+    }
+  },
+  {
+    "name": "yfinance_fill",
+    "bars": [
+      {
+        "source": "yfinance/yahoo/split",
+        "close": "100",
+        "volume": 1000000
+      },
+      {
+        "source": "twelve_data/daily/split",
+        "close": "100",
+        "volume": 1000000
+      }
+    ],
+    "expected": {
+      "selection_reason": "fill_yfinance",
+      "quality_status": "complete",
+      "price_source": "yfinance/yahoo/split",
+      "volume_source": "yfinance/yahoo/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc",
+        "consolidated_volume",
+        "split_adjusted_volume"
+      ],
+      "sources_seen": [
+        "twelve_data/daily/split",
+        "yfinance/yahoo/split"
+      ]
+    }
+  },
+  {
+    "name": "twelve_data_fill_price_only",
+    "bars": [
+      {
+        "source": "twelve_data/daily/split",
+        "close": "100",
+        "volume": 1000000
+      }
+    ],
+    "expected": {
+      "selection_reason": "fill_twelve_data",
+      "quality_status": "complete",
+      "price_source": "twelve_data/daily/split",
+      "volume_source": "twelve_data/daily/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:unknown",
+        "currency:USD",
+        "price_ohlc"
+      ],
+      "sources_seen": [
+        "twelve_data/daily/split"
+      ]
+    }
+  },
+  {
+    "name": "sip_volume_missing",
+    "bars": [
+      {
+        "source": "alpaca/sip/split",
+        "close": "100",
+        "volume": 0
+      }
+    ],
+    "expected": {
+      "selection_reason": "compatible_gap_fill",
+      "quality_status": "volume_missing",
+      "price_source": "alpaca/sip/split",
+      "volume_source": "alpaca/sip/split",
+      "capabilities": [
+        "price_basis:split_adjusted",
+        "adjustment_scope:splits",
+        "session_semantics:provider_aligned",
+        "volume_basis:split_adjusted",
+        "currency:USD",
+        "price_ohlc"
+      ],
+      "sources_seen": [
+        "alpaca/sip/split"
+      ]
+    }
+  }
+]

@@ -19,7 +19,14 @@ gitleaks_cmd() {
     gitleaks "$@"
   elif command -v docker >/dev/null 2>&1; then
     echo "    using docker zricethezav/gitleaks:v8.30.1"
-    docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1 "$@"
+    # Worktrees store objects in the main .git dir; mount it at the same host path
+    # so gitleaks can walk history (a lone -v "$PWD:/repo" is not enough).
+    docker_args=(--rm -v "$PWD:/repo")
+    git_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "${git_common}" ] && [ -d "${git_common}" ] && [ "${git_common}" != "$PWD/.git" ]; then
+      docker_args+=(-v "${git_common}:${git_common}")
+    fi
+    docker run "${docker_args[@]}" -w /repo zricethezav/gitleaks:v8.30.1 "$@"
   else
     echo "error: gitleaks not found and docker is unavailable." >&2
     echo "install gitleaks, or start Docker to use zricethezav/gitleaks:v8.30.1" >&2
