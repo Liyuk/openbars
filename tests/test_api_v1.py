@@ -431,3 +431,135 @@ def test_raw_default_window_uses_selected_source(client, backend):
     body = client.get('/api/v1/bars', params={'id': T1, 'source': 'prov_c'}).json()
     assert body['start'] == body['end'] == str(day)
     assert [bar['session_date'] for bar in body['bars']] == [str(day)]
+
+
+def test_hourly_historical_sources_and_source_defaults(client, backend):
+    other_day = date(2020, 2, 3)
+    for provider, day in [('prov_a', DAYS[0]), ('prov_b', other_day)]:
+        batch = raw_batch([SYM], [day], provider=provider, fetch_id='hourly-' + provider)
+        rows = [replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+                for row in raw_rows_from_batch(batch)]
+        backend.raw.append_rows(rows)
+    params = {'id': T1, 'interval': '1h'}
+    initial = client.get('/api/v1/bars', params=params).json()
+    assert initial['available_sources'] == ['prov_a', 'prov_b']
+    for provider, day in [('prov_a', DAYS[0]), ('prov_b', other_day)]:
+        body = client.get('/api/v1/bars', params={**params, 'source': provider}).json()
+        assert body['available_sources'] == ['prov_a', 'prov_b']
+        assert body['start'] == body['end'] == str(day)
+        assert [bar['session_date'] for bar in body['bars']] == [str(day)]
+    canonical = replace(_canon(T1, DAYS[1], '10'), interval=Interval.H1)
+    backend.canonical.upsert_rows([canonical])
+    body = client.get('/api/v1/bars', params=params).json()
+    assert body['source'] == 'canonical'
+    assert body['start'] == body['end'] == str(DAYS[1])
+    assert len(body['bars']) == 1
+    assert body['available_sources'] == ['canonical', 'prov_a', 'prov_b']
+    daily = client.get('/api/v1/bars', params={'id': T1}).json()
+    assert daily['start'] == str(START) and daily['end'] == str(END)
+    assert daily['available_sources'] == ['canonical', 'prov_a', 'prov_b']
+    daily_narrow = client.get('/api/v1/bars', params={
+        'id': T1, 'start': str(DAYS[4]), 'end': str(DAYS[4]),
+    }).json()
+    assert daily_narrow['available_sources'] == ['canonical', 'prov_a']
+
+
+def test_hourly_raw_default_window_is_bounded_for_long_history(client, backend):
+    days = [date(2020, 1, 2), date(2025, 1, 2)]
+    batch = raw_batch([SYM], days, provider='prov_long', fetch_id='hourly-long')
+    backend.raw.append_rows([
+        replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+        for row in raw_rows_from_batch(batch)
+    ])
+    response = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_long'})
+    assert response.status_code == 200
+    body = response.json()
+    assert days[0].isoformat() <= body['start'] <= body['end'] == days[-1].isoformat()
+    assert body['bars'][-1]['session_date'] == days[-1].isoformat()
+
+
+def test_hourly_raw_default_window_counts_extended_slots(client, backend):
+    # ~600 sessions: fits at 7 regular slots/session, not at 17 with pre/post-market.
+    days = [date(2023, 1, 3), date(2025, 5, 30)]
+    batch = raw_batch([SYM], days, provider='prov_ext', fetch_id='hourly-ext')
+    rows = [replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+            for row in raw_rows_from_batch(batch)]
+    rows[-1] = replace(rows[-1], extra={**(rows[-1].extra or {}), 'session': 'pre'})
+    backend.raw.append_rows(rows)
+    response = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_ext'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert days[0].isoformat() < body['start'] <= body['end'] == days[-1].isoformat()
+
+
+def test_hourly_mixed_mapped_and_legacy_sources_and_rows(client, backend):
+    entries = [
+        ('prov_mixed', DAYS[0], T1),
+        ('prov_mixed', DAYS[1], None),
+        ('prov_legacy', DAYS[2], ''),
+        ('prov_other', DAYS[3], 'us:eq:xnys:OTHER'),
+    ]
+    for provider, day, iid in entries:
+        batch = raw_batch([SYM], [day], provider=provider, fetch_id='mixed-' + provider + str(day))
+        backend.raw.append_rows([replace(row, instrument_id=iid, market=Market.US, interval=Interval.H1)
+                                 for row in raw_rows_from_batch(batch)])
+    params = {'id': T1, 'interval': '1h'}
+    initial = client.get('/api/v1/bars', params=params).json()
+    assert initial['available_sources'] == ['prov_legacy', 'prov_mixed']
+    mixed = client.get('/api/v1/bars', params={**params, 'source': 'prov_mixed'}).json()
+    assert (mixed['start'], mixed['end']) == (str(DAYS[0]), str(DAYS[1]))
+    assert [bar['session_date'] for bar in mixed['bars']] == [str(DAYS[0]), str(DAYS[1])]
+    legacy = client.get('/api/v1/bars', params={**params, 'source': 'prov_legacy'}).json()
+    assert legacy['start'] == legacy['end'] == str(DAYS[2])
+    assert len(legacy['bars']) == 1
+
+
+def test_hourly_mixed_rows_deduplicate_and_prefer_mapped(client, backend, monkeypatch):
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_mixed', fetch_id='mapped')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=Interval.H1)
+    legacy = replace(mapped, instrument_id=None, close=D('999'))
+    scan = backend.raw.scan_rows
+
+    def mixed_scan(provider, market, interval, window, **kwargs):
+        if interval == Interval.H1 and (provider is None or provider == 'prov_mixed'):
+            return [mapped] if 'instrument_ids' in kwargs else [legacy]
+        return scan(provider, market, interval, window, **kwargs)
+
+    monkeypatch.setattr(backend.raw, 'scan_rows', mixed_scan)
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_mixed'}).json()
+    assert len(body['bars']) == 1
+    assert D(str(body['bars'][0]['close'])) == mapped.close
+
+
+def test_daily_raw_rows_keep_pre_147_legacy_fallback(backend, monkeypatch):
+    from openbars.api.queries import _raw_rows
+
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_daily', fetch_id='daily')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=Interval.D1)
+    legacy = [replace(mapped, instrument_id=None, feed='legacy-only')]
+    found = {'mapped': [mapped]}
+    monkeypatch.setattr(backend.raw, 'scan_rows', lambda *args, **kwargs:
+                        found['mapped'] if 'instrument_ids' in kwargs else legacy)
+    kwargs = dict(market=Market.US, interval=Interval.D1, start=DAYS[0], end=DAYS[0])
+    # Mapped rows exist: legacy rows are not added (same as before #147).
+    assert _raw_rows(backend, T1, 'prov_daily', **kwargs) == [mapped]
+    # No mapped rows: fall back to the legacy symbol rows.
+    found['mapped'] = []
+    assert _raw_rows(backend, T1, 'prov_daily', **kwargs) == legacy
+
+
+def test_raw_rows_keep_distinct_series_and_only_merge_matching_legacy(backend, monkeypatch):
+    interval = Interval.H1
+    from openbars.api.queries import _raw_rows
+
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_series', fetch_id='series')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=interval)
+    variants = [mapped, replace(mapped, feed='other'), replace(mapped, adjustment='adjusted'),
+                replace(mapped, revision=mapped.revision + 1)]
+    legacy = [replace(row, instrument_id=None) for row in variants]
+    legacy.append(replace(mapped, instrument_id=None, feed='legacy-only'))
+    monkeypatch.setattr(backend.raw, 'scan_rows', lambda *args, **kwargs:
+                        variants if 'instrument_ids' in kwargs else legacy)
+    rows = _raw_rows(backend, T1, 'prov_series', market=Market.US, interval=interval,
+                     start=DAYS[0], end=DAYS[0])
+    assert rows == variants + [legacy[-1]]

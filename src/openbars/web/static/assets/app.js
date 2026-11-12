@@ -357,11 +357,16 @@
       ev.preventDefault();
       loadChart();
     });
-    sourceSel.addEventListener("change", function () {
-      if (document.getElementById("chart-q").value.trim()) loadChart();
-    });
+    sourceSel.addEventListener("change", resetChartWindow);
+    document.getElementById("interval").addEventListener("change", resetChartWindow);
 
     if (initial) loadChart();
+  }
+
+  function resetChartWindow() {
+    document.getElementById("chart-start").value = "";
+    document.getElementById("chart-end").value = "";
+    loadChart();
   }
 
   function fillSources(available, selected) {
@@ -381,7 +386,10 @@
     return Number(value);
   }
 
+  var chartRequestSequence = 0;
+
   function loadChart() {
+    var requestSequence = ++chartRequestSequence;
     var q = document.getElementById("chart-q").value.trim();
     var source = document.getElementById("chart-source").value || "canonical";
     var start = document.getElementById("chart-start").value;
@@ -402,6 +410,7 @@
     if (end) params.set("end", end);
     history.replaceState(null, "", "/chart?" + params.toString());
     apiGet("/api/v1/bars?" + params.toString()).then(function (body) {
+      if (requestSequence !== chartRequestSequence) return;
       if (body.start) document.getElementById("chart-start").value = body.start;
       if (body.end) document.getElementById("chart-end").value = body.end;
       fillSources(body.available_sources, body.source);
@@ -430,6 +439,7 @@
       if (!bars.length) bits.unshift('<p class="empty">' + t("chart.empty") + "</p>");
       meta.innerHTML = bits.join("");
     }).catch(function (err) {
+      if (requestSequence !== chartRequestSequence) return;
       note.innerHTML = '<span class="err">' + escapeHtml(err.message || t("err.generic")) + "</span>";
     });
   }
