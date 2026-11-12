@@ -130,6 +130,7 @@ uv run openbars plan && uv run openbars run
 
 ### 存储维护（Parquet 后端）
 
+- Python 读取方可用 `open_backend(path, read_only=True, index_dir=...)` 只读打开 Parquet 数据目录。此模式不创建或修改数据目录中的文件，不打开 `state.db`，写入与作业状态操作会抛出 `ReadOnlyError`；DuckDB 目录索引及其锁位于用户缓存目录（默认 `~/.cache/openbars`），也可用 `index_dir` 指定。
 - `openbars usage [--json]`：按 layer / market / interval / year（raw 另按 provider）汇总文件数与字节数，日线与小时线分开列；只打印相对数据目录的路径。
 - `openbars compact [--layer raw|canonical|all] [--min-parts N]`：默认只列出会合并的分区与预计腾出的空间，加 `--apply` 才执行；去重语义不变。part 文件变多时（尤其是小时线回填之后）跑一次即可，执行时持有写锁，可与 `run` 并存。
 - 保留策略默认关闭：只有在 `storage.retention` 写了规则（例如 `- {layer: raw, keep_years: 2, market: us, interval: 1h}`）时，`openbars retention` 才会列出早于保留窗口的整年 raw 分区，加 `--apply` 才删除。canonical 与 ref 永远保留，配置成其它 layer 会报错。若 `history.start` 早于保留窗口，之后的 `plan` / `run` 可能重新拉取被删的区间。
@@ -254,6 +255,7 @@ uv run openbars plan && uv run openbars run
 
 ### Storage maintenance (Parquet backend)
 
+- Python readers can open a Parquet data directory with `open_backend(path, read_only=True, index_dir=...)`. This mode does not create or modify files in the data directory and does not open `state.db`; writes and job-state operations raise `ReadOnlyError`. The DuckDB catalog index and its lock live in the user cache (default `~/.cache/openbars`); `index_dir` overrides the location.
 - `openbars usage [--json]`: file count and bytes per layer / market / interval / year (raw also per provider), daily and hourly listed apart; prints paths relative to the data directory only.
 - `openbars compact [--layer raw|canonical|all] [--min-parts N]`: lists the partitions it would merge and the estimated space freed; only `--apply` changes files. Deduplication semantics are unchanged. Run it when parts pile up (for example after an hourly backfill); it holds the writer lock, so it is safe next to `run`.
 - Retention is off by default. Only when `storage.retention` has rules (for example `- {layer: raw, keep_years: 2, market: us, interval: 1h}`) does `openbars retention` list whole raw `year=` partitions older than the window, and only `--apply` deletes them. Canonical and ref are always kept; any other layer is a config error. If `history.start` reaches before the window, later `plan` / `run` may fetch the pruned range again.
