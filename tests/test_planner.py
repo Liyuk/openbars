@@ -669,3 +669,27 @@ def test_partial_hourly_raw_session_is_not_complete():
     raw.append(RawBatch("massive", "f1", req, (bar,)))
     p = plan(sel(day, day, frozenset({Interval.H1})), [provider], RawStoreCoverage(raw), universe=["TEST1"])
     assert len(p.jobs) == 1
+
+
+def test_mixed_daily_hourly_budget_combines_requests():
+    class MixedProvider(FakeProvider):
+        def capabilities(self):
+            from dataclasses import replace
+            daily = super().capabilities()[0]
+            return (daily, replace(daily, interval=Interval.H1))
+
+    provider = MixedProvider("alpaca")
+    selection = sel(date(2026, 3, 9), date(2026, 3, 9), frozenset({Interval.D1, Interval.H1}))
+    result = plan(selection, [provider], universe=["TEST1"])
+    assert {job.interval for job in result.jobs} == {Interval.D1, Interval.H1}
+    assert result.budget.providers["alpaca"].requests == 2
+
+
+def test_hourly_extended_hours_skips_twelve_data():
+    providers = {name: FakeProvider(name, interval=Interval.H1) for name in ("massive", "twelve_data")}
+    result = DefaultPlanner(include_extended_hours=True).plan(
+        sel(date(2026, 3, 2), date(2026, 3, 2), frozenset({Interval.H1})),
+        now=NOW, universe=["TEST1"], providers=providers,
+    )
+    assert {job.provider for job in result.jobs} == {"massive"}
+    assert any(note.code == "unsupported_options" and "twelve_data" in note.message for note in result.notes)

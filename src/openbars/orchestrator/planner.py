@@ -698,6 +698,7 @@ class DefaultPlanner:
                                                     self.include_extended_hours)
                 else:
                     have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
+                # A partially covered session is deliberately re-planned in full.
                 for day in eligible:
                     if day not in have:
                         groups[day].append(symbol)

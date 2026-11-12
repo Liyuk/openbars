@@ -257,7 +257,11 @@ def _ingest_pairs(settings: Settings, providers: Mapping[str, Any], backend: Any
 
 def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, now: datetime,
                master: Any = None) -> Plan:  # fmt: skip
-    planner = DefaultPlanner(policies=effective_policies(settings, providers), instruments=master)
+    planner = DefaultPlanner(
+        policies=effective_policies(settings, providers), instruments=master,
+        hourly_alignment=settings.us_hourly_alignment,
+        include_extended_hours=settings.include_extended_hours,
+    )
     return planner.plan(
         settings.selection,
         RawStoreCoverage(backend.raw),
@@ -356,6 +360,8 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
         sink=make_sink(backend, providers),
         gate=gate,
         feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
+        hourly_alignment=settings.us_hourly_alignment.value,
+        include_extended_hours=settings.include_extended_hours,
         clock=clock,
         redact=out._scrub,
     )
