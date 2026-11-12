@@ -50,6 +50,7 @@ class Settings:
     postgres_mode: str = "native"
     postgres_write: bool = False
     postgres_schema: str | None = None
+    postgres_quota: str = "sqlite"  # sqlite | postgres
     default_adjustment: Adjustment = Adjustment.SPLIT
     nodes: tuple[NodeConfig, ...] = (NodeConfig(name="local"),)
     # Explicit symbols per market (InstrumentMaster-based universes come later).

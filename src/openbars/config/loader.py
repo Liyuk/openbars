@@ -283,6 +283,9 @@ def parse_settings(data: Any) -> Settings:
         raise ConfigError(f"storage.postgres.mode must be native or upstream_compat, not {mode!r}")
     schema_name = pg.get("schema")
     schema_text = str(schema_name).strip() if schema_name is not None and str(schema_name).strip() else None
+    quota = str(pg.get("quota", "sqlite") or "sqlite").strip().lower()
+    if quota not in ("sqlite", "postgres"):
+        raise ConfigError(f"storage.postgres.quota must be sqlite or postgres, not {quota!r}")
     return Settings(
         selection=selection,
         providers=providers,
@@ -292,6 +295,7 @@ def parse_settings(data: Any) -> Settings:
         postgres_mode=mode,
         postgres_write=_as_bool(pg.get("write", False), "storage.postgres.write"),
         postgres_schema=schema_text,
+        postgres_quota=quota,
         universe=universe,
         reconcile=dict(_section(data, "reconcile")),
         schedule=dict(_section(data, "schedule")),

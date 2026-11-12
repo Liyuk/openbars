@@ -316,7 +316,7 @@ def _plan(args: argparse.Namespace, settings: Settings, out: _Out, factory: Prov
 def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: ProviderFactory,
          clock: Callable[[], datetime]) -> int:  # fmt: skip
     from openbars.orchestrator.nodes import DEFAULT_FEEDS, LocalNode
-    from openbars.quota.persistent import SqliteQuotaGate
+    from openbars.quota.postgres import open_configured_quota_gate
 
     root = data_dir(settings, args.data)
     # The gate needs the providers' policies; build once without it to read them.
@@ -326,7 +326,7 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
     backend = _open_backend(settings, root)
     state = _job_state(backend, root / "state.db")
     policies = effective_policies(settings, probe)
-    gate = SqliteQuotaGate(root / "quota.db", policies)
+    gate = open_configured_quota_gate(settings, data_dir=root, policies=policies)
     providers = factory(settings, gate)
     notes = skipped_providers(settings, providers)
 

@@ -27,8 +27,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, Callable, Iterator, Literal, Sequence
+from pathlib import Path
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
+import time
+
+from openbars.quota.persistent import Clock, PersistentQuotaGate, Sleep, _utcnow
+from openbars.quota.policy import QuotaPolicy
 from openbars.quota.store import PROVIDER_WIDE_SCOPE, GateState, QuotaTransaction, UsageRow
 
 SchemaMode = Literal["native", "upstream_compat"]
@@ -279,3 +284,73 @@ class _PostgresTransaction:
             f"DELETE FROM {store.usage_table} WHERE provider = %s AND scope = %s AND reserved_at < %s",
             (provider, scope, prune_before),
         )
+
+
+class PostgresQuotaGate(PersistentQuotaGate):
+    """Store-backed gate over :class:`PostgresQuotaStore` (native tables or upstream shared gate)."""
+
+    def __init__(
+        self,
+        store: PostgresQuotaStore,
+        policies: Mapping[str, QuotaPolicy] | None = None,
+        *,
+        clock: Clock = _utcnow,
+        sleep: Sleep = time.sleep,
+        ensure_schema: bool | None = None,
+    ) -> None:
+        if ensure_schema is True or (ensure_schema is None and store.mode == "native"):
+            store.ensure_schema()
+        super().__init__(store, policies, clock=clock, sleep=sleep)
+
+    @classmethod
+    def from_dsn(
+        cls,
+        dsn: str,
+        policies: Mapping[str, QuotaPolicy] | None = None,
+        *,
+        mode: SchemaMode = "native",
+        schema: str | None = None,
+        clock: Clock = _utcnow,
+        sleep: Sleep = time.sleep,
+        ensure_schema: bool | None = None,
+    ) -> "PostgresQuotaGate":
+        store = PostgresQuotaStore.from_dsn(dsn, mode=mode, schema=schema)
+        return cls(store, policies, clock=clock, sleep=sleep, ensure_schema=ensure_schema)
+
+
+def open_configured_quota_gate(
+    settings: Any,
+    *,
+    data_dir: str | Path,
+    policies: Mapping[str, QuotaPolicy] | None = None,
+    clock: Clock = _utcnow,
+    sleep: Sleep = time.sleep,
+) -> PersistentQuotaGate:
+    """CLI helper: SQLite by default, or the Postgres store when ``storage.postgres.quota`` is postgres."""
+    from pathlib import Path as _Path
+
+    from openbars.core.errors import ConfigError
+    from openbars.quota.persistent import SqliteQuotaGate
+
+    root = _Path(data_dir)
+    backend = str(getattr(settings, "storage_backend", "") or "").strip().lower()
+    quota = str(getattr(settings, "postgres_quota", "sqlite") or "sqlite").strip().lower()
+    if quota == "postgres":
+        if backend != "postgres":
+            raise ConfigError("storage.postgres.quota is postgres but storage.backend is not postgres")
+        dsn = getattr(settings, "postgres_dsn", None)
+        if not dsn:
+            raise ConfigError(
+                "storage.postgres.dsn is required when storage.postgres.quota is postgres "
+                "(set OPENBARS_PG_DSN or storage.postgres.dsn at runtime)"
+            )
+        return PostgresQuotaGate.from_dsn(
+            dsn,
+            policies,
+            mode=getattr(settings, "postgres_mode", "native") or "native",
+            schema=getattr(settings, "postgres_schema", None),
+            clock=clock,
+            sleep=sleep,
+        )
+    return SqliteQuotaGate(root / "quota.db", policies, clock=clock, sleep=sleep)
+

@@ -22,6 +22,9 @@ from openbars.storage.compat_write import (
     action_details,
     action_event_key,
     action_type_for,
+    actions_from_revision,
+    kind_from_action_type,
+    ratio_amount_from_details,
     advisory_lock_key,
     parse_int_id,
     parse_optional_int_ref,
@@ -80,6 +83,28 @@ def test_action_helpers_and_split_fraction():
     details = action_details(CorporateActionKind.SPLIT, ratio=Decimal("4"))
     assert details == {"new_shares_numerator": 4, "old_shares_denominator": 1}
     assert action_event_key("split", 42, date(2024, 1, 2)) == "openbars:split:42:2024-01-02"
+
+
+def test_revision_maps_back_to_corporate_actions():
+    assert kind_from_action_type("split") is CorporateActionKind.SPLIT
+    assert kind_from_action_type("cash_dividend") is CorporateActionKind.DIVIDEND
+    assert kind_from_action_type("stock_dividend") is CorporateActionKind.DIVIDEND
+    assert kind_from_action_type("spin_off") is CorporateActionKind.SPINOFF
+    assert kind_from_action_type("nope") is None
+    ratio, amount = ratio_amount_from_details("split", {"new_shares_numerator": 4, "old_shares_denominator": 1})
+    assert ratio == Decimal("4") and amount is None
+    ratio, amount = ratio_amount_from_details("cash_dividend", {"cash_amount": "0.20"})
+    assert ratio is None and amount == Decimal("0.20")
+    actions = actions_from_revision(
+        action_type="split",
+        ex_date=date(2024, 3, 1),
+        instrument_ids=[42],
+        details={"new_shares_numerator": 4, "old_shares_denominator": 1},
+        source="prov_a",
+    )
+    assert len(actions) == 1
+    assert actions[0].instrument_id == "42" and actions[0].kind is CorporateActionKind.SPLIT
+    assert actions[0].ratio == Decimal("4") and actions[0].source == "prov_a"
 
 
 def _raw(**kw) -> RawBarRow:
@@ -323,6 +348,58 @@ def test_live_upstream_compat_writes_corporate_actions(pg_dsn, tmp_path):
             assert list(revs[0]["instrument_ids"] if not isinstance(revs[0]["instrument_ids"], str) else __import__("json").loads(revs[0]["instrument_ids"])) == [42]
             assert len(obs) == 1 and obs[0]["provider"] == "prov_a"
             assert len(links) == 1
+        read_back = backend.instruments.corporate_actions(["42"])
+        assert len(read_back) == 1
+        assert read_back[0].instrument_id == "42"
+        assert read_back[0].kind is CorporateActionKind.SPLIT
+        assert read_back[0].ex_date == date(2024, 3, 1)
+        assert read_back[0].ratio == Decimal("4")
+        assert read_back[0].amount is None
+        assert read_back[0].source == "prov_a"
+        dividend = CorporateAction(
+            instrument_id="42",
+            ex_date=date(2024, 6, 1),
+            kind=CorporateActionKind.DIVIDEND,
+            source="prov_a",
+            amount=Decimal("0.25"),
+        )
+        backend.instruments.upsert_corporate_actions([dividend])
+        kinds = {(a.kind, a.ex_date, a.amount or a.ratio) for a in backend.instruments.corporate_actions(["42"])}
+        assert (CorporateActionKind.SPLIT, date(2024, 3, 1), Decimal("4")) in kinds
+        assert (CorporateActionKind.DIVIDEND, date(2024, 6, 1), Decimal("0.25")) in kinds
+        assert backend.instruments.corporate_actions(["99"]) == []
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
+def test_live_compat_mappings_lists_symbol_aliases(pg_dsn, tmp_path):
+    import psycopg
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    schema = f"openbars_compat_m_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+            conn.execute("INSERT INTO instrument (id, asset_class, security_type) VALUES (10, 'equity', 'common_stock')")
+            conn.execute(
+                "INSERT INTO symbol_alias (instrument_id, symbol, exchange, valid_from, valid_from_basis, verification_status) "
+                "VALUES (10, 'ZZZA', 'TESTX', '2020-01-01', 'listing', 'verified')"
+            )
+        backend = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=False, schema=schema, state_path=tmp_path / "state.db"
+        )
+        maps = backend.instruments.mappings()
+        assert len(maps) == 1
+        assert maps[0].instrument_id == "10"
+        assert maps[0].symbol == "ZZZA"
+        assert maps[0].valid_from == date(2020, 1, 1) and maps[0].valid_to is None
+        assert maps[0].provider == "*"
+        # used by crypto CLI planning: mappings() must exist even when there are no crypto: ids
+        assert not any(m.instrument_id.startswith("crypto:") for m in maps)
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
