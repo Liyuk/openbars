@@ -2,6 +2,8 @@
 
 ## 中文
 
+规划器按预期时段网格判断 1h 覆盖（#144）：某交易日只有存齐常规时段的全部小时槽（`session_open` 或 `clock_hour` 任一对齐，提前收盘日槽数更少）才算已覆盖，只存了部分小时的交易日会被重新规划。例外：若该日收盘后有一次成功抓取（`ok` / `empty`）已经覆盖过它，剩下缺的小时按无成交（清淡、停牌）处理，不再反复重抓；排队中的作业同样占住对应交易日。raw 小文件压实不在本次范围。
+
 本手册补充 [README 的小时线配置](../README.md#美股小时线可选)，侧重可重复的测量。示例仅用合成标识或公开量级；openbars 不分发行情，使用者须遵守数据源条款。配置、行情、计时和测量输出均留在仓库外，不要提交或公开原始报告。以下路径是仓库外的占位示例，请替换为自己的路径。
 
 ### 落盘与计时
@@ -47,6 +49,8 @@ PY
 小规模试跑的 Parquet 约每行数百字节，小文件开销占主导，较大分区通常压缩更好。外推时按每层、来源（仅 raw）、粒度分别用测得的字节/行 × 预计行数；例如小时线用证券数 × 交易日/年 × 10 年 × 约 7 根/日，日线另用约 1 根/交易日，再按实际覆盖与重复版本调整。这是容量量级，不是全市场实测报告。若比较 Postgres，在相同数据、索引和保留策略下分别测表及索引的磁盘大小并除以行数，与 Parquet 的对应层和粒度比较数量级；记录压缩和维护状态，不公开连接信息。
 
 ## English
+
+The planner checks 1h coverage against the expected session grid (#144): a session counts as covered only when every regular hourly slot is stored (under either `session_open` or `clock_hour` alignment; early closes have fewer slots). A session with only some hours stored is planned again. Exception: when a successful fetch (`ok` / `empty`) after that session closed already answered it, the remaining missing hours are treated as no trades (thin trading, halts) and are not re-fetched forever; queued jobs also reserve their sessions. Raw-file compaction is out of scope.
 
 This guide complements the [README hourly setup](../README.md#us-hourly-bars-optional) with repeatable measurement. Examples use synthetic identifiers or public orders of magnitude. openbars does not redistribute market data; follow provider terms. Keep configuration, data, timings and measurement output outside the repository; do not commit or publish raw reports. The external paths below are placeholders; replace them with your own.
 

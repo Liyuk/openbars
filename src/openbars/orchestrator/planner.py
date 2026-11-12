@@ -60,7 +60,7 @@ from openbars.normalize.hk_instruments import (
     to_yahoo_hk_ticker,
 )
 from openbars.normalize.instruments import InstrumentMaster
-from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
+from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, JobState, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
 from openbars.providers.us.alpaca import ESTIMATED_BARS_PER_PAGE
 from openbars.providers.us.massive_window import (
@@ -140,8 +140,10 @@ class StaticCoverage:
 class RawStoreCoverage:
     """Coverage derived from ``RawStore.scan`` (one scan per provider/market/interval/window)."""
 
-    def __init__(self, raw: RawStore) -> None:
+    def __init__(self, raw: RawStore, *, state=None) -> None:
         self._raw = raw
+        self.state = state
+        self._hourly_history = None
         self._cache: dict[tuple, tuple[set[date], dict[str, set[date]]]] = {}
 
     def _load(
@@ -149,13 +151,13 @@ class RawStoreCoverage:
     ) -> tuple[set[date], dict[str, set[date]]]:
         key = (provider, market, interval, window)
         if key not in self._cache:
+            if market is Market.US and interval is Interval.H1:
+                self._cache[key] = self._load_us_hourly(provider, window)
+                return self._cache[key]
             whole: set[date] = set()
             per_symbol: dict[str, set[date]] = defaultdict(set)
             for bar in self._raw.scan(provider, market, interval, window):
-                day = bar.session_date or (
-                    bar.ts_start.astimezone(NEW_YORK).date()
-                    if market is Market.US and interval is Interval.H1 else bar.ts_start.date()
-                )
+                day = bar.session_date or bar.ts_start.date()
                 whole.add(day)
                 per_symbol[bar.symbol_as_returned].add(day)
                 if bar.instrument_id:
@@ -163,9 +165,95 @@ class RawStoreCoverage:
             self._cache[key] = (whole, per_symbol)
         return self._cache[key]
 
+    def _load_us_hourly(self, provider: str, window: DateRange) -> tuple[set[date], dict[str, set[date]]]:
+        """US 1h coverage on the expected regular-session grid (#144).
+
+        A (symbol, session) is covered only when every regular hourly slot of that session is
+        stored, under either alignment (``session_open`` or ``clock_hour``; early closes have
+        fewer slots). A session with only some hours stored stays uncovered so the planner
+        fetches it again. Sessions a successful fetch already answered are added separately
+        from the job history (see ``_attempts``): hours missing after such a fetch are treated
+        as no-trade hours (thin trading, halts) instead of being re-fetched forever.
+        """
+        grids: dict[date, tuple[dict[datetime, int], int, int]] = {}
+
+        def grid(day: date):
+            if day not in grids:
+                bits: dict[datetime, int] = {}
+                fulls = []
+                for offset, alignment in ((0, HourlyAlignment.SESSION_OPEN), (16, HourlyAlignment.CLOCK_HOUR)):
+                    slots = xnys.hourly_slots(day, alignment=alignment)
+                    for i, slot in enumerate(slots):
+                        bits[slot.ts_start] = bits.get(slot.ts_start, 0) | (1 << (offset + i))
+                    fulls.append(((1 << len(slots)) - 1) << offset if slots else -1)
+                grids[day] = (bits, fulls[0], fulls[1])
+            return grids[day]
+
+        whole: set[date] = set()
+        masks: dict[str, dict[date, int]] = defaultdict(dict)
+        for bar in self._raw.scan(provider, Market.US, Interval.H1, window):
+            day = bar.session_date or bar.ts_start.astimezone(NEW_YORK).date()
+            bit = grid(day)[0].get(bar.ts_start.astimezone(UTC), 0)
+            if not bit:
+                continue
+            whole.add(day)
+            for name in (bar.symbol_as_returned, bar.instrument_id):
+                if name:
+                    days = masks[name]
+                    days[day] = days.get(day, 0) | bit
+        per_symbol: dict[str, set[date]] = {}
+        for name, days in masks.items():
+            per_symbol[name] = {
+                day for day, mask in days.items()
+                if any(full != -1 and mask & full == full for full in grid(day)[1:])
+            }
+        return whole, per_symbol
+
     def covered(self, provider, market, interval, window, *, symbol=None) -> set[date]:  # noqa: ANN001
         whole, per_symbol = self._load(provider, market, interval, window)
-        return set(whole) if symbol is None else set(per_symbol.get(symbol, ()))
+        result = set(whole) if symbol is None else set(per_symbol.get(symbol, ()))
+        if self.state is not None and market is Market.US and interval is Interval.H1 and symbol is not None:
+            result |= self._attempts(provider, symbol, window)
+        return result
+
+    def _attempts(self, provider, symbol, window):
+        if self._hourly_history is None:
+            jobs = self.state.list_jobs()
+            fetches = self.state.list_fetches(market=Market.US, interval=Interval.H1)
+            successful: dict[str, set[date]] = defaultdict(set)
+            sessions: dict[tuple[date, date], set[date]] = {}
+
+            def session_days(start, end):
+                if start > end:
+                    return set()
+                key = (start, end)
+                if key not in sessions:
+                    sessions[key] = set(xnys.sessions(start, end))
+                return sessions[key]
+
+            for fetch in fetches:
+                if fetch.status in {"ok", "empty"} and fetch.started_at is not None:
+                    last_day = fetch.started_at.astimezone(NEW_YORK).date() - timedelta(days=1)
+                    successful[fetch.job_id].update(
+                        session_days(fetch.window.start, min(fetch.window.end, last_day))
+                    )
+
+            index: dict[tuple[str, str], set[date]] = defaultdict(set)
+            for job in jobs:
+                if job.market is not Market.US or job.interval is not Interval.H1:
+                    continue
+                if job.state in {JobState.PENDING, JobState.LEASED, JobState.RUNNING}:
+                    days = session_days(job.window.start, job.window.end)
+                elif job.state is JobState.DONE:
+                    days = session_days(job.window.start, job.window.end) & successful.get(job.job_id, set())
+                else:
+                    continue
+                if days:
+                    for instrument in job.instruments:
+                        index[(job.provider, instrument)].update(days)
+            self._hourly_history = index
+        return {day for day in self._hourly_history.get((provider, symbol), ())
+                if window.start <= day <= window.end}
 
 
 # --- plan / budget ------------------------------------------------------------------------
@@ -668,7 +756,7 @@ class DefaultPlanner:
         """Plan complete US sessions; readiness follows the daily next-day rule.
 
         This conservative rule also exceeds Alpaca SIP's close + 16 minute delay.
-        Each request spans one session so covered sessions are never crossed.
+        Windows never cross a session already covered for every requested symbol.
         """
         if not symbols:
             notes.append(PlanNote("no_universe", "us/1h: no symbols configured; skipped"))
@@ -686,16 +774,40 @@ class DefaultPlanner:
             groups = defaultdict(list)
             for symbol in symbols:
                 have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
-                # One stored bar covers the session; missing hours are a quality concern.
+                # Complete-session fetches make missing hours genuine no-trade hours.
                 for day in eligible:
                     if day not in have:
                         groups[day].append(symbol)
             size = 1 if cap.batch is BatchShape.PER_SYMBOL else self._batch_size(name, cap)
-            for day, syms in groups.items():
-                kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
-                for chunk in _chunks(syms, size):
-                    emit(kind, name, chunk, DateRange(day, day),
-                         PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+            # Without state history, retain old job IDs so existing queued jobs cannot overlap.
+            if getattr(coverage, "state", None) is None:
+                for day, syms in groups.items():
+                    kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
+                    for chunk in _chunks(syms, size):
+                        emit(kind, name, chunk, DateRange(day, day),
+                             PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+                continue
+            active = {}
+            def flush(chunk):
+                start, end, count = active.pop(chunk)
+                kind = JobKind.DAILY if start == end == latest else JobKind.BACKFILL
+                emit(kind, name, chunk, DateRange(start, end),
+                     PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+            for day in eligible:
+                chunks = set(_chunks(groups.get(day, []), size))
+                for chunk in list(active):
+                    start, _, count = active[chunk]
+                    limit = max(1, 20000 // (13 * len(chunk))) if name == "alpaca" else (312 if name == "twelve_data" else 366)
+                    if chunk not in chunks or count >= limit or (day - start).days >= self.max_window_days:
+                        flush(chunk)
+                for chunk in chunks:
+                    if chunk in active:
+                        start, _, count = active[chunk]
+                        active[chunk] = (start, day, count + 1)
+                    else:
+                        active[chunk] = (day, day, 1)
+            for chunk in list(active):
+                flush(chunk)
 
     def _symbols_for(
         self,

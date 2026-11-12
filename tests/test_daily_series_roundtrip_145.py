@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -55,6 +56,9 @@ def test_seriesless_adjustment_identity_roundtrips(tmp_path, extra):
     restored = reload_bar(open_backend(tmp_path), bar, Market.US)
     before, after = observation_from_raw(bar), observation_from_raw(restored)
     assert restored.series is None
+    if extra.get('adjustment') == 'raw':
+        # massive/eod is split-only: a stored seriesless raw row is a pre-#145 row, read back as split (#149)
+        before = replace(before, adjustment='split')
     assert (after.feed, after.adjustment, after.series) == (before.feed, before.adjustment, before.series)
 
 
@@ -69,7 +73,8 @@ def test_reconciliation_same_when_either_source_reloaded(tmp_path, first, revers
         mixed.reverse()
 
     def reconcile(items):
-        observations = [observation_from_raw(b) for b in items]
+        # a reloaded bar carries its raw ingested_at as available_at (#154); selection is what matters
+        observations = [replace(observation_from_raw(b), available_at=None) for b in items]
         return MemoryReconciler().reconcile_range('TEST1', DAY, DAY, observations,
                                                    generated_at=datetime(2025, 1, 3, tzinfo=UTC))
     expected = reconcile(bars)
@@ -98,7 +103,7 @@ def test_hk_both_arrival_orders_preserve_reconciliation(tmp_path, fresh_provider
     mixed = [b if b.provider == fresh_provider else reload_bar(backend, b, Market.HK) for b in bars]
     iid = 'hk:equity:TEST1'
     def reconcile(items):
-        obs = [replace(observation_from_raw(b), instrument_id=iid) for b in items]
+        obs = [replace(observation_from_raw(b), instrument_id=iid, available_at=None) for b in items]
         return reconcile_hk(iid, DAY, DAY, obs, generated_at=datetime(2025, 1, 3, tzinfo=UTC)).result
     expected = reconcile(bars)
     assert expected.canonical
@@ -115,7 +120,7 @@ def test_binance_same_venue_sources_both_arrival_orders(tmp_path, fresh_feed):
     mixed = [b if b.feed == fresh_feed else reload_bar(backend, b, Market.CRYPTO) for b in bars]
     iid = 'crypto:spot:binance:TEST-USDT'
     def reconcile(items):
-        obs = [replace(observation_from_raw(b), instrument_id=iid) for b in items]
+        obs = [replace(observation_from_raw(b), instrument_id=iid, available_at=None) for b in items]
         return reconcile_crypto(iid, DAY, DAY, obs, generated_at=datetime(2025, 1, 3, tzinfo=UTC)).result
     expected = reconcile(bars)
     assert expected.canonical
@@ -160,7 +165,8 @@ def test_fresh_sink_output_matches_original_projection(tmp_path, monkeypatch):
             else:
                 sink = finalize.CnCanonicalSink(backend.instruments, lambda rows: output.extend(rows))
             sink.after_fetch(job, [bar])
-            return [replace(row, generated_at=datetime(2025, 1, 3, tzinfo=UTC)) for row in output]
+            return [replace(row, generated_at=datetime(2025, 1, 3, tzinfo=UTC), available_at=None)
+                    for row in output]
         before, after = run(original), run(current)
         assert before
         assert after == before
