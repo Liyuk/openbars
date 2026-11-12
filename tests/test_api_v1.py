@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from openbars.api.http import create_app
 from openbars.api.queries import MAX_BARS, open_readonly_quota_gate, quota_snapshot
-from openbars.core.models import AssetClass, Instrument, Interval, Market, SymbolMapping
+from openbars.core.models import AssetClass, DateRange, Instrument, Interval, Market, SymbolMapping
 from openbars.quota.gate import QuotaUsage
 from openbars.quota.persistent import SqliteQuotaGate
 from openbars.storage.parquet_duckdb import open_backend
@@ -331,3 +331,103 @@ def test_open_readonly_quota_gate_does_not_create_file(tmp_path):
     settings = type("S", (), {"postgres_quota": "sqlite"})()
     assert open_readonly_quota_gate(settings, tmp_path) is None
     assert not (tmp_path / "quota.db").exists()
+
+
+def test_hourly_raw_and_interval_filters(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    hourly = replace(original, interval=Interval.H1, ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC), extra={'session': 'regular', 'ts_end': '2020-01-02T15:30:00+00:00'})
+    backend.raw.append_rows([hourly])
+    params = {'id': T1, 'interval': '1h', 'source': 'prov_a', 'start': str(day), 'end': str(day)}
+    body = client.get('/api/v1/bars', params=params).json()
+    assert len(body['bars']) == 1
+    assert body['bars'][0]['session'] == 'regular'
+    assert body['bars'][0]['ts_end'] == '2020-01-02T15:30:00+00:00'
+    assert len(body['missing_hours']) == 6
+    empty = client.get('/api/v1/bars', params={**params, 'source': 'canonical'}).json()
+    assert empty['bars'] == [] and empty['note']
+    assert client.get('/api/v1/markets', params={'interval': '1h'}).json()['markets'] == []
+    assert client.get('/api/v1/flags', params={'interval': '1h'}).json()['total'] == 0
+    for route in ('markets', 'flags', 'bars'):
+        assert client.get('/api/v1/' + route, params={'interval': 'bad', 'id': T1}).status_code == 400
+
+
+def test_hourly_canonical_flags_and_coverage(client, backend):
+    row = replace(_canon(T1, DAYS[0], "10", flags=("DIVERGENT",)),
+                  interval=Interval.H1, ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC))
+    backend.canonical.upsert_rows([row])
+    params = {"interval": "1h", "id": T1, "start": str(DAYS[0]), "end": str(DAYS[0])}
+    bars = client.get("/api/v1/bars", params=params).json()
+    assert len(bars["bars"]) == 1
+    assert bars["bars"][0]["flags"] == ["divergent"]
+    assert bars["bars"][0]["session"] == "regular"
+    assert client.get("/api/v1/markets", params=params).json()["markets"][0]["bars"] == 1
+    flags = client.get("/api/v1/flags", params=params).json()
+    assert flags["total"] == 1 and flags["items"][0]["ts_start"]
+
+
+def test_hourly_clock_grid_and_extended_sessions(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    rows = [replace(original, interval=Interval.H1, ts_start=datetime(2020, 1, 2, hour, minute, tzinfo=UTC), extra={'session': session})
+            for hour, minute, session in [(9, 0, 'pre'), (14, 30, 'regular'), (15, 0, 'regular')]]
+    backend.raw.append_rows(rows)
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_a', 'start': str(day), 'end': str(day)}).json()
+    missing = body['missing_hours']
+    assert any(x['session'] == 'pre' for x in missing)
+    assert any(x['session'] == 'post' for x in missing)
+    assert any(x['ts_start'] == '2020-01-02T16:00:00+00:00' for x in missing)
+    assert not any(x['ts_start'] == '2020-01-02T15:30:00+00:00' for x in missing)
+
+
+def test_hourly_canonical_policy_and_adjustment(client, backend):
+    row = replace(_canon(T1, DAYS[0], '10', flags=('DIVERGENT',)), interval=Interval.H1,
+                  ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC))
+    backend.canonical.upsert_rows([row, replace(row, policy_version='obsolete', flags=('SPIKE_SUSPECT',))])
+    params = {'id': T1, 'interval': '1h', 'start': str(DAYS[0]), 'end': str(DAYS[0])}
+    assert len(client.get('/api/v1/bars', params=params).json()['bars']) == 1
+    assert client.get('/api/v1/markets', params=params).json()['markets'][0]['bars'] == 1
+    assert client.get('/api/v1/flags', params=params).json()['total'] == 1
+    assert client.get('/api/v1/bars', params={**params, 'adjustment': 'raw'}).status_code == 400
+    assert client.get('/api/v1/bars', params={**params, 'as_of': str(DAYS[0])}).status_code == 400
+
+
+def test_hourly_canonical_stored_adjustment_is_not_mislabeled(client, backend):
+    row = replace(_canon(T1, DAYS[0], '10'), interval=Interval.H1, adjustment='raw',
+                  ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC))
+    backend.canonical.upsert_rows([row])
+    params = {'id': T1, 'interval': '1h', 'start': str(DAYS[0]), 'end': str(DAYS[0])}
+    assert client.get('/api/v1/bars', params=params).status_code == 400
+    body = client.get('/api/v1/bars', params={**params, 'adjustment': 'raw'}).json()
+    assert body['adjustment'] == body['bars'][0]['adjustment'] == 'raw'
+
+
+def test_hourly_opening_bar_identifies_clock_grid(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    row = replace(original, interval=Interval.H1, ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC),
+                  extra={'session': 'regular', 'ts_end': '2020-01-02T15:00:00+00:00'})
+    backend.raw.append_rows([row])
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_a'}).json()
+    starts = [slot['ts_start'] for slot in body['missing_hours']]
+    assert '2020-01-02T15:00:00+00:00' in starts
+    assert '2020-01-02T15:30:00+00:00' not in starts
+
+
+def test_hourly_ambiguous_grid_does_not_claim_gaps(client, backend):
+    day = DAYS[0]
+    original = list(backend.raw.scan_rows('prov_a', Market.US, Interval.D1, DateRange(day, day)))[0]
+    backend.raw.append_rows([replace(original, interval=Interval.H1,
+                                    ts_start=datetime(2020, 1, 2, 14, 30, tzinfo=UTC), extra={'session': 'regular'})])
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_a'}).json()
+    assert body['missing_hours'] == []
+    assert body['note']
+
+
+def test_raw_default_window_uses_selected_source(client, backend):
+    day = date(2020, 2, 3)
+    batch = raw_batch([SYM], [day], provider='prov_c', fetch_id='fetch-c')
+    backend.raw.append_rows([replace(row, instrument_id=T1, market=Market.US) for row in raw_rows_from_batch(batch)])
+    body = client.get('/api/v1/bars', params={'id': T1, 'source': 'prov_c'}).json()
+    assert body['start'] == body['end'] == str(day)
+    assert [bar['session_date'] for bar in body['bars']] == [str(day)]

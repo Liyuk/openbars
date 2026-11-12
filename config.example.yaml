@@ -30,6 +30,8 @@ history:
 
 universe:
   us:
+    # 类似 ON 或数字的代码请加引号，如 "ON"、"0001"。
+    # Quote tickers like ON or numeric codes, e.g. "ON", "0001".
     # Explicit symbols (Alpaca / yfinance jobs need them; Massive plans the whole market):
     # symbols: [TEST1, ZZZA]
     include: [common_stock, etf]   # adr, preferred, ... 可选

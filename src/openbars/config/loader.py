@@ -266,7 +266,10 @@ def parse_settings(data: Any) -> Settings:
     for market_key, body in _section(data, "universe").items():
         market = _enum(Market, market_key, "universe market")
         symbols = _as_list((body or {}).get("symbols") if isinstance(body, Mapping) else None, "universe symbols")
-        cleaned = tuple(sorted({str(s).strip() for s in symbols if str(s).strip()}))
+        for symbol in symbols:
+            if not isinstance(symbol, str):
+                raise ConfigError(f"universe {market.value} symbol {symbol!r} must be a string; quote it in YAML")
+        cleaned = tuple(sorted({s.strip() for s in symbols if s.strip()}))
         if cleaned:
             universe[market] = cleaned
 
