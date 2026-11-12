@@ -146,6 +146,15 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **代码复用与代际**：已退役的 id 永不给新公司复用。首次上市为 `cn:eq:xshg:600000`；同一 `(venue, code)` 再次上市则为 `cn:eq:xshg:600000:g2`（第 2 代，之后 `g3` …）。第 1 代无后缀，`:g1` 不是合法写法。`cn_instrument_id(venue, code, generation=1)` 构造，`parse_cn_instrument_id` 反解为 `(venue, code, generation)`，非法部分抛 `ValueError`。
 - 选择下一代的逻辑（读取已退役 id）属于后续的上市清单入库，不在本模块。
 
+#### 3.2.3 港股证券 id（`openbars.normalize.hk_instruments`）
+
+设计见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)（issue #70）。
+
+- **格式**：`hk:eq:xhkg:<code>`。`venue` 仅为 `xhkg`（港交所，含主板与 GEM）。`code` 恰为 5 位数字，保留前导 0（`00700`、`09988`）。`asset_class` 不进 id。`market_of` 取首段得到 `hk`。
+- **常见写法归一化**（`normalize_hk_symbol`）：`00700` / `700` / `0700.HK` / `HK.00700` / `HK00700` / `xhkg:00700` → `xhkg` + `00700`。港股只有一个交易所，裸 1–5 位数字是明确的（与 A 股不同）。
+- **代码复用与代际**：与 A 股相同，已退役 id 永不复用；再次上市为 `:g2`、`:g3` …。第 1 代无后缀，`:g1` 不是合法写法。`hk_instrument_id` / `parse_hk_instrument_id` 构造与反解。
+- **美股 ADR 关联**：港股正股与美股 ADR 是两个 instrument。正股的 `external_ids["us_adr"]` 指向美股 ADR 的 id；ADR 的 `external_ids["hk_ordinary"]` 指向港股正股 id（`hk_adr_external_ids` / `us_hk_ordinary_external_ids`）。不把 ADR ticker 写进港股 id。
+
 ### 3.3 Bar
 
 ```text
@@ -212,6 +221,17 @@ Bar
 - `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（15:00 收盘后再等待 N 分钟）。`openbars.calendars` 以 `cn_` 前缀导出函数（`cn_sessions` 等），避免与 XNYS 同名函数冲突。
 - 覆盖范围：库内节假日只记录到固定年份（4.13.x 为 2026），超出时库抛 `ValueError`，不会静默当作无假日；需升级依赖来扩展。
 - **规划器尚未接入**：`Market.CN` 仍产生 `no_calendar` 并跳过，不会在没有 provider 时凭空生成作业。
+
+#### 3.4.4 港股日历（`openbars.calendars.hk`）
+
+设计见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)（issue #69）。
+
+- 包装 `exchange_calendars` 的 **XHKG**。`market = Market.HK`，`timezone = "Asia/Hong_Kong"`，入口点 `hk`。
+- **常规时段**（库自 2011-03-07 起记录）：连续竞价 09:30–12:00、13:00–16:00（16:00 为收市竞价结束）。`session_bounds(day)` 在常规交易日返回**两段** UTC `(open, close)`。
+- **半日市**：圣诞节前夕、新年前夕、农历新年前夕，以及库列出的其他提早收市日，只有上午一段，收市 12:00 HKT，无午休。`TradingSession` 的 `opens_at` / `closes_at` 仍是当日首开与尾收（Asia/Hong_Kong，带时区）。
+- `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（按当日实际收市时间再等待 N 分钟）。模块函数以 `hk_` 前缀从 `openbars.calendars` 导出。
+- **覆盖范围**：库内默认会话区间有上下限（`exchange-calendars` 4.13.x 约为 2006-11-13 至 2027-11-11，以 `coverage()` 为准）。超出时抛 `ValueError`，**不要手写假期或未来台风/黑雨休市**。历史上库已收录的临时休市（部分台风/黑雨日出现在 `adhoc_holidays`）按库数据使用；未来天气休市需升级依赖或后续接入港交所公告，不在本模块预测。
+- **规划器尚未接入**：`Market.HK` 仍产生 `no_calendar` 并跳过，在没有 provider 时不会凭空生成作业。
 
 ### 3.5 Provider 能力声明
 
