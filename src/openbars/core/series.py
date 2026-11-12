@@ -53,6 +53,12 @@ YFINANCE_YAHOO_SPLIT = SourceIdentity("yfinance", "yahoo", "split")
 YFINANCE_YAHOO_RAW = SourceIdentity("yfinance", "yahoo", "raw")
 TWELVE_DATA_DAILY_SPLIT = SourceIdentity("twelve_data", "daily", "split")
 ALPHA_VANTAGE_DAILY_RAW = SourceIdentity("alpha_vantage", "daily", "raw")
+# US 1h (v0.6). Massive hourly comes from the per-ticker aggregates endpoint, not the
+# grouped-daily ``eod`` product; Twelve Data intraday is a separate product from its daily
+# series. Alpaca and yfinance keep their daily triples: the interval lives in the series.
+# Not in KNOWN_SOURCES (that tuple is the research-daily-v2 source list).
+MASSIVE_AGGS_SPLIT = SourceIdentity("massive", "aggs", "split")
+TWELVE_DATA_INTRADAY_SPLIT = SourceIdentity("twelve_data", "intraday", "split")
 # Crypto spot (UTC-day klines). Deliberately NOT in KNOWN_SOURCES: that tuple is the US
 # research-daily-v2 source list.
 BINANCE_SPOT_RAW = SourceIdentity("binance", "spot", "raw")
@@ -143,6 +149,12 @@ _SPLIT_ADJUSTED = dict(
     session_semantics=SessionSemantics.PROVIDER_ALIGNED,
 )
 
+_HOURLY_SPLIT = dict(
+    price_basis=PriceBasis.SPLIT_ADJUSTED,
+    adjustment_scope=AdjustmentScope.SPLITS,
+    session_semantics=SessionSemantics.REGULAR,  # adapters switch to EXTENDED with pre/post
+)
+
 # Conservative mapping; anything not listed resolves to all-unknown.
 _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
     (ALPACA_IEX_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
@@ -199,6 +211,17 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
     ),
     # Volume handling is provider-dependent, so it stays unknown.
     (TWELVE_DATA_DAILY_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.UNKNOWN),
+    # US 1h (providers.us.hourly): bars sit on the XNYS hourly grid, regular session by default.
+    (MASSIVE_AGGS_SPLIT, Interval.H1): dict(**_HOURLY_SPLIT, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
+    (ALPACA_SIP_SPLIT, Interval.H1): dict(**_HOURLY_SPLIT, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
+    (ALPACA_IEX_SPLIT, Interval.H1): dict(**_HOURLY_SPLIT, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
+    (TWELVE_DATA_INTRADAY_SPLIT, Interval.H1): dict(**_HOURLY_SPLIT, volume_basis=VolumeBasis.UNKNOWN),
+    (YFINANCE_YAHOO_SPLIT, Interval.H1): dict(
+        price_basis=PriceBasis.PROVIDER_DEFINED,
+        adjustment_scope=AdjustmentScope.UNKNOWN,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.PROVIDER_DEFINED,
+    ),
     # Usable for inspection; not treated as proven-compatible.
     (YFINANCE_YAHOO_SPLIT, Interval.D1): dict(
         price_basis=PriceBasis.PROVIDER_DEFINED,

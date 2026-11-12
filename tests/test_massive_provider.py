@@ -105,7 +105,9 @@ class FakeMaster:
 
 # -- capabilities ----------------------------------------------------------------------------
 def test_capabilities_and_policy():
-    (cap,) = provider(Server()).capabilities()
+    cap, hourly = provider(Server()).capabilities()
+    assert hourly.interval is Interval.H1 and hourly.feed == "massive:aggs"
+    assert hourly.batch is BatchShape.PER_SYMBOL and hourly.rolling_window == timedelta(days=730)
     assert cap.provider == "massive" and cap.market is Market.US and cap.interval is Interval.D1
     assert cap.batch is BatchShape.WHOLE_MARKET_PER_DAY
     assert cap.history_start is None and cap.rolling_window == timedelta(days=730)

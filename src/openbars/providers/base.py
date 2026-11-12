@@ -75,6 +75,9 @@ class FetchRequest:
     cursor: str | None = None
     feed: str | None = None  # provider feed, e.g. "sip"; None = provider default
     adjustment: str | None = None  # legacy adjustment string ("split" / "raw"); None = provider default
+    # Intraday only (US 1h, see providers.us.hourly): grid alignment and extended hours.
+    hourly_alignment: str | None = None  # "session_open" (default) | "clock_hour"
+    include_extended_hours: bool = False
 
 
 @dataclass(frozen=True)

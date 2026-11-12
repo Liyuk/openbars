@@ -26,6 +26,7 @@ _CREDENTIALS: dict[str, dict[str, str]] = {
     "alpaca": {"api_key": "key_id", "api_secret": "secret_key"},
     "massive": {"api_key": "api_key"},
     "yfinance": {},
+    "twelve_data": {"api_key": "api_key"},
     "binance": {},  # public market data: no key
     "coinbase": {},
     "baostock": {},  # anonymous login: no key (optional extra openbars[baostock])
@@ -40,6 +41,7 @@ _PROVIDER_MARKETS: dict[str, frozenset[Market]] = {
     "alpaca": frozenset({Market.US}),
     "massive": frozenset({Market.US}),
     "yfinance": frozenset({Market.US, Market.HK}),
+    "twelve_data": frozenset({Market.US}),
     "binance": frozenset({Market.CRYPTO}),
     "coinbase": frozenset({Market.CRYPTO}),
     "baostock": frozenset({Market.CN}),
