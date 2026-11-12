@@ -236,3 +236,118 @@ def test_split_windows():
     windows = split_windows(days, 366)
     assert windows[0].start == days[0] and windows[-1].end == days[-1]
     assert all((w.end - w.start).days < 366 for w in windows)
+
+
+# --- crypto ---------------------------------------------------------------------------------
+
+CRYPTO_NOW = datetime(2026, 3, 10, 0, 29, tzinfo=UTC)  # 29 min after UTC midnight: Mar 9 not ready
+CRYPTO_READY = datetime(2026, 3, 10, 0, 30, tzinfo=UTC)  # 30 min wait elapsed: Mar 9 is ready
+
+
+def crypto_sel(start: date, end: date | None = None) -> Selection:
+    return Selection(frozenset({Market.CRYPTO}), frozenset({Interval.D1}), start, end)
+
+
+def crypto_plan(selection, providers, now=CRYPTO_READY, universe=("TESTUSDT", "TEST-USDT"), **kw):
+    from crypto_fakes import CryptoFake  # noqa: F401
+
+    return DefaultPlanner(**kw).plan(
+        selection, EmptyCoverage(), now=now, universe={Market.CRYPTO: universe},
+        providers={p.id: p for p in providers},
+    )  # fmt: skip
+
+
+def test_latest_ready_session_crypto_is_utc_with_wait():
+    from openbars.orchestrator.planner import latest_ready_session
+
+    assert latest_ready_session(CRYPTO_NOW, Market.CRYPTO) == date(2026, 3, 8)
+    assert latest_ready_session(CRYPTO_READY, Market.CRYPTO) == date(2026, 3, 9)
+    # US path is unchanged (New York based, XNYS sessions only)
+    assert latest_ready_session(NOW) == LATEST == latest_ready_session(NOW, Market.US)
+
+
+def test_crypto_routes_each_symbol_to_its_own_venue_and_includes_weekends():
+    from crypto_fakes import CryptoFake
+
+    # Sat 2026-03-07 and Sun 2026-03-08 are sessions.
+    p = crypto_plan(
+        crypto_sel(date(2026, 3, 6), date(2026, 3, 31)), [CryptoFake("binance"), CryptoFake("coinbase")]
+    )
+    assert not [n for n in p.notes if n.code in {"no_calendar", "no_provider"}]
+    seen = {(j.provider, j.instruments) for j in p.jobs}
+    assert seen == {("binance", ("TESTUSDT",)), ("coinbase", ("TEST-USDT",))}
+    for name in ("binance", "coinbase"):
+        jobs = by(p, name)
+        days = {d for j in jobs for d in (j.window.start + timedelta(days=i) for i in range((j.window.end - j.window.start).days + 1))}
+        assert days == {date(2026, 3, 6) + timedelta(days=i) for i in range(4)}  # Fri..Mon, ready only
+        assert {j.kind for j in jobs} == {JobKind.DAILY, JobKind.BACKFILL}
+        assert all(j.market is Market.CRYPTO for j in jobs)
+        daily = [j for j in jobs if j.kind is JobKind.DAILY]
+        assert [j.window for j in daily] == [DateRange(date(2026, 3, 9), date(2026, 3, 9))]
+
+
+def test_crypto_session_not_ready_is_not_planned():
+    from crypto_fakes import CryptoFake
+
+    p = crypto_plan(
+        crypto_sel(date(2026, 3, 8), date(2026, 3, 9)), [CryptoFake("binance")], now=CRYPTO_NOW
+    )
+    assert [(j.window.start, j.window.end) for j in p.jobs] == [(date(2026, 3, 8), date(2026, 3, 8))]
+
+
+def test_crypto_budget_counts_weekend_sessions():
+    from crypto_fakes import CryptoFake
+
+    p = crypto_plan(crypto_sel(date(2026, 3, 1), date(2026, 3, 9)), [CryptoFake("binance")], universe=["TESTUSDT"])
+    assert p.budget.providers["binance"].jobs == 2  # latest daily + one backfill window
+
+
+def test_crypto_never_uses_yfinance_or_us_providers():
+    from crypto_fakes import CryptoFake
+
+    p = crypto_plan(crypto_sel(date(2026, 3, 8), date(2026, 3, 9)), [CryptoFake("binance"), yfinance(), massive()])
+    assert {j.provider for j in p.jobs} == {"binance"}
+    assert all(j.market is Market.CRYPTO for j in p.jobs)
+
+
+def test_crypto_symbol_with_no_matching_provider_is_a_note_not_a_job():
+    from crypto_fakes import CryptoFake
+
+    p = crypto_plan(crypto_sel(date(2026, 3, 8), date(2026, 3, 9)), [CryptoFake("binance")], universe=["TEST-USDT"])
+    assert p.jobs == ()
+    assert any(n.code == "no_symbols" for n in p.notes)
+
+
+def test_crypto_instrument_master_resolver_decides_when_given():
+    from crypto_fakes import CryptoFake
+
+    from openbars.normalize.crypto_pairs import CryptoPairListing, ingest_crypto_pairs
+    from openbars.normalize.instruments import MemoryInstrumentMaster
+
+    master = MemoryInstrumentMaster()
+    ingest_crypto_pairs(
+        master,
+        [CryptoPairListing("binance", "ZZZ", "USDT", "binance", "ZZZUSDT"),
+         CryptoPairListing("coinbase", "ZZZ", "USDT", "coinbase", "ZZZ-USDT")],
+        as_of=date(2026, 1, 1),
+    )  # fmt: skip
+    p = crypto_plan(
+        crypto_sel(date(2026, 3, 8), date(2026, 3, 9)), [CryptoFake("binance"), CryptoFake("coinbase")],
+        universe=["ZZZUSDT", "ZZZ-USDT", "TESTUSDT"], instruments=master,
+    )  # fmt: skip
+    assert {(j.provider, j.instruments) for j in p.jobs} == {
+        ("binance", ("ZZZUSDT",)), ("coinbase", ("ZZZ-USDT",))
+    }  # TESTUSDT is unknown to the master: not planned
+
+
+def test_other_markets_are_skipped_without_jobs():
+    p = DefaultPlanner().plan(
+        Selection(frozenset({Market.CN}), frozenset({Interval.D1}), date(2026, 3, 2), None),
+        EmptyCoverage(), now=NOW, universe={Market.CN: ["TEST1"]},
+        providers={"fake": _cn_fake()},
+    )  # fmt: skip
+    assert p.jobs == () and any(n.code in {"no_calendar", "no_provider"} for n in p.notes)
+
+
+def _cn_fake():
+    return FakeProvider("fake")  # declares US only -> no_provider; keeps the note path exercised

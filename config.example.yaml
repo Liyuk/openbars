@@ -12,6 +12,8 @@
 version: 1
 
 # 选择市场（多选）: us | crypto | cn | hk
+# 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
+# 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
 markets: [us]
 
 # 选择粒度（多选）: 1d (default) | 1h | 30m | 15m | 5m | 1m
@@ -29,6 +31,12 @@ universe:
     # symbols: [TEST1, ZZZA]
     include: [common_stock, etf]   # adr, preferred, ... 可选
     exclude_otc: true
+  # 加密货币（markets 含 crypto 时生效）。按 provider 的原生 symbol 书写：
+  #   Binance:  字母数字，如 TESTUSDT（只发给 binance）
+  #   Coinbase: BASE-QUOTE 产品 id，如 TEST-USDT（只发给 coinbase）
+  # 日线按 UTC 00:00 切日，周末也是交易日；两家交易所是两个独立 instrument，不合并。
+  # crypto:
+  #   symbols: [TESTUSDT, TEST-USDT]
 
 storage:
   backend: parquet_duckdb  # parquet_duckdb | postgres
@@ -64,9 +72,13 @@ providers:
     enabled: false
     api_key: ${ALPHA_VANTAGE_API_KEY}
     role: audit            # primary | fallback | audit
-  binance:                 # v0.2
+  # 加密货币（公开行情，无需 key）。默认关闭，不影响仅美股的首次运行。
+  binance:
     enabled: false
     base_url: https://data-api.binance.vision
+  coinbase:                # Coinbase Exchange 公开 candles
+    enabled: false
+    base_url: https://api.exchange.coinbase.com
 
 # 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
 reconcile:

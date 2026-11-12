@@ -11,6 +11,12 @@ Routing per market x interval (only providers that declare the market/interval t
 3. the fallback (yfinance): only what ``should_request_yfinance`` asks for -- pre-2016
    sessions and sessions no primary source covers or will cover.
 
+Crypto (``Market.CRYPTO``) uses the 24/7 UTC calendar: every UTC date is a session and the
+latest ready session is the last UTC day closed at least 30 minutes ago. Whole-market and
+fallback routing are US-only; every crypto provider that declares ``crypto``/``1d`` takes part,
+but a symbol is only sent to a provider whose symbol dialect it matches (see
+``crypto_symbol_for_provider``), so Coinbase product ids never reach Binance or vice versa.
+
 Priorities (lower runs first): latest-session daily jobs 0-10, other primary backfill
 20-40, fallback 60-80.
 """
@@ -18,22 +24,26 @@ Priorities (lower runs first): latest-session daily jobs 0-10, other primary bac
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from openbars.calendars import crypto as crypto_calendar
 from openbars.calendars import xnys
 from openbars.config.schema import Selection
 from openbars.core.models import DateRange, Interval, Market
+from openbars.normalize.instruments import InstrumentMaster
 from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
 from openbars.providers.us.massive_window import ROLLING_WINDOW_DAYS, massive_grouped_sessions
 from openbars.providers.us.yfinance import should_request_yfinance
 from openbars.quota.policy import QuotaPolicy
 from openbars.raw.store import RawStore
+from openbars.reconcile.crypto import CRYPTO_COMPLETION_WAIT_MINUTES
 
 NEW_YORK = ZoneInfo("America/New_York")
 FALLBACK_PROVIDERS = frozenset({"yfinance"})
@@ -130,7 +140,7 @@ class RawStoreCoverage:
 
 @dataclass(frozen=True)
 class PlanNote:
-    code: str  # no_provider | no_universe | no_calendar | nothing_to_do
+    code: str  # no_provider | no_universe | no_symbols | no_calendar | nothing_to_do
     message: str
 
 
@@ -227,14 +237,55 @@ def _normalize_universe(
     }
 
 
-def latest_ready_session(now: datetime) -> date | None:
-    """Latest XNYS session strictly before the New York date of ``now``."""
+def latest_ready_session(now: datetime, market: Market = Market.US) -> date | None:
+    """Latest ready session of ``market``.
+
+    US: latest XNYS session strictly before the New York date of ``now``. Crypto: latest UTC
+    day that closed at least ``CRYPTO_COMPLETION_WAIT_MINUTES`` (30) before ``now``.
+    Other markets have no calendar yet: ``None``.
+    """
+    market = Market(market)
+    if market is Market.CRYPTO:
+        return crypto_calendar.latest_completed_session(now, CRYPTO_COMPLETION_WAIT_MINUTES)
+    if market is not Market.US:
+        return None
     today = now.astimezone(NEW_YORK).date()
     found = xnys.sessions(today - timedelta(days=14), today - timedelta(days=1))
     return found[-1] if found else None
 
 
 _latest_ready_session = latest_ready_session
+
+
+def _has_calendar(market: Market) -> bool:
+    return market in (Market.US, Market.CRYPTO)
+
+
+def _sessions(market: Market, start: date, end: date) -> list[date]:
+    """Sessions of the market's own calendar (XNYS for US, every UTC day for crypto)."""
+    if Market(market) is Market.CRYPTO:
+        return crypto_calendar.sessions(start, end)
+    return xnys.sessions(start, end)
+
+
+def _today(now: datetime, market: Market) -> date:
+    """Calendar date of ``now`` in the market's clock (UTC for crypto, New York for US)."""
+    return now.astimezone(UTC if market is Market.CRYPTO else NEW_YORK).date()
+
+
+_BINANCE_STYLE = re.compile(r"[A-Z0-9]+")
+
+
+def crypto_symbol_for_provider(provider: str, symbol: str) -> bool:
+    """Heuristic (no instrument master): does ``symbol`` look like ``provider``'s dialect?
+
+    ``coinbase`` product ids are ``BASE-QUOTE`` (contain ``-``); every other crypto provider
+    (Binance) uses plain ``[A-Z0-9]+`` such as ``TESTUSDT``. A symbol matching neither is
+    skipped everywhere: a skipped symbol is better than a failed job.
+    """
+    if provider == "coinbase":
+        return "-" in symbol and symbol.replace("-", "").isalnum() and symbol == symbol.upper()
+    return bool(_BINANCE_STYLE.fullmatch(symbol))
 
 
 def _bars_per_session(interval: Interval) -> int:
@@ -249,7 +300,7 @@ def estimate_requests(job: Job, cap: SourceCapability | None) -> int:
         return 1
     if cap is None or not cap.max_bars_per_request:
         return 1
-    sessions = len(xnys.sessions(job.window.start, job.window.end)) or 1
+    sessions = len(_sessions(Market(job.market), job.window.start, job.window.end)) or 1
     bars = len(job.instruments) * sessions * _bars_per_session(Interval(job.interval))
     return max(1, math.ceil(bars / cap.max_bars_per_request))
 
@@ -273,7 +324,12 @@ class DefaultPlanner:
         providers: Mapping[str, Provider] | None = None,
         policies: Mapping[str, QuotaPolicy] | None = None,
         max_window_days: int = MAX_WINDOW_DAYS,
+        instruments: InstrumentMaster | None = None,
     ) -> None:
+        # ``instruments`` (optional): a crypto pair master. When given, a crypto symbol is
+        # planned for a provider only if ``resolve(symbol, provider=...)`` hits; otherwise the
+        # ``crypto_symbol_for_provider`` heuristic decides.
+        self.instruments = instruments
         self.universe = universe
         self.providers = providers
         self.policies = policies
@@ -331,12 +387,13 @@ class DefaultPlanner:
         if not capable:
             notes.append(PlanNote("no_provider", f"{label}: no enabled provider declares this market/interval; skipped"))
             return
-        if market is not Market.US:
+        if not _has_calendar(market):
             notes.append(PlanNote("no_calendar", f"{label}: no trading calendar available yet; skipped"))
             return
 
-        latest = _latest_ready_session(now)
-        today = now.astimezone(NEW_YORK).date()
+        is_us = market is Market.US
+        latest = latest_ready_session(now, market)
+        today = _today(now, market)
         if latest is None:
             return
         end = min(selection.history_end or latest, latest)
@@ -345,7 +402,7 @@ class DefaultPlanner:
             notes.append(PlanNote("nothing_to_do", f"{label}: history window is empty"))
             return
         window = DateRange(start, end)
-        all_sessions = xnys.sessions(start, end)
+        all_sessions = _sessions(market, start, end)
 
         def emit(
             kind: JobKind, provider: str, instruments: tuple[str, ...], win: DateRange, priority: int
@@ -358,7 +415,7 @@ class DefaultPlanner:
         # 1. whole-market grouped providers -------------------------------------------------
         whole_done: set[date] = set()  # covered or planned for every symbol
         whole = [n for n, c in capable.items() if c.batch is BatchShape.WHOLE_MARKET_PER_DAY]
-        if whole:
+        if whole and is_us:
             name = whole[0]
             have = coverage.covered(name, market, interval, window)
             planned = massive_grouped_sessions(
@@ -376,9 +433,10 @@ class DefaultPlanner:
         # 2/3. symbol based providers need a universe ----------------------------------------
         multi = [
             n for n, c in capable.items()
-            if c.batch is not BatchShape.WHOLE_MARKET_PER_DAY and n not in FALLBACK_PROVIDERS
+            if c.batch is not BatchShape.WHOLE_MARKET_PER_DAY
+            and not (is_us and n in FALLBACK_PROVIDERS)
         ]  # fmt: skip
-        fallback = [n for n in capable if n in FALLBACK_PROVIDERS]
+        fallback = [n for n in capable if is_us and n in FALLBACK_PROVIDERS]
         if (multi or fallback) and not symbols:
             notes.append(
                 PlanNote(
@@ -398,7 +456,7 @@ class DefaultPlanner:
                 continue
             span = DateRange(eligible[0], eligible[-1])
             groups: dict[tuple[date, date, JobKind], list[str]] = defaultdict(list)
-            for sym in symbols:
+            for sym in self._symbols_for(name, symbols, market, end, label, notes):
                 have = coverage.covered(name, market, interval, span, symbol=sym)
                 missing = [d for d in eligible if d not in have]
                 primary_covered[sym] |= have | set(missing)  # covered now or by this plan
@@ -430,6 +488,27 @@ class DefaultPlanner:
                         JobKind.BACKFILL, name, chunk, DateRange(w_start, w_end),
                         PRIORITY_FALLBACK_HISTORY if pre_history else PRIORITY_FALLBACK_GAP,
                     )  # fmt: skip
+
+    def _symbols_for(
+        self, name: str, symbols: list[str], market: Market, on: date, label: str, notes: list[PlanNote]
+    ) -> list[str]:
+        """Symbols ``name`` can serve. US: all. Crypto: only its own symbol dialect."""
+        if market is not Market.CRYPTO:
+            return symbols
+        if self.instruments is not None:
+            ok = [
+                s for s in symbols
+                if self.instruments.resolve(s, on=on, provider=name, market=Market.CRYPTO) is not None
+            ]  # fmt: skip
+        else:
+            ok = [s for s in symbols if crypto_symbol_for_provider(name, s)]
+        skipped = [s for s in symbols if s not in ok]
+        if skipped and not ok:
+            notes.append(
+                PlanNote("no_symbols", f"{label}: no configured symbol fits {name}; provider skipped")
+            )
+        # Skipping a symbol for one provider is routine (the other venue's symbol): no note.
+        return ok
 
     @staticmethod
     def _default_start(capable: Mapping[str, SourceCapability], today: date) -> date:
