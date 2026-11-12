@@ -110,7 +110,10 @@ def run_serve(
         out.err(f"error: {exc}")
         return EXIT_ERROR if isinstance(exc, StorageError) else EXIT_USAGE
 
-    app = create_app(settings=settings, backend=backend, data_dir=root)
+    from openbars.api.queries import open_readonly_quota_gate
+
+    gate = open_readonly_quota_gate(settings, root)
+    app = create_app(settings=settings, backend=backend, data_dir=root, quota_gate=gate)
     out.line("openbars serve: read-only local UI (not a public data API)")
     out.line(f"listening on http://{host}:{port}  (loopback only; no fetch, no writes)")
     run = server

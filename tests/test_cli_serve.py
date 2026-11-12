@@ -155,3 +155,25 @@ def test_serve_output_redacts_secrets(tmp_path, capsys, monkeypatch):
     assert main(["--config", str(cfg), "serve"], env={"MASSIVE_API_KEY": SECRET}) == 0
     captured = "".join(capsys.readouterr())
     assert SECRET not in captured
+
+
+def test_serve_does_not_create_quota_db(tmp_path, monkeypatch):
+    """``openbars serve`` must not create quota.db when the file is absent."""
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+
+    def fake_run(app, *, host, port, log_level="info"):
+        seen["app"] = app
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = fake_run
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+    data = tmp_path / "data"
+    assert main(["--config", str(_config(tmp_path)), "serve"], env={}) == 0
+    assert not (data / "quota.db").exists()
+    assert not (tmp_path / "quota.db").exists()
+    app = seen["app"]
+    assert app.state.quota_gate is None
