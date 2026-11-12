@@ -265,7 +265,7 @@ def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, n
     )
     return planner.plan(
         settings.selection,
-        RawStoreCoverage(backend.raw),
+        RawStoreCoverage(backend.raw, state=backend.state),
         now=now,
         universe=settings.universe,
         providers=providers,
