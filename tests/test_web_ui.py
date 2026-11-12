@@ -107,3 +107,14 @@ def test_every_quality_flag_has_en_and_zh_labels(client):
     # Both languages actually differ for at least the newly completed keys.
     assert "single source" in js and "单一来源" in js
     assert "limit up" in js and "涨停" in js
+
+
+def test_hourly_controls_and_new_york_labels(client):
+    js = client.get("/assets/app.js").text
+    assert 'value="1h"' in js
+    assert 'params.set("interval", interval)' in js
+    assert 'America/New_York' in js
+    assert 'missing_hours' in js
+    assert 'chart.hourly_bars' in js
+    for key in ("interval.label", "chart.hours", "chart.no_hourly", "chart.hourly_bars"):
+        assert len(re.findall(rf'"{re.escape(key)}"\s*:', js)) == 2
