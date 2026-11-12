@@ -16,6 +16,7 @@ classifiers = [
 ]
 dependencies = [
     "exchange-calendars>=4.9,<5",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -33,9 +34,8 @@ openbars = "openbars.cli.main:main"
 [project.entry-points."openbars.calendars"]
 xnys = "openbars.calendars.xnys:XNYSCalendar"
 
-# Third-party providers register here, e.g.:
-# [project.entry-points."openbars.providers"]
-# alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
+[project.entry-points."openbars.providers"]
+alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]
