@@ -18,12 +18,12 @@ class Terminal(io.StringIO):
 
 def test_wizard_writes_selected_settings_and_hides_keys(tmp_path, monkeypatch, capsys):
     secret = "private-" + "sample-value"
-    monkeypatch.setattr("sys.stdin", Terminal("us,crypto\n1d,1h\nalpaca,binance\n\n\n"))
+    monkeypatch.setattr("sys.stdin", Terminal("us,crypto\n1d\nalpaca,binance\n\n\n"))
     monkeypatch.setattr("getpass.getpass", lambda prompt: secret)
     assert main(["init", str(tmp_path)]) == 0
     config = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert config["markets"] == ["us", "crypto"]
-    assert config["intervals"] == ["1d", "1h"]
+    assert config["intervals"] == ["1d"]
     assert config["providers"]["alpaca"]["enabled"]
     assert config["providers"]["binance"]["enabled"]
     assert not config["providers"]["massive"]["enabled"]
@@ -75,7 +75,6 @@ def test_hourly_wizard_enables_twelve_data_and_hides_its_key(tmp_path, monkeypat
     assert secret in (tmp_path / ".env").read_text()
     output = capsys.readouterr()
     assert secret not in output.out + output.err
-    assert "#117" in output.out and "#118" in output.out
     assert main(["--config", str(tmp_path / "config.yaml"), "config"], env={}) == 0
     output = capsys.readouterr()
     assert secret not in output.out + output.err
@@ -132,6 +131,18 @@ def test_wizard_multiple_market_symbols_load(tmp_path, monkeypatch):
 
 
 def test_wizard_reprompts_when_non_us_market_has_no_interval(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("sys.stdin", Terminal("us,crypto\n1h\n1d,1h\nyfinance,binance\n\n\n"))
+    monkeypatch.setattr("sys.stdin", Terminal("us,crypto\n1h\n1d,1h\n1d\nyfinance,binance\n\n\n"))
     assert main(["init", str(tmp_path)]) == 0
-    assert "Non-US markets require 1d" in capsys.readouterr().out
+    assert capsys.readouterr().out.count("1h is supported only for US") == 2
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\x85"])
+def test_wizard_rejects_unicode_line_breaks_in_credentials(tmp_path, monkeypatch, capsys, separator):
+    from openbars.config.loader import parse_env_file
+
+    values = iter([f"bad{separator}value", "safe-value", "second"])
+    monkeypatch.setattr("sys.stdin", Terminal("us\n1d\nalpaca\n\n"))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: next(values))
+    assert main(["init", str(tmp_path)]) == 0
+    assert parse_env_file(tmp_path / ".env")["ALPACA_API_KEY_ID"] == "safe-value"
+    assert "Unsupported character in credential" in capsys.readouterr().out

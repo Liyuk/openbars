@@ -64,11 +64,9 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     while True:
         intervals = _choose("粒度 / Intervals (1d, 1h; 1h US only / 小时线仅美股)",
                             {"1d", "1h"} if "us" in markets else {"1d"}, "1d")
-        if "1d" in intervals or all(market == "us" for market in markets):
+        if "1h" not in intervals or all(market == "us" for market in markets):
             break
-        out.line("非美股市场需要日线 / Non-US markets require 1d; 请重选 / choose again.")
-    if "1h" in intervals:
-        out.line("提示 / Note: 1h runs need a version with #117/#118 / 小时线运行需要包含 #117/#118 的版本。")
+        out.line("小时线仅支持美股 / 1h is supported only for US; 请重选 / choose again.")
     available = set()
     for market, names in {"us": {"alpaca", "massive", "yfinance"}, "hk": {"yfinance"},
                           "crypto": {"binance", "coinbase"}, "cn": {"baostock"}}.items():
@@ -86,7 +84,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     while True:
         providers = _choose(f"数据源 / Providers ({choices}; comma-separated / 逗号分隔)", available, choices)
         missing = [f"{market}/{interval}" for market in markets for interval in intervals
-                   if (market, interval) in coverage and not coverage[market, interval].intersection(providers)]
+                   if not coverage.get((market, interval), set()).intersection(providers)]
         if not missing:
             break
         out.line(f"数据源未覆盖 / Providers do not cover: {', '.join(missing)}; 请重选 / choose again.")
@@ -126,7 +124,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", getpass.GetPassWarning)
                     value = getpass.getpass(f"{name} (可留空 / optional): ")
-                if not any(c in value for c in "\r\n\x00") and "'" not in value:
+                if not any(c in value for c in "\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029\x00") and "'" not in value:
                     break
                 out.line("密钥含不支持的字符，请重试 / Unsupported character in credential; try again.")
             lines.append(f"{name}='{value}'")
