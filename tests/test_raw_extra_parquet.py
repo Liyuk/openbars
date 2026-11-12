@@ -6,6 +6,8 @@ files written before it existed (no such column) must keep reading, with ``extra
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal as D
@@ -90,6 +92,7 @@ def test_encode_decode_is_deterministic_and_lossless():
     text = encode_extra(extra)
     assert text == encode_extra({"a": date(2026, 3, 4), "b": D("1.10")})  # key order never matters
     assert decode_extra(text) == extra and str(decode_extra(text)["b"]) == "1.10"
+    assert decode_extra(json.loads(text)) == extra  # JSONB-style already-parsed mapping
     assert encode_extra({}) is None and encode_extra(None) is None and decode_extra(None) is None
 
 

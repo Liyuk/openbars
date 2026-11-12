@@ -243,8 +243,17 @@ def _revive(obj: dict[str, Any]) -> Any:
     return obj
 
 
+def _revive_tree(obj: Any) -> Any:
+    """Walk a parsed JSON value and revive ``$decimal`` / ``$date`` / ``$datetime`` tags."""
+    if isinstance(obj, list):
+        return [_revive_tree(v) for v in obj]
+    if isinstance(obj, dict):
+        return _revive({k: _revive_tree(v) for k, v in obj.items()})
+    return obj
+
+
 def decode_extra(value: Mapping[str, object] | str | None) -> Mapping[str, object] | None:
-    """Inverse of ``encode_extra``; a mapping passes through, empty / null is ``None``."""
+    """Inverse of ``encode_extra``; a mapping (e.g. JSONB) is revived too; empty / null is ``None``."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if isinstance(value, str):
@@ -252,6 +261,8 @@ def decode_extra(value: Mapping[str, object] | str | None) -> Mapping[str, objec
             value = json.loads(value, object_hook=_revive)
         except ValueError as exc:
             raise InvalidBarError(f"extra is not valid JSON: {exc}") from None
+    elif isinstance(value, Mapping):
+        value = _revive_tree(dict(value))
     if not isinstance(value, Mapping):
         raise InvalidBarError("extra must be a JSON object")
     return dict(value) or None
@@ -287,8 +298,8 @@ class RawBarRow:
     ingest_run_id: str | None = None
     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     # ``RawBar.extra`` keys without a column of their own (tradestatus, isST, preclose, ...).
-    # Persisted by the Parquet raw layer only, as a JSON string (a JSON string is accepted here
-    # and decoded); Postgres has no such column. ``None`` = nothing to keep.
+    # Parquet stores a JSON string; Postgres native stores JSONB (a mapping is accepted here
+    # and decoded). ``None`` = nothing to keep.
     extra: Mapping[str, object] | str | None = None
 
     def __post_init__(self) -> None:
