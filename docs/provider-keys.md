@@ -1,0 +1,18 @@
+# 数据源申请与额度 / Provider keys and limits
+
+以下是仓库内记录的公开免费档信息；额度、覆盖范围和历史深度可能变化，申请前请核对官方页面。各源有不同许可：仅在本机为个人使用保存数据，不要重新分发；遵守各源条款。填写密钥时使用交互式 `openbars init`，或自行编辑不应提交的 `.env`。
+
+These are public free-tier notes recorded in this repository; limits, coverage and history can change. Check the official pages before signing up. Provider terms differ: store data locally for personal use, do not redistribute it, and follow each provider's terms. Enter credentials through interactive `openbars init` or edit the private, uncommitted `.env` yourself.
+
+| 数据源 / Provider | 官方页面 / Official page | 密钥与免费额度、历史 / Key, free limits and history |
+| --- | --- | --- |
+| Alpaca | [Market Data API](https://docs.alpaca.markets/docs/about-market-data-api) | 需要账户和 key / Account and key required. 仓库记录免费档 200 次/分钟，SIP 历史从 2016 年起；免费数据覆盖受 feed 和近期数据限制。/ Repository notes 200 requests/minute and SIP history from 2016; feed and recent-data restrictions apply. |
+| Massive | [Pricing](https://massive.com/pricing) | 需要 key / Key required. 仓库记录免费档 5 次/分钟，默认限速为 4；历史取决于套餐和标的，详情见价格页。/ Repository notes 5 calls/minute, paced at 4 by default; history depends on plan and instrument, see pricing. |
+| yfinance | [Documentation](https://ranaroussi.github.io/yfinance/) | 无需注册或 token / No registration or token. 无公布的固定额度；历史深度因标的和上游而异；项目默认 30 次/分钟是保守设置，不是官方额度。/ No published fixed quota; history varies by instrument and upstream; the project's 30/minute is a conservative setting, not an official limit. |
+| BaoStock | [Documentation](http://www.baostock.com/) | 无需注册或 token / No registration or token. 无官方固定额度；历史深度因标的而异，见文档。需安装 `openbars[baostock]`。/ No official fixed quota; history varies by instrument, see documentation. Install `openbars[baostock]`. |
+| Binance | [Public market data](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints) | 公开行情无需注册或 token / Public market data needs no registration or token. 请求按 IP 权重限速，历史因交易对上市时间而异；见官方文档。/ IP request-weight limits apply; history depends on pair listing date; see official docs. |
+| Coinbase | [Exchange candles](https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductcandles) | 公开行情无需注册或 token / Public market data needs no registration or token. 单次最多 300 根 K 线，历史因交易对而异；另有公开接口限速。/ Up to 300 candles per request, history varies by product; public API rate limits also apply. |
+| AKShare | [Documentation](https://akshare.akfamily.xyz/) | 无需注册或 token / No registration or token. 无统一官方固定额度；历史因上游与标的而异。适配器已实现，但当前 CLI 未装配，向导不能启用。/ No uniform official fixed quota; history varies by upstream and instrument. The adapter exists, but is not wired into the current CLI wizard. |
+| Twelve Data | [Pricing](https://twelvedata.com/pricing) | 需要 key / Key required. 仓库记录免费档 8 次/分钟、800 次/日，每次最多 5,000 条；历史受套餐和标的限制。**当前分支没有该适配器，尚未接入 / Not implemented on this branch**，不能用于美股 1h。/ Repository notes 8/minute, 800/day and up to 5,000 bars/request; history depends on plan and instrument. No adapter is present on this branch, including for US 1h. |
+
+Alpha Vantage ([official API key page](https://www.alphavantage.co/support/#api-key)), Tiingo ([official documentation](https://www.tiingo.com/documentation/general/overview)) 和 Tushare ([官方文档](https://tushare.pro/document/1))：**未接入 / not implemented**，不能通过当前 CLI 使用。示例配置中关闭的 Alpha Vantage 不是可用数据源。
