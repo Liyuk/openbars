@@ -401,7 +401,7 @@ class BarReader(Protocol):
 2. **覆盖索引**：从存储读已有 raw/canonical 覆盖 → 差集即待抓窗口。
 3. **源路由**：对每个待抓窗口，按 `reconcile` 优先级和 `SourceCapability`（历史深度、批形状、延迟）挑选能覆盖的源，生成**最省额度**的 Job（例：Massive 一天一请求覆盖全市场；Alpaca 200 只一批；yfinance 只补 2016 年前）。
 4. **执行**：worker 从队列租用 Job → `QuotaGate.acquire` → provider 请求 → `RawStore.append` → 更新 Checkpoint。
-5. **错误**：`ProviderError(code, retryable, retry_at)` 统一错误模型（沿用上游内部实现）；429 → `penalize` 整个 provider；连续失败 N 次 → 熔断该 provider 一段时间；不可重试 → `dead` 并进入 `status` 报告。
+5. **错误**：`ProviderError(code, retryable, retry_at)` 统一错误模型（沿用上游内部实现）；429 → `penalize` 整个 provider；连续失败 N 次 → 熔断该 provider 一段时间；不可重试 → `dead` 并进入 `status` 报告。`dead` 是终态：`plan --submit` / `run` 对已存在的作业行一律不改（同一缺口重新规划得到相同 job id，仍是 `dead`），只有显式的 `openbars jobs retry [--dead] [--failed] [--provider P] [--market M] [--interval I] [--error TEXT] [--dry-run]`（#151，`StateStore.retry_jobs`）把匹配的 `dead` / `failed` 行改回 `pending`，`attempts` 归零、清掉 `retry_at`，保留 `last_error` 与断点；下一次 `run` 执行它们。永久性错误因此不会被自动无限重试。
 6. **每日增量**：按各源 `latency` 定时（例如美股 06:30 ET 后跑前一交易日），先主源后兜底源。
 7. **回补预算**：`openbars plan` 输出每个源预计请求数、耗时下限与额度占用；启用非日线粒度时若超过预算，要求用户确认（`--accept-budget`）。
 

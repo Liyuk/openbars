@@ -44,6 +44,7 @@ uv run openbars plan                 # 预览任务与请求预算（不写入�
 uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
 uv run openbars status               # 任务状态、失败/死信、断点
 uv run openbars verify               # 各市场的覆盖率与多源一致性报告（只读）
+uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新入队（可加 --provider / --error / --dry-run）
 # 可选：安装 http 额外依赖后，在本机打开只读界面（默认仅绑定 127.0.0.1；非回环 --host 会被拒绝）
 # uv sync --extra http
 # uv run openbars serve              # 打开 http://127.0.0.1:8787
@@ -163,6 +164,7 @@ uv run openbars plan                 # preview jobs and request budget (writes n
 uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
 uv run openbars status               # job states, dead jobs, checkpoints
 uv run openbars verify               # per-market coverage and cross-source agreement report (read-only)
+uv run openbars jobs retry --dead     # dead jobs are re-queued only on an explicit retry (--provider / --error / --dry-run)
 # Optional: install the http extra and open the local read-only UI (loopback only; a non-loopback --host is rejected)
 # uv sync --extra http
 # uv run openbars serve              # http://127.0.0.1:8787
