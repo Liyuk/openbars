@@ -478,6 +478,20 @@ def test_hourly_raw_default_window_is_bounded_for_long_history(client, backend):
     assert body['bars'][-1]['session_date'] == days[-1].isoformat()
 
 
+def test_hourly_raw_default_window_counts_extended_slots(client, backend):
+    # ~600 sessions: fits at 7 regular slots/session, not at 17 with pre/post-market.
+    days = [date(2023, 1, 3), date(2025, 5, 30)]
+    batch = raw_batch([SYM], days, provider='prov_ext', fetch_id='hourly-ext')
+    rows = [replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+            for row in raw_rows_from_batch(batch)]
+    rows[-1] = replace(rows[-1], extra={**(rows[-1].extra or {}), 'session': 'pre'})
+    backend.raw.append_rows(rows)
+    response = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_ext'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert days[0].isoformat() < body['start'] <= body['end'] == days[-1].isoformat()
+
+
 def test_hourly_mixed_mapped_and_legacy_sources_and_rows(client, backend):
     entries = [
         ('prov_mixed', DAYS[0], T1),
