@@ -57,6 +57,7 @@ MODULES = [
     "openbars.normalize.crypto_pairs",
     "openbars.normalize.cn_instruments",
     "openbars.normalize.hk_instruments",
+    "openbars.normalize.hk_adjust",
     "openbars.normalize.normalizer",
     "openbars.normalize.adjust",
     "openbars.reconcile.policy",
