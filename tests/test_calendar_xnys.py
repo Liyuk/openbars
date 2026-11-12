@@ -9,14 +9,18 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from openbars.calendars import (
+    HourlyBarSlot,
     TradingSession,
     XNYSCalendar,
+    filter_hourly_slots,
+    hourly_slots,
     is_non_session_date,
     latest_completed_session,
     reject_non_session_bars,
+    session_for_hourly_ts,
     session_index,
 )
-from openbars.core.models import Market
+from openbars.core.models import HourlyAlignment, Market, Session
 
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -294,3 +298,132 @@ def test_reject_non_session_bars_custom_attr_and_type_check():
     assert reject_non_session_bars([Other(date(2024, 7, 4))], session_date_attr="day").rejected
     with pytest.raises(TypeError):
         reject_non_session_bars([Other("2024-07-04")], session_date_attr="day")
+
+
+# --- hourly slots (issue #114) ----------------------------------------------------------
+
+
+REGULAR_DAY = date(2024, 1, 3)  # Wednesday, EST
+HALF_DAY = date(2024, 11, 29)  # day after Thanksgiving, 13:00 EST close
+
+
+def _starts(slots):
+    return [s.ts_start for s in slots]
+
+
+def _sessions(slots):
+    return [s.session for s in slots]
+
+
+def test_hourly_session_open_full_day():
+    slots = hourly_slots(REGULAR_DAY)
+    assert len(slots) == 7
+    assert set(_sessions(slots)) == {Session.REGULAR}
+    assert _starts(slots) == [
+        datetime(2024, 1, 3, 14 + i, 30, tzinfo=UTC) for i in range(7)
+    ]
+    assert slots[-1].ts_end == datetime(2024, 1, 3, 21, 0, tzinfo=UTC)
+    assert slots[-1].ts_start == datetime(2024, 1, 3, 20, 30, tzinfo=UTC)
+    assert all(s.session_date == REGULAR_DAY for s in slots)
+    assert all(s.ts_start.tzinfo is UTC or s.ts_start.utcoffset() == timedelta(0) for s in slots)
+
+
+def test_hourly_session_open_half_day():
+    slots = hourly_slots(HALF_DAY)
+    assert len(slots) == 4
+    assert set(_sessions(slots)) == {Session.REGULAR}
+    assert _starts(slots) == [
+        datetime(2024, 11, 29, 14, 30, tzinfo=UTC),
+        datetime(2024, 11, 29, 15, 30, tzinfo=UTC),
+        datetime(2024, 11, 29, 16, 30, tzinfo=UTC),
+        datetime(2024, 11, 29, 17, 30, tzinfo=UTC),
+    ]
+    assert slots[-1].ts_end == datetime(2024, 11, 29, 18, 0, tzinfo=UTC)  # 13:00 EST
+    assert hourly_slots(HALF_DAY, include_extended_hours=False) == slots
+
+
+def test_hourly_clock_hour_full_and_half_day():
+    full = hourly_slots(REGULAR_DAY, alignment=HourlyAlignment.CLOCK_HOUR)
+    assert len(full) == 7 and set(_sessions(full)) == {Session.REGULAR}
+    assert full[0].ts_start == datetime(2024, 1, 3, 14, 30, tzinfo=UTC)
+    assert full[0].ts_end == datetime(2024, 1, 3, 15, 0, tzinfo=UTC)  # 09:30-10:00 EST
+    assert _starts(full)[1:] == [datetime(2024, 1, 3, 15 + i, 0, tzinfo=UTC) for i in range(6)]
+    assert full[-1].ts_end == datetime(2024, 1, 3, 21, 0, tzinfo=UTC)
+
+    half = hourly_slots(HALF_DAY, alignment="clock_hour")
+    assert len(half) == 4 and set(_sessions(half)) == {Session.REGULAR}
+    assert half[0].ts_start == datetime(2024, 11, 29, 14, 30, tzinfo=UTC)
+    assert half[0].ts_end == datetime(2024, 11, 29, 15, 0, tzinfo=UTC)
+    assert _starts(half)[1:] == [
+        datetime(2024, 11, 29, 15, 0, tzinfo=UTC),
+        datetime(2024, 11, 29, 16, 0, tzinfo=UTC),
+        datetime(2024, 11, 29, 17, 0, tzinfo=UTC),
+    ]
+    assert half[-1].ts_end == datetime(2024, 11, 29, 18, 0, tzinfo=UTC)
+
+
+def test_hourly_extended_hours_full_and_half_day():
+    slots = hourly_slots(REGULAR_DAY, include_extended_hours=True)
+    pre = [s for s in slots if s.session is Session.PRE]
+    regular = [s for s in slots if s.session is Session.REGULAR]
+    post = [s for s in slots if s.session is Session.POST]
+    assert len(regular) == 7
+    assert pre[0].ts_start == datetime(2024, 1, 3, 9, 0, tzinfo=UTC)  # 04:00 EST
+    assert pre[-1].ts_end == datetime(2024, 1, 3, 14, 30, tzinfo=UTC)  # 09:30 EST
+    assert post[0].ts_start == datetime(2024, 1, 3, 21, 0, tzinfo=UTC)  # 16:00 EST
+    assert post[-1].ts_end == datetime(2024, 1, 4, 1, 0, tzinfo=UTC)  # 20:00 EST
+
+    half = hourly_slots(HALF_DAY, include_extended_hours=True)
+    half_post = [s for s in half if s.session is Session.POST]
+    assert [s for s in half if s.session is Session.REGULAR] == hourly_slots(HALF_DAY)
+    assert half_post[0].ts_start == datetime(2024, 11, 29, 18, 0, tzinfo=UTC)  # 13:00 EST
+    assert half_post[-1].ts_end == datetime(2024, 11, 29, 22, 0, tzinfo=UTC)  # 17:00 EST
+
+
+def test_hourly_slots_empty_on_weekend_and_holiday():
+    assert hourly_slots(date(2024, 1, 6)) == []  # Saturday
+    assert hourly_slots(date(2024, 1, 1)) == []  # New Year's Day
+    assert hourly_slots(date(2024, 11, 28)) == []  # Thanksgiving
+
+
+def test_hourly_dst_regular_hours_follow_local_clock():
+    # 2016-03-11 is still EST; 2016-03-14 is the first Monday in EDT
+    est = hourly_slots(date(2016, 3, 11))
+    edt = hourly_slots(date(2016, 3, 14))
+    assert len(est) == len(edt) == 7
+    assert est[0].ts_start == datetime(2016, 3, 11, 14, 30, tzinfo=UTC)
+    assert est[-1].ts_end == datetime(2016, 3, 11, 21, 0, tzinfo=UTC)
+    assert edt[0].ts_start == datetime(2016, 3, 14, 13, 30, tzinfo=UTC)
+    assert edt[-1].ts_end == datetime(2016, 3, 14, 20, 0, tzinfo=UTC)
+    # fall-back Monday (2016-11-07) is EST again
+    fall = hourly_slots(date(2016, 11, 7))
+    assert fall[0].ts_start == datetime(2016, 11, 7, 14, 30, tzinfo=UTC)
+    assert fall[-1].ts_end == datetime(2016, 11, 7, 21, 0, tzinfo=UTC)
+
+
+def test_filter_hourly_slots_drops_extended_by_default():
+    all_slots = hourly_slots(REGULAR_DAY, include_extended_hours=True)
+    kept = filter_hourly_slots(all_slots)
+    assert {s.session for s in kept} == {Session.REGULAR}
+    assert len(kept) == 7
+    assert filter_hourly_slots(all_slots, include_extended_hours=True) == list(all_slots)
+
+
+def test_session_for_hourly_ts_and_calendar_method():
+    slots = hourly_slots(REGULAR_DAY, include_extended_hours=True)
+    first_pre = next(s for s in slots if s.session is Session.PRE)
+    first_reg = next(s for s in slots if s.session is Session.REGULAR)
+    first_post = next(s for s in slots if s.session is Session.POST)
+    assert session_for_hourly_ts(REGULAR_DAY, first_reg.ts_start) is Session.REGULAR
+    assert session_for_hourly_ts(REGULAR_DAY, first_pre.ts_start) is None  # extended off
+    assert session_for_hourly_ts(
+        REGULAR_DAY, first_pre.ts_start, include_extended_hours=True
+    ) is Session.PRE
+    assert session_for_hourly_ts(
+        REGULAR_DAY, first_post.ts_start, include_extended_hours=True
+    ) is Session.POST
+    with pytest.raises(ValueError, match="timezone-aware"):
+        session_for_hourly_ts(REGULAR_DAY, datetime(2024, 1, 3, 14, 30))
+    via_cal = CAL.hourly_slots(REGULAR_DAY)
+    assert via_cal == hourly_slots(REGULAR_DAY)
+    assert isinstance(via_cal[0], HourlyBarSlot)
