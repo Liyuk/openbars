@@ -105,7 +105,7 @@ class HkBrokerDailyProvider:
                 adjusted_modes=frozenset({Adjustment.RAW}),
                 feed=self.feed,
                 terms=ProviderTerms(
-                    personal_only=True, redistribution_allowed=False, url=self.terms_url, notes=self.terms_notes
+                    personal_only=True, redistribution_allowed=False, url=self.terms_url, notes="待验证：港股盘后当日可得性未由适配器保证；尽力获取、不承诺 T+0。 " + self.terms_notes
                 ),
             ),
         )

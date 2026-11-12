@@ -412,7 +412,7 @@ class BaoStockProvider:
             personal_only=True,
             redistribution_allowed=False,
             url=TERMS_URL,
-            notes="No API key. The baostock PyPI package is BSD licensed, but the website forbids "
+            notes="待验证：收盘后当日可得性未由适配器保证；尽力获取、不承诺 T+0。 No API key. The baostock PyPI package is BSD licensed, but the website forbids "
             "copying, distribution or commercial use without written permission; openbars only "
             "stores the data locally. Prices are unadjusted (adjustflag 3).",
         )
