@@ -125,8 +125,7 @@ def test_daily_stored_instrument_id_does_not_change_symbol_reconciliation():
 
 
 @pytest.mark.parametrize('order', [('massive', 'alpaca'), ('alpaca', 'massive')])
-@pytest.mark.parametrize('with_master', [False, True])
-def test_hourly_mixed_identity_reconciles(order, with_master):
+def test_hourly_mixed_identity_reconciles(order):
     from dataclasses import replace
     from openbars.core.models import DateRange
     from openbars.orchestrator.jobs import JobKind
@@ -140,13 +139,8 @@ def test_hourly_mixed_identity_reconciles(order, with_master):
         def scan(self, provider, market, interval, window):
             return stored.get(provider, [])
 
-    class Master:
-        def resolve(self, symbol, *, on, provider, market):
-            assert (symbol, on, market) == ('TEST1', day, Market.US)
-            return 'us:TEST1'
-
     sink = ReconcilingSink(MemoryReconciler(), lambda rows, market: writes.append(rows),
-                           Raw(), ('massive', 'alpaca'), master=Master() if with_master else None)
+                           Raw(), ('massive', 'alpaca'))
     for provider in order:
         b = bar(15, provider, 'aggs' if provider == 'massive' else 'sip',
                 '10' if provider == 'massive' else '15')
@@ -155,10 +149,72 @@ def test_hourly_mixed_identity_reconciles(order, with_master):
         stored[provider] = [b]
         job = Job('job', JobKind.BACKFILL, provider, Market.US, Interval.H1, ('TEST1',), window)
         sink.after_fetch(job, [b])
-    if not with_master and order[0] == 'alpaca':
+    if order[0] == 'alpaca':
         # An unresolved first write uses the symbol until another source supplies an ID.
         assert writes[0][0].instrument_id == 'TEST1'
     assert len(writes[-1]) == 1
     assert writes[-1][0].instrument_id == 'us:TEST1'
     assert writes[-1][0].quality_status == 'divergent'
     assert set(writes[-1][0].sources_seen) == {'massive', 'alpaca'}
+
+
+def test_symbol_daily_and_hourly_ignore_available_master(tmp_path):
+    from dataclasses import replace
+    from openbars.cli.wiring import make_sink
+    from openbars.core.models import DateRange
+    from openbars.orchestrator.jobs import JobKind
+    from openbars.reconcile.hourly import compare_hourly_to_daily
+    from openbars.storage.parquet_duckdb import open_backend
+
+    backend = open_backend(tmp_path)
+    class Master:
+        def resolve(self, *args, **kwargs):
+            return 'us:TEST1'
+    backend.instruments = Master()
+    sink = make_sink(backend, {})
+    day = date(2025, 1, 2)
+    window = DateRange(day, day)
+    job = Job('job', JobKind.BACKFILL, 'massive', Market.US, Interval.H1, ('TEST1',), window)
+    sink.after_fetch(job, [replace(bar(15), instrument_id=None),
+                           replace(bar(16, 'alpaca', 'sip'), instrument_id=None)])
+    rows = backend.canonical.scan_rows(['TEST1'], Interval.H1, window)
+    assert len(rows) == 2
+    daily = replace(rows[0], interval=Interval.D1, volume=D('200'))
+    backend.canonical.upsert_rows([daily])
+    stored_daily = backend.canonical.scan_rows(['TEST1'], Interval.D1, window)[0]
+    assert compare_hourly_to_daily(rows, stored_daily).differences == ()
+    assert compare_hourly_to_daily(rows, replace(stored_daily, close=D('15'))).differences == ('close',)
+
+
+def test_conflicting_ids_are_not_merged():
+    from dataclasses import replace
+    from openbars.core.models import DateRange
+    from openbars.orchestrator.jobs import JobKind
+
+    day = date(2025, 1, 2)
+    writes = []
+    sink = ReconcilingSink(MemoryReconciler(), lambda rows, market: writes.extend(rows))
+    job = Job('job', JobKind.BACKFILL, 'massive', Market.US, Interval.H1,
+              ('TEST1',), DateRange(day, day))
+    sink.after_fetch(job, [bar(15), replace(bar(15, 'alpaca', 'sip', '15'), instrument_id='us:OTHER'),
+                           replace(bar(15, 'yfinance', 'yahoo'), instrument_id=None)])
+    assert {row.instrument_id for row in writes} == {'us:TEST1', 'us:OTHER', 'TEST1'}
+    assert all(len(row.sources_seen) == 1 for row in writes)
+
+
+def test_daily_aggregation_uses_regular_hours_and_preserves_daily():
+    from dataclasses import replace
+    from openbars.reconcile.hourly import compare_hourly_to_daily, reconcile_hourly
+
+    first = replace(bar(15), open=D('8'), high=D('12'), low=D('7'), close=D('11'), volume=D('30'))
+    last = replace(bar(16), open=D('11'), high=D('15'), low=D('9'), close=D('14'), volume=D('70'))
+    extended = replace(bar(14, session='pre'), high=D('99'), volume=D('900'))
+    rows = reconcile_hourly([last, extended, first])
+    daily = replace(rows[0], interval=Interval.D1, open=D('8'), high=D('15'), low=D('7'),
+                    close=D('14'), volume=D('100'))
+    report = compare_hourly_to_daily(rows, daily)
+    assert report.differences == ()
+    assert (report.aggregate.open, report.aggregate.high, report.aggregate.low,
+            report.aggregate.close, report.aggregate.volume) == (D('8'), D('15'), D('7'), D('14'), D('100'))
+    assert compare_hourly_to_daily(rows, replace(daily, volume=D('200'))).differences == ('volume',)
+    assert daily.volume == D('100')

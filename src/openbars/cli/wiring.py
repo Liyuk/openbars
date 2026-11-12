@@ -93,8 +93,7 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
     raw = backend.raw  # type: ignore[attr-defined]
     others = tuple(providers)
     return DispatchingSink(
-        us=ReconcilingSink(MemoryReconciler(), writer, raw=raw, other_providers=others,
-                           master=backend.instruments),  # type: ignore[attr-defined]
+        us=ReconcilingSink(MemoryReconciler(), writer, raw=raw, other_providers=others),
         crypto=CryptoReconcilingSink(
             backend.instruments, writer, raw=raw, other_providers=others  # type: ignore[attr-defined]
         ),
