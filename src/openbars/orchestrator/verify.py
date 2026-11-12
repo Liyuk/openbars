@@ -14,7 +14,14 @@ What is scored:
   IEX vs SIP, or a source with provider-defined bases) count as ``not_comparable`` and are
   never scored as disagreements, so volumes of different feeds are never mixed;
 * **quality-flag agreement**: only when canonical rows of several policy versions exist for
-  the same cell; otherwise ``n/a`` (the status distribution is still reported).
+  the same cell; otherwise ``n/a`` (the status distribution and the canonical flag counts, for
+  example A-share ``LIMIT_UP`` / ``LIMIT_DOWN``, are still reported).
+
+Every market is verified on its own calendar (the caller passes it in) and its own
+``policy_version``. Stored bars are always RAW: A-share QFQ / HFQ and Hong Kong split-only reads
+are derived at query time and are never scored here. An A-share suspension keeps its raw bar
+(``tradestatus`` 0) but has no canonical bar; that expected hole is a *suspended cell*, not an
+ordinary missing cell.
 
 A report is not a pass/fail gate: agreement below 100% is a finding, not an error.
 """
@@ -45,6 +52,7 @@ from openbars.core.series import (
 )
 from openbars.reconcile.compatibility import compare_series
 from openbars.reconcile.policy import PRICE_TOLERANCE_PCT, VOLUME_TOLERANCE_PCT
+from openbars.storage.rows import decode_extra
 
 DEFAULT_RECENT_SESSIONS = 20
 _HUNDRED = Decimal(100)
@@ -117,6 +125,7 @@ class VerifyBar:
     volume: Decimal | None
     series: BarSeriesIdentity | None = None  # None: resolved via BarSeriesCatalog
     revision: int = 0
+    suspended: bool = False  # A-share raw row of a trading suspension (tradestatus 0)
 
     @property
     def source(self) -> SourceIdentity:
@@ -136,6 +145,7 @@ class VerifyCanonical:
     provider: str = ""
     feed: str = ""
     quality_status: str | None = None
+    flags: tuple[str, ...] = ()
 
 
 # --- outputs ---------------------------------------------------------------------------------
@@ -202,6 +212,7 @@ class Coverage:
     expected_cells: int = 0
     canonical_cells: int = 0
     raw_cells: int = 0  # cells with a bar from any raw source
+    suspended_cells: int = 0  # expected canonical holes: raw shows a suspension, canonical dropped it
     canonical_available: bool = False
     by_source: dict[str, int] = field(default_factory=dict)  # "provider/feed/adjustment" -> cells
     canonical_by_provider: dict[str, int] = field(default_factory=dict)
@@ -219,8 +230,14 @@ class Coverage:
 
     @property
     def missing_cells(self) -> int:
-        """Expected cells without a canonical bar (raw bar when no canonical rows exist)."""
-        return self.expected_cells - (self.canonical_cells if self.canonical_available else self.raw_cells)
+        """Expected cells without a canonical bar (raw bar when no canonical rows exist).
+
+        Suspended cells (A-share halts: raw kept, canonical dropped) are expected holes and are
+        not counted as missing.
+        """
+        if not self.canonical_available:
+            return self.expected_cells - self.raw_cells
+        return self.expected_cells - self.canonical_cells - self.suspended_cells
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +249,7 @@ class Coverage:
             "raw_cells": self.raw_cells,
             "raw_rate": self.raw_rate,
             "missing_cells": self.missing_cells,
+            "suspended_cells": self.suspended_cells,
             "by_source": {k: {"cells": v, "rate": self._rate(v)} for k, v in sorted(self.by_source.items())},
             "canonical_by_provider": dict(sorted(self.canonical_by_provider.items())),
         }
@@ -242,6 +260,7 @@ class QualityAgreement:
     """Quality status agreement between policy versions; ``rate`` is ``None`` when n/a."""
 
     distribution: dict[str, int] = field(default_factory=dict)  # status -> canonical rows
+    flags: dict[str, int] = field(default_factory=dict)  # quality flag -> canonical rows carrying it
     cells_compared: int = 0  # cells with rows from >= 2 policy versions
     cells_agreeing: int = 0
 
@@ -252,6 +271,7 @@ class QualityAgreement:
     def to_dict(self) -> dict[str, Any]:
         return {
             "distribution": dict(sorted(self.distribution.items())),
+            "flags": dict(sorted(self.flags.items())),
             "cells_compared": self.cells_compared,
             "cells_agreeing": self.cells_agreeing,
             "rate": self.rate,
@@ -292,6 +312,7 @@ class PeriodMetrics:
             "quality": self.quality.to_dict(),
             "counts": {
                 "missing": self.coverage.missing_cells,
+                "suspended": self.coverage.suspended_cells,
                 "not_comparable": self.not_comparable_pairs,
                 "divergent_price": self.price.divergent,
                 "divergent_volume": self.volume.divergent,
@@ -431,7 +452,14 @@ def verify(
         if previous is None or bar.revision >= previous.revision:
             slot[sk] = bar
 
+    suspended: set[tuple[date, str]] = set()
+    for day, by_entity in raw_by_day.items():
+        for e, by_source in by_entity.items():
+            if any(b.suspended for b in by_source.values()):
+                suspended.add((day, e))
+
     canon_status: dict[date, dict[str, dict[str, str | None]]] = defaultdict(lambda: defaultdict(dict))
+    canon_flags: dict[date, dict[str, tuple[str, ...]]] = defaultdict(dict)  # of ``policy_version``
     canon_provider: dict[date, dict[str, str]] = defaultdict(dict)  # selected source of ``policy_version``
     canonical_rows = 0
     for row in canonical:
@@ -441,6 +469,7 @@ def verify(
         canonical_rows += 1
         canon_status[row.session_date][e][row.policy_version] = row.quality_status
         if row.policy_version == policy_version:
+            canon_flags[row.session_date][e] = tuple(row.flags)
             canon_provider[row.session_date][e] = f"{row.provider}/{row.feed}" if row.provider else "unknown"
 
     ctx = _Context(tolerances, len(entities), canonical_rows > 0)
@@ -450,6 +479,8 @@ def verify(
     elif not canonical_rows:
         notes.append("no canonical rows in the window: coverage and missing counts use raw bars")
 
+    ctx.suspended = suspended
+    ctx.canon_flags = canon_flags
     periods = [ctx.metrics("window", sessions, raw_by_day, canon_status, canon_provider, policy_version)]
     if recent_sessions and 0 < recent_sessions < len(sessions):
         periods.append(
@@ -459,6 +490,12 @@ def verify(
             )  # fmt: skip
         )
 
+    held = periods[0].coverage.suspended_cells
+    if held:
+        notes.append(
+            f"{held} suspended cell(s): raw bar with tradestatus 0, canonical dropped the halt day; "
+            "an expected hole, not counted as missing"
+        )
     sources = tuple(
         SourceSummary(info[0].provider, info[0].feed, info[0].adjustment, info[1], len(info[2]), info[3], info[4])
         for _, info in sorted(summaries.items())
@@ -480,6 +517,8 @@ class _Context:
         self.tol = tolerances
         self.universe = universe
         self.canonical_available = canonical_available
+        self.suspended: set[tuple[date, str]] = set()
+        self.canon_flags: Mapping[date, Mapping[str, tuple[str, ...]]] = {}
         self._gate: dict[tuple[BarSeriesIdentity, BarSeriesIdentity], bool] = {}
 
     def comparable(self, a: VerifyBar, b: VerifyBar) -> bool:
@@ -509,11 +548,14 @@ class _Context:
         by_source: Counter[str] = Counter()
         provider_counts: Counter[str] = Counter()
         statuses: Counter[str] = Counter()
+        flag_counts: Counter[str] = Counter()
         single = multi = not_comparable = 0
 
         for day in sessions:
             for e, sources in raw_by_day.get(day, {}).items():
                 cov.raw_cells += 1
+                if (day, e) in self.suspended and policy_version not in canon_status.get(day, {}).get(e, {}):
+                    cov.suspended_cells += 1
                 by_source.update(sources.keys())
                 if len(sources) < 2:
                     single += 1
@@ -533,6 +575,7 @@ class _Context:
                     cov.canonical_cells += 1
                     provider_counts[canon_provider[day][e]] += 1
                     statuses[versions[policy_version] or _UNKNOWN] += 1
+                    flag_counts.update(self.canon_flags.get(day, {}).get(e, ()))
                 known = [v for v in versions.values() if v is not None]
                 if len(versions) >= 2 and len(known) == len(versions):  # unknown statuses are not guessed
                     quality.cells_compared += 1
@@ -541,6 +584,7 @@ class _Context:
         cov.by_source = dict(by_source)
         cov.canonical_by_provider = dict(provider_counts)
         quality.distribution = dict(statuses)
+        quality.flags = dict(flag_counts)
         return PeriodMetrics(
             label=label,
             window=DateRange(sessions[0], sessions[-1]) if sessions else None,
@@ -602,6 +646,14 @@ def _series_from_record(record: Mapping[str, Any]) -> BarSeriesIdentity | None:
     )
 
 
+def _is_suspended(extra: Any, volume: Decimal | None) -> bool:
+    """CN rule (``cn_quality.suspended_dates``): ``tradestatus`` decides; without it, volume 0."""
+    status = (decode_extra(extra) or {}).get("tradestatus")
+    if status is None:
+        return volume is not None and volume == 0
+    return str(status).strip() == "0"
+
+
 def load_raw_bars(
     backend: Any,
     market: Market,
@@ -614,6 +666,7 @@ def load_raw_bars(
     other ``RawStore`` implementations need ``providers``."""
     store = backend.raw
     out: list[VerifyBar] = []
+    cn = Market(market) is Market.CN  # only A-shares have trading suspensions
     if hasattr(store, "scan_table"):
         for r in store.scan_table(None, market, interval, window).to_pylist():
             out.append(
@@ -623,6 +676,7 @@ def load_raw_bars(
                     provider=r["provider"], feed=r.get("feed") or "", adjustment=r.get("adjustment") or "raw",
                     open=r["open"], high=r["high"], low=r["low"], close=r["close"], volume=r.get("volume"),
                     series=_series_from_record(r), revision=int(r.get("revision") or 0),
+                    suspended=cn and _is_suspended(r.get("extra"), r.get("volume")),
                 )  # fmt: skip
             )
         return out
@@ -636,6 +690,7 @@ def load_raw_bars(
                     adjustment=str(bar.extra.get("adjustment") or "raw"),
                     open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume,
                     series=bar.series, revision=bar.revision,
+                    suspended=cn and _is_suspended(bar.extra, bar.volume),
                 )  # fmt: skip
             )
     return out
@@ -657,6 +712,7 @@ def load_canonical(
             VerifyCanonical(
                 key=r["instrument_id"], session_date=r["session_date"], policy_version=r["policy_version"],
                 provider=r.get("provider") or "", feed=r.get("feed") or "", quality_status=r.get("quality_status"),
+                flags=tuple(r.get("flags") or ()),
             )  # fmt: skip
             for r in table.to_pylist()
         ]
@@ -698,6 +754,25 @@ def build_aliases(master: Any, keys: Iterable[str], *, on: date, market: Market)
     return out
 
 
+MARKET_NOTES: dict[Market, str] = {
+    Market.CN: (
+        "A-share bars are stored RAW (unadjusted); QFQ / HFQ are derived at query time and are not "
+        "what verify scores. Suspended sessions keep a raw bar but have no canonical bar; "
+        "LIMIT_UP / LIMIT_DOWN / SUSPENDED flags leave quality_status complete"
+    ),
+    Market.HK: (
+        "Hong Kong bars are stored RAW; split-only adjustment is derived at query time and is not "
+        "what verify scores"
+    ),
+}
+
+
+def market_notes(market: Market | str) -> tuple[str, ...]:
+    """Fixed per-market remarks for the report (empty for markets without any)."""
+    note = MARKET_NOTES.get(Market(market))
+    return (note,) if note else ()
+
+
 # --- rendering ---------------------------------------------------------------------------------
 
 
@@ -736,6 +811,7 @@ def format_report(report: VerifyReport) -> list[str]:
         lines.append(
             f"  coverage canonical {_pct(cov.canonical_rate)} ({cov.canonical_cells}), "
             f"raw {_pct(cov.raw_rate)} ({cov.raw_cells}), missing {cov.missing_cells}"
+            + (f", suspended {cov.suspended_cells} (expected)" if cov.suspended_cells else "")
         )
         for source, cells in sorted(cov.by_source.items()):
             rate = cells / cov.expected_cells if cov.expected_cells else None
@@ -750,9 +826,12 @@ def format_report(report: VerifyReport) -> list[str]:
             )
         status = ", ".join(f"{k}={v}" for k, v in sorted(q.distribution.items())) or "none"
         lines.append(f"  quality  {_pct(q.rate):>8}  canonical status: {status}")
+        flags = ", ".join(f"{k}={v}" for k, v in sorted(q.flags.items())) or "none"
+        lines.append(f"  flags    canonical rows with a quality flag: {flags}")
         lines.append(
             f"  counts   missing {cov.missing_cells}, not comparable {period.not_comparable_pairs}, "
             f"divergent price {period.price.divergent}, divergent volume {period.volume.divergent}, "
             f"single-source cells {period.single_source_cells}"
+            + (f", suspended {cov.suspended_cells}" if cov.suspended_cells else "")
         )
     return lines

@@ -3,6 +3,8 @@
 Further markets get their own module next to ``xnys``, ``crypto``, ``cn``, and ``hk``.
 """
 
+from typing import Any
+
 from openbars.calendars.cn import CNCalendar, XSHECalendar, XSHGCalendar
 from openbars.calendars.cn import is_session as cn_is_session
 from openbars.calendars.cn import (
@@ -52,8 +54,33 @@ from openbars.calendars.xnys import (
     session_index,
 )
 from openbars.core.calendar import TradingSession
+from openbars.core.models import Market
+
+# Exchange calendar name per market (CN: XSHE is an alias of XSHG; Beijing is out of scope).
+CALENDAR_NAMES = {
+    Market.US: "XNYS",
+    Market.CRYPTO: "UTC 24/7",
+    Market.CN: "XSHG",
+    Market.HK: "XHKG",
+}
+
+
+def calendar_for_market(market: Market | str) -> Any:
+    """The trading calendar of ``market``; ``ValueError`` for a market without one."""
+    market = Market(market)
+    if market is Market.US:
+        return XNYSCalendar()
+    if market is Market.CRYPTO:
+        return CryptoCalendar()
+    if market is Market.CN:
+        return CNCalendar()
+    if market is Market.HK:
+        return HKCalendar()
+    raise ValueError(f"unsupported market {market.value}")
+
 
 __all__ = [
+    "CALENDAR_NAMES",
     "AdhocClosure",
     "BarFilterResult",
     "BarRejection",
@@ -67,6 +94,7 @@ __all__ = [
     "XNYSCalendar",
     "XSHECalendar",
     "XSHGCalendar",
+    "calendar_for_market",
     "cn_is_session",
     "cn_latest_completed_session",
     "cn_session_bounds",

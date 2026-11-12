@@ -36,24 +36,12 @@ class QueryError(ValueError):
 
 def calendar_for(market: Market) -> Any:
     """Return the trading calendar for ``market``."""
-    market = Market(market)
-    if market is Market.US:
-        from openbars.calendars import XNYSCalendar
+    from openbars.calendars import calendar_for_market
 
-        return XNYSCalendar()
-    if market is Market.CRYPTO:
-        from openbars.calendars import CryptoCalendar
-
-        return CryptoCalendar()
-    if market is Market.CN:
-        from openbars.calendars import CNCalendar
-
-        return CNCalendar()
-    if market is Market.HK:
-        from openbars.calendars import HKCalendar
-
-        return HKCalendar()
-    raise QueryError(f"unsupported market {market.value}")
+    try:
+        return calendar_for_market(market)
+    except ValueError as exc:
+        raise QueryError(str(exc)) from exc
 
 
 def parse_market(value: str | None) -> Market | None:

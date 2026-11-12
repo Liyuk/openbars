@@ -252,3 +252,18 @@ def test_crypto_read_ignores_adjustment_mode(written):
     for mode in (Adjustment.RAW, Adjustment.SPLIT, Adjustment.ALL, None):
         table = written.bars([BIN], adjustment=mode, start=START, end=END)
         assert table.num_rows == len(DAYS)
+
+
+def test_verify_crypto_counts_every_utc_day_including_the_weekend(tmp_path, capsys):
+    fakes, factory = make_factory()
+    assert cli(["run"], tmp_path, factory) == 0
+    capsys.readouterr()
+    assert cli(["verify"], tmp_path, factory) == 0
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "us market only" not in captured.err + out
+    assert "market crypto" in out and "crypto-daily-v1" in out and "UTC 24/7" in out
+    assert "2026-03-05..2026-03-09" in out
+    assert "expected sessions 5" in out  # Sat 03-07 and Sun 03-08 are sessions
+    assert "universe 2" in out and "missing 0" in out
+    assert "binance/" in out and "coinbase/" in out

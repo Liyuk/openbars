@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openbars.calendars import XNYSCalendar
+from openbars.calendars import CNCalendar, CryptoCalendar, HKCalendar, XNYSCalendar
 from openbars.core.errors import ConfigError
 from openbars.core.models import DateRange
 from openbars.core.series import BarSeriesCatalog, SourceIdentity
@@ -184,3 +184,76 @@ def test_build_aliases_uses_master_resolution():
     master = SimpleNamespace(resolve_any=lambda k, on, market: {"TESTE00": "id-0"}.get(k, k))
     assert build_aliases(master, ["TESTE00", "id-0", "TESTE01"], on=date(2026, 3, 6), market="us") == {"TESTE00": "id-0"}
     assert build_aliases(object(), ["TESTE00"], on=date(2026, 3, 6), market="us") == {}
+
+
+# --- per-market calendars and conventions ------------------------------------------------------
+
+SAT, SUN = date(2026, 3, 7), date(2026, 3, 8)
+
+
+def test_crypto_every_utc_day_is_a_session_including_weekends():
+    window = DateRange(date(2026, 3, 5), date(2026, 3, 9))  # Thu .. Mon
+    days = [date(2026, 3, d) for d in range(5, 10)]
+    raw = [bar("crypto:spot:binance:TEST-USDT", d, provider="binance", feed="spot", adjustment="raw") for d in days]
+    report = verify(
+        raw, [], calendar=CryptoCalendar(), window=window, universe=["crypto:spot:binance:TEST-USDT"],
+        policy_version="crypto-daily-v1",
+    )  # fmt: skip
+    assert report.expected_sessions == 5 and report.coverage.expected_cells == 5
+    assert report.coverage.raw_cells == 5 and report.coverage.missing_cells == 0  # Sat / Sun count
+    assert report.policy_version == "crypto-daily-v1"
+    # the same window on XNYS has no weekend sessions
+    assert run([], universe=["x"]).expected_sessions == 5
+    assert verify([], [], calendar=CAL, window=window, universe=["x"]).expected_sessions == 3
+
+
+def test_cn_week_uses_xshg_sessions_and_skips_the_weekend():
+    window = DateRange(date(2026, 3, 2), date(2026, 3, 8))
+    report = verify([], [], calendar=CNCalendar(), window=window, universe=["cn:eq:xshg:600000"])
+    assert report.expected_sessions == 5
+    sessions = CNCalendar().sessions(window.start, window.end)
+    assert sessions == DAYS and SAT not in sessions and SUN not in sessions
+
+
+def test_hk_uses_xhkg_not_xnys():
+    window = DateRange(date(2026, 1, 19), date(2026, 1, 19))  # US holiday (MLK), HK trades
+    assert verify([], [], calendar=XNYSCalendar(), window=window, universe=["x"]).expected_sessions == 0
+    assert verify([], [], calendar=HKCalendar(), window=window, universe=["x"]).expected_sessions == 1
+    lunar = DateRange(date(2026, 2, 16), date(2026, 2, 20))  # HK closed Feb 17-19, US open
+    assert verify([], [], calendar=HKCalendar(), window=lunar, universe=["x"]).expected_sessions == 2
+    assert verify([], [], calendar=XNYSCalendar(), window=lunar, universe=["x"]).expected_sessions == 4
+
+
+def test_cn_suspended_day_is_an_expected_hole_and_limit_up_is_counted():
+    iid, cn_window = "cn:eq:xshg:600000", DateRange(date(2026, 3, 2), date(2026, 3, 6))
+    mon, tue, wed, thu, fri = [date(2026, 3, d) for d in range(2, 7)]
+
+    def cn_bar(day, **kw):
+        return bar(iid, day, provider="baostock", feed="ashare", adjustment="raw", **kw)
+
+    raw = [cn_bar(mon), cn_bar(tue), cn_bar(wed, volume="0", suspended=True), cn_bar(thu), cn_bar(fri)]
+    canon = [
+        VerifyCanonical(iid, d, "cn-daily-v1", "baostock", "ashare", "complete", flags)
+        for d, flags in ((mon, ()), (tue, ()), (thu, ("LIMIT_UP",)), (fri, ("LIMIT_DOWN",)))
+    ]  # no canonical bar on the halted Wednesday
+    report = verify(
+        raw, canon, calendar=CNCalendar(), window=cn_window, universe=[iid], policy_version="cn-daily-v1"
+    )
+    cov = report.coverage
+    assert (cov.expected_cells, cov.raw_cells, cov.canonical_cells) == (5, 5, 4)
+    assert cov.suspended_cells == 1 and cov.missing_cells == 0  # the halt is not an ordinary missing cell
+    assert report.quality.distribution == {"complete": 4}  # limit flags never change the status
+    assert report.quality.flags == {"LIMIT_UP": 1, "LIMIT_DOWN": 1}
+    assert any("suspended" in n for n in report.notes)
+    data = report.to_dict()
+    assert data["periods"][0]["coverage"]["suspended_cells"] == 1
+    assert data["periods"][0]["quality"]["flags"] == {"LIMIT_DOWN": 1, "LIMIT_UP": 1}
+    text = "\n".join(format_report(report))
+    assert "suspended 1" in text and "LIMIT_UP=1" in text and "LIMIT_DOWN=1" in text
+
+    # a canonical hole with no suspension evidence in raw is still missing
+    unexplained = verify(
+        [cn_bar(d) for d in (mon, tue, wed, thu, fri)], canon, calendar=CNCalendar(), window=cn_window,
+        universe=[iid], policy_version="cn-daily-v1",
+    )  # fmt: skip
+    assert unexplained.coverage.suspended_cells == 0 and unexplained.coverage.missing_cells == 1
