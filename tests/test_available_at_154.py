@@ -215,6 +215,33 @@ def test_same_source_bar_keeps_its_earliest_available_at(tmp_path):
     assert stored() == at(7)
 
 
+def corrected(base: CanonicalBarRow, **changes) -> CanonicalBarRow:
+    """Same key, revision and ``source_fingerprint`` as *base*: the daily path fingerprints
+    without a source bar id, so a source switch or a price correction can share it (#154 review)."""
+    return replace(base, source_fingerprint=base.source_fingerprint, **changes)
+
+
+SAME_FINGERPRINT_CHANGES = [
+    {"close": Decimal("11")},
+    {"provider": "alpaca", "feed": "sip", "price_source": "alpaca:sip"},
+    {"volume": Decimal("150")},
+    {"volume_source": "alpaca:sip"},
+]
+
+
+@pytest.mark.parametrize("changes", SAME_FINGERPRINT_CHANGES)
+def test_changed_source_or_price_with_the_same_fingerprint_takes_its_own_time(tmp_path, changes):
+    store = open_backend(tmp_path).canonical
+    first = row(available_at=at(2))
+    store.upsert_rows([first])
+    later = corrected(first, available_at=at(7), **changes)
+    assert later.source_fingerprint == first.source_fingerprint
+    store.upsert_rows([later])
+    (stored,) = store.scan_rows([IID], Interval.D1, WINDOW)
+    assert stored.available_at == at(7)
+    assert load_canonical(open_backend(tmp_path), [IID], start=D1, end=D1, market=Market.US, available_by=at(5)) == []
+
+
 # --- producers ------------------------------------------------------------------------------
 
 
@@ -296,7 +323,8 @@ def test_postgres_native_ddl_and_schema_check_treat_available_at_as_additive():
     with pytest.raises(SchemaMismatchError):
         check_native(catalog)
     for sql in (_CANON_DAILY_SQL, _CANON_INTRADAY_SQL):
-        assert '"available_at" = CASE WHEN "canonical_bars"."source_fingerprint" = EXCLUDED."source_fingerprint"' in sql
+        for column in ("source_fingerprint", "price_source", "close", "volume_source"):
+            assert f'"canonical_bars"."{column}" IS NOT DISTINCT FROM EXCLUDED."{column}"' in sql
         assert 'LEAST("canonical_bars"."available_at", EXCLUDED."available_at")' in sql
 
 
@@ -381,3 +409,22 @@ def test_live_pre_154_postgres_reads_null_and_write_open_adds_the_column(pg_dsn)
         rw = PostgresBackend(dsn, mode="native", write=True, schema=schema)  # ADD COLUMN IF NOT EXISTS
         rw.canonical.upsert_rows([row(available_at=at(1))])
         assert [r.available_at for r in ro.canonical.scan_rows([IID], Interval.D1, WINDOW)] == [at(1)]
+
+
+@pytest.mark.postgres_live
+def test_live_postgres_changed_source_with_the_same_fingerprint(pg_dsn):
+    from pg_helpers import throwaway_schema
+
+    from openbars.storage.postgres import PostgresBackend
+
+    with throwaway_schema(pg_dsn) as schema:
+        store = PostgresBackend(pg_dsn, mode="native", write=True, schema=schema).canonical
+        first = row(available_at=at(2))
+        store.upsert_rows([first])
+        store.upsert_rows([corrected(first, available_at=at(9))])  # identical bar: stays at(2)
+        assert store.scan_rows([IID], Interval.D1, WINDOW)[0].available_at == at(2)
+        for i, changes in enumerate(SAME_FINGERPRINT_CHANGES):
+            when = at(10 + i)
+            store.upsert_rows([corrected(first, available_at=when, **changes)])
+            assert store.scan_rows([IID], Interval.D1, WINDOW)[0].available_at == when
+            store.upsert_rows([first])  # back to the original bar for the next case
