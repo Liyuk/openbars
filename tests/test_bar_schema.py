@@ -181,7 +181,13 @@ def test_enum_values_are_exact():
     assert [e.value for e in AdjustmentScope] == [
         "none", "splits", "dividends", "splits_and_dividends", "provider_defined", "unknown",
     ]  # fmt: skip
-    assert [e.value for e in SessionSemantics] == ["regular", "extended", "provider_aligned", "unknown"]
+    assert [e.value for e in SessionSemantics] == [
+        "regular",
+        "extended",
+        "provider_aligned",
+        "utc_day",
+        "unknown",
+    ]
     assert [e.value for e in VolumeBasis] == ["as_traded", "split_adjusted", "provider_defined", "unknown"]
     assert Interval.D1.value == "1d"
 
@@ -351,3 +357,10 @@ def test_arrow_schemas():
     )
     assert table.to_pylist()[0]["close"] == row.close
     assert table.to_pylist()[0]["capabilities"] == list(row.capabilities)
+
+
+def test_session_semantics_enums_stay_in_sync():
+    from openbars.core.series import SessionSemantics as CoreSessionSemantics
+    from openbars.storage.schema import SessionSemantics as StorageSessionSemantics
+
+    assert [e.value for e in CoreSessionSemantics] == [e.value for e in StorageSessionSemantics]

@@ -44,6 +44,7 @@ from typing import Sequence
 
 from openbars.core.models import AssetClass, Instrument, Market, SymbolMapping
 from openbars.normalize.instruments import InstrumentMaster, UnresolvedRecord
+from openbars.providers.base import ProviderInstrument
 
 __all__ = [
     "CryptoPair",
@@ -58,6 +59,7 @@ __all__ = [
     "build_crypto_instrument",
     "crypto_instrument_id",
     "ingest_crypto_pairs",
+    "listing_from_provider_instrument",
     "pair_assets",
     "pair_venue",
     "parse_crypto_instrument_id",
@@ -179,6 +181,33 @@ def crypto_instrument_id(venue: str, base: str, quote: str) -> str:
 
 def parse_crypto_instrument_id(instrument_id: str) -> CryptoPair:
     return CryptoPair.parse(instrument_id)
+
+
+def listing_from_provider_instrument(
+    row: ProviderInstrument, *, provider: str, venue: str | None = None
+) -> CryptoPairListing:
+    """Turn a provider's ``ProviderInstrument`` into a ``CryptoPairListing``.
+
+    ``base_asset`` / ``quote_asset`` are required (``ValueError`` otherwise). ``venue`` defaults to
+    ``row.exchange``; one of the two must be given. Codes are not validated here: ingest queues
+    invalid rows. Not called by the orchestrator.
+    """
+    base = (row.base_asset or "").strip()
+    quote = (row.quote_asset or "").strip()
+    if not base or not quote:
+        raise ValueError(f"provider instrument {row.symbol!r} has no base_asset/quote_asset")
+    resolved = (venue or row.exchange or "").strip()
+    if not resolved:
+        raise ValueError(f"provider instrument {row.symbol!r} has no venue (pass venue=)")
+    return CryptoPairListing(
+        venue=resolved,
+        base=base,
+        quote=quote,
+        provider=provider,
+        symbol=row.symbol,
+        name=row.name,
+        active=row.active,
+    )
 
 
 def pair_assets(instrument: Instrument) -> tuple[str, str]:

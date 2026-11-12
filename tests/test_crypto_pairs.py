@@ -12,11 +12,13 @@ from openbars.normalize.crypto_pairs import (
     CryptoPairListing,
     crypto_instrument_id,
     ingest_crypto_pairs,
+    listing_from_provider_instrument,
     pair_assets,
     pair_venue,
     parse_crypto_instrument_id,
 )
 from openbars.normalize.instruments import MemoryInstrumentMaster
+from openbars.providers.base import ProviderInstrument
 from openbars.storage.parquet_duckdb import open_backend
 
 D = date
@@ -280,3 +282,42 @@ def test_parquet_master_roundtrip(tmp_path):
     assert pair_assets(got) == ("TEST", "USDT") and got.currency == "USDT" and got.exchange == "BINANCE"
     assert store.resolve("TESTUSDT", on=ASOF, provider="binance", market=Market.CRYPTO) == got.instrument_id
     assert store.resolve("TEST-USDT", on=ASOF, provider="coinbase", market=Market.CRYPTO) == "crypto:spot:coinbase:TEST-USDT"
+
+
+def test_listing_from_provider_instrument_roundtrip():
+    row = ProviderInstrument(
+        symbol="TESTUSDT",
+        market=Market.CRYPTO,
+        asset_class=AssetClass.CRYPTO_SPOT,
+        name="Test pair",
+        exchange="BINANCE",
+        active=True,
+        base_asset="TEST",
+        quote_asset="USDT",
+    )
+    listing = listing_from_provider_instrument(row, provider="binance")
+    assert (listing.venue, listing.base, listing.quote) == ("BINANCE", "TEST", "USDT")
+    assert (listing.provider, listing.symbol, listing.name, listing.active) == (
+        "binance",
+        "TESTUSDT",
+        "Test pair",
+        True,
+    )
+    master = MemoryInstrumentMaster()
+    summary = ingest_crypto_pairs(master, [listing], as_of=ASOF)
+    assert summary.created == 1 and summary.unresolved == 0
+    assert pair_assets(master.get("crypto:spot:binance:TEST-USDT")) == ("TEST", "USDT")
+
+
+def test_listing_from_provider_instrument_requires_assets_and_venue():
+    base = dict(symbol="TESTUSDT", market=Market.CRYPTO, asset_class=AssetClass.CRYPTO_SPOT)
+    with pytest.raises(ValueError):
+        listing_from_provider_instrument(ProviderInstrument(**base, exchange="BINANCE"), provider="binance")
+    with pytest.raises(ValueError):
+        listing_from_provider_instrument(
+            ProviderInstrument(**base, exchange="BINANCE", base_asset="TEST", quote_asset=" "), provider="binance"
+        )
+    row = ProviderInstrument(**base, base_asset="TEST", quote_asset="USDT")
+    with pytest.raises(ValueError):
+        listing_from_provider_instrument(row, provider="binance")
+    assert listing_from_provider_instrument(row, provider="binance", venue="binance").venue == "binance"

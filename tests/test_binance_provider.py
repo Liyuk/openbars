@@ -138,7 +138,7 @@ def test_klines_parse_to_utc_daily_raw_bars():
     assert series.legacy_adjustment == "raw" and series.currency is None
     assert series.price_basis is PriceBasis.RAW
     assert series.adjustment_scope is AdjustmentScope.NONE
-    assert series.session_semantics is SessionSemantics.PROVIDER_ALIGNED
+    assert series.session_semantics is SessionSemantics.UTC_DAY
     assert series.volume_basis is VolumeBasis.AS_TRADED
     assert series.source not in KNOWN_SOURCES
 
@@ -339,6 +339,8 @@ def test_list_instruments_from_exchange_info():
     assert test.market is Market.CRYPTO and test.asset_class is AssetClass.CRYPTO_SPOT
     assert test.exchange == "BINANCE" and test.native_id == "TESTUSDT" and test.active is True
     assert zzz.active is False
+    assert (test.base_asset, test.quote_asset) == ("TEST", "USDT")
+    assert (zzz.base_asset, zzz.quote_asset) == ("ZZZ", "USDT")
 
 
 def test_list_instruments_rejects_other_markets():
