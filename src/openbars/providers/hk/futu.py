@@ -4,7 +4,7 @@ Talks to a **local OpenD gateway** the user runs and logs into themselves (Futu 
 registered phone / e-mail). openbars never handles the Futu login: it only needs the
 gateway address (``providers.futu.host`` / ``port``, default ``127.0.0.1:11111``), read at
 runtime. Logging in does not imply a market-data entitlement: HK quote level, history-K
-quota (distinct symbols per 30 days) and mainland / international status (often decided by
+quota (distinct symbols within a rolling period set by Futu) and mainland / international status (often decided by
 the OpenD login IP) depend on the account and Futu's current terms -- check them first.
 
 Quotes are governed by the Futu user agreement, the OpenAPI agreement and exchange

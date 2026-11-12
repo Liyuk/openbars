@@ -14,6 +14,14 @@ from typing import Any
 
 from openbars.core.models import Adjustment, DateRange, HourlyAlignment, Interval, Market, QualityFlag
 from openbars.reconcile import policy_version_for_market
+from openbars.storage.rows import (
+    ID_KIND_AUTO,
+    ID_KIND_UPSTREAM,
+    available_by_utc,
+    check_id_kind,
+    is_available,
+    upstream_instrument_ids,
+)
 from openbars.storage.schema import AUTO_POLICY_VERSION
 
 MAX_BARS = 8000
@@ -231,19 +239,48 @@ def load_canonical(
     adjustment: Adjustment = Adjustment.SPLIT,
     as_of: date | None = None,
     market: Market | None = None,
+    available_by: datetime | None = None,
+    id_kind: str = ID_KIND_AUTO,
 ) -> list[dict[str, Any]]:
-    """Load canonical bars via ``BarReader`` when present, else ``scan_rows``."""
+    """Load canonical bars via ``BarReader`` when present, else ``scan_rows``.
+
+    ``id_kind="upstream"`` (#155): ``instrument_ids`` are upstream integer ids matched verbatim
+    (no symbol mapping; nothing needs to be registered in the instrument master).
+
+    ``available_by`` (#154, tz-aware): only stored rows with ``available_at <= available_by``;
+    rows without ``available_at`` are left out. ``None`` = no point-in-time filter.
+    """
+    if available_by is not None:
+        try:
+            available_by = available_by_utc(available_by)
+        except ValueError as exc:
+            raise QueryError(str(exc)) from exc
+    try:
+        upstream = check_id_kind(id_kind) == ID_KIND_UPSTREAM
+        if upstream:
+            instrument_ids = list(dict.fromkeys(upstream_instrument_ids(instrument_ids)))
+    except ValueError as exc:
+        raise QueryError(str(exc)) from exc
+
+    def visible(rows: list[Any]) -> list[Any]:
+        if available_by is None:
+            return rows
+        return [row for row in rows if is_available(row, available_by)]
+
     if interval == Interval.H1:
         if as_of is not None:
             raise QueryError("as_of is not supported for canonical hourly bars")
-        rows = [_from_canonical_row(row) for row in _scan_canonical(
+        rows = [_from_canonical_row(row) for row in visible(_scan_canonical(
             backend, instrument_ids, interval=interval, start=start, end=end, market=market
-        )]
+        ))]
         if any(row["adjustment"] != adjustment.value for row in rows):
             raise QueryError("requested adjustment is not available for canonical hourly bars")
         return rows
     reader = getattr(backend, "reader", None)
     if reader is not None and hasattr(reader, "bars"):
+        extra: dict[str, Any] = {} if available_by is None else {"available_by": available_by}
+        if upstream:
+            extra["id_kind"] = ID_KIND_UPSTREAM
         result = reader.bars(
             instrument_ids,
             interval=interval,
@@ -252,6 +289,7 @@ def load_canonical(
             adjustment=adjustment,
             as_of=as_of,
             market=market,
+            **extra,
         )
         if hasattr(result, "to_pylist"):
             return _from_arrow_table(result)
@@ -265,7 +303,7 @@ def load_canonical(
         market=market,
         policy_version=AUTO_POLICY_VERSION,
     )
-    return [_from_canonical_row(row) for row in rows]
+    return [_from_canonical_row(row) for row in visible(rows)]
 
 
 def _mappings(backend: Any) -> list[Any]:
@@ -419,6 +457,7 @@ def available_sources(
     interval: Interval,
     start: date | None,
     end: date | None,
+    upstream: bool = False,
 ) -> list[str]:
     """Return ``canonical`` plus raw provider names that have rows in the window."""
     names: list[str] = []
@@ -427,7 +466,8 @@ def available_sources(
     ):
         names.append(SOURCE_CANONICAL)
     raw_rows = _raw_rows(
-        backend, instrument_id, None, market=market, interval=interval, start=start, end=end
+        backend, instrument_id, None, market=market, interval=interval, start=start, end=end,
+        upstream=upstream,
     )
     providers = sorted({r.provider for r in raw_rows if getattr(r, "provider", None)})
     for name in providers:
@@ -445,7 +485,9 @@ def _raw_rows(
     interval: Interval,
     start: date | None,
     end: date | None,
+    upstream: bool = False,
 ) -> list[Any]:
+    """Raw rows of one instrument; ``upstream=True`` (#155) matches ``instrument_id`` only."""
     window = _wide_window(start, end)
     try:
         rows = list(backend.raw.scan_rows(
@@ -453,6 +495,8 @@ def _raw_rows(
         ))
     except TypeError:
         rows = []
+    if upstream:
+        return rows
     symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
     if interval != Interval.H1:
         # Daily and other intervals keep the pre-#147 rule: rows written before
@@ -530,15 +574,36 @@ def list_bars(
     adjustment: Adjustment = Adjustment.SPLIT,
     as_of: date | None = None,
     source: str | None = None,
+    id_kind: str = ID_KIND_AUTO,
 ) -> dict[str, Any]:
-    """Canonical (default) or raw-provider bars, plus ``available_sources`` and gaps."""
+    """Canonical (default) or raw-provider bars, plus ``available_sources`` and gaps.
+
+    ``id_kind="upstream"`` (#155): ``instrument_id`` is an upstream integer id, matched verbatim
+    (no symbol mapping, no instrument-master record needed, ``market`` required, ``symbol`` in
+    the response is ``None``).
+    """
     source_name = (source or SOURCE_CANONICAL).strip()
     if not source_name:
         raise QueryError("source must be 'canonical' or a provider name")
-    iid, resolved_market = resolve_instrument(
-        backend, instrument_id=instrument_id, symbol=symbol, market=market, on=end
-    )
-    inst = backend.instruments.get(iid) if hasattr(backend.instruments, "get") else None
+    try:
+        upstream = check_id_kind(id_kind) == ID_KIND_UPSTREAM
+    except ValueError as exc:
+        raise QueryError(str(exc)) from exc
+    if upstream:
+        if symbol:
+            raise QueryError("id_kind=upstream takes id, not symbol")
+        if market is None:
+            raise QueryError("market is required with id_kind=upstream")
+        try:
+            (iid,) = upstream_instrument_ids([instrument_id if instrument_id is not None else ""])
+        except ValueError as exc:
+            raise QueryError(str(exc)) from exc
+        resolved_market, inst = market, None
+    else:
+        iid, resolved_market = resolve_instrument(
+            backend, instrument_id=instrument_id, symbol=symbol, market=market, on=end
+        )
+        inst = backend.instruments.get(iid) if hasattr(backend.instruments, "get") else None
     market = resolved_market or market or (inst.market if inst is not None else None)
     if market is None:
         # Infer from the id prefix when the instrument row is missing.
@@ -555,7 +620,8 @@ def list_bars(
         if source_name == SOURCE_CANONICAL:
             stored = _scan_canonical(backend, [iid], interval=interval, market=market)
         else:
-            stored = _raw_rows(backend, iid, source_name, market=market, interval=interval, start=None, end=None)
+            stored = _raw_rows(backend, iid, source_name, market=market, interval=interval, start=None, end=None,
+                               upstream=upstream)
         if not stored and interval == Interval.H1:
             start = start or end or date.today()
             end = end or start
@@ -599,6 +665,7 @@ def list_bars(
         backend, iid, market=market, interval=interval,
         start=None if interval == Interval.H1 else start,
         end=None if interval == Interval.H1 else end,
+        upstream=upstream,
     )
     session_list = _session_dates(calendar, start, end)
     present: set[date] = set()
@@ -614,6 +681,7 @@ def list_bars(
             adjustment=adjustment,
             as_of=as_of,
             market=market,
+            id_kind=id_kind,
         )
         for rec in records:
             day = date.fromisoformat(rec["session_date"]) if rec.get("session_date") else None
@@ -623,7 +691,8 @@ def list_bars(
             bars.append(rec)
     else:
         rows = _raw_rows(
-            backend, iid, source_name, market=market, interval=interval, start=start, end=end
+            backend, iid, source_name, market=market, interval=interval, start=start, end=end,
+            upstream=upstream,
         )
         for row in rows:
             rec = _from_raw_row(row, iid)
@@ -674,7 +743,8 @@ def list_bars(
                 if slot.ts_start.timestamp() not in present_ts:
                     missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
     missing = [d.isoformat() for d in session_list if d not in present]
-    symbol_name = _symbol_for(iid, _mappings(backend), on=end)
+    # an upstream id never gets an openbars-inferred symbol (#155)
+    symbol_name = None if upstream else _symbol_for(iid, _mappings(backend), on=end)
     if symbol_name is None and inst is not None:
         symbol_name = symbol
     return {

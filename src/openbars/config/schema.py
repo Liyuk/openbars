@@ -40,6 +40,33 @@ class NodeConfig:
     markets: frozenset[Market] = frozenset()
 
 
+RETAINABLE_LAYERS = ("raw",)  # canonical / ref are never pruned by retention (#127)
+
+
+@dataclass(frozen=True)
+class RetentionRule:
+    """Keep the most recent ``keep_years`` calendar years (UTC year of ``now``) of a layer.
+
+    ``provider`` / ``market`` / ``interval`` narrow the rule; ``None`` matches all.
+    """
+
+    layer: str
+    keep_years: int
+    provider: str | None = None
+    market: str | None = None
+    interval: str | None = None
+
+    def matches(self, dims: Mapping[str, str]) -> bool:
+        return all(
+            want is None or dims.get(dim) == want
+            for dim, want in (("provider", self.provider), ("market", self.market), ("interval", self.interval))
+        )
+
+    def describe(self) -> str:
+        scope = ", ".join(f"{k}={v}" for k, v in (("provider", self.provider), ("market", self.market), ("interval", self.interval)) if v)
+        return f"{self.layer} keep {self.keep_years} year(s)" + (f" [{scope}]" if scope else "")
+
+
 @dataclass(frozen=True)
 class Settings:
     selection: Selection
@@ -55,6 +82,8 @@ class Settings:
     us_hourly_alignment: HourlyAlignment = HourlyAlignment.SESSION_OPEN
     include_extended_hours: bool = False
     nodes: tuple[NodeConfig, ...] = (NodeConfig(name="local"),)
+    # ``storage.retention`` rules (#127); empty = retention off (nothing is ever pruned).
+    retention: tuple[RetentionRule, ...] = ()
     # Explicit symbols per market (InstrumentMaster-based universes come later).
     universe: Mapping[Market, tuple[str, ...]] = field(default_factory=dict)
     reconcile: Mapping[str, object] = field(default_factory=dict)  # raw ``reconcile:`` section

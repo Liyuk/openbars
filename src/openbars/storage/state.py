@@ -302,6 +302,55 @@ class SqlStateStore:
             )
             return cur.rowcount
 
+    def retry_jobs(
+        self,
+        *,
+        states: Sequence[JobState] = (JobState.DEAD,),
+        provider: str | None = None,
+        market: Market | None = None,
+        interval: Interval | None = None,
+        error_contains: str | None = None,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> list[Job]:
+        """Explicit retry (#151): put matching ``dead`` / ``failed`` jobs back to ``pending``.
+
+        Only these two states can be retried; ``attempts`` restarts at 0 and ``retry_at`` is
+        cleared so the runner gives them a fresh backoff budget, ``last_error`` is kept for the
+        record and checkpoints are left alone (a retried job resumes from its cursor). Nothing
+        else re-queues dead jobs: ``plan --submit`` still leaves existing rows untouched, so a
+        permanent error is never retried without this call. Returns the matched jobs (as they
+        were before the reset); ``dry_run`` only lists them.
+        """
+        allowed = {JobState.DEAD, JobState.FAILED}
+        wanted = [JobState(s) for s in states]
+        if not wanted or any(s not in allowed for s in wanted):
+            raise ValueError("only dead or failed jobs can be retried")
+        where = f"state IN ({', '.join('?' for _ in wanted)})"
+        params: list[Any] = [s.value for s in wanted]
+        for column, value in (("provider", provider), ("market", market and Market(market).value),
+                              ('"interval"', interval and Interval(interval).value)):  # fmt: skip
+            if value is not None:
+                where += f" AND {column} = ?"
+                params.append(value)
+        if error_contains:
+            escaped = error_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where += " AND lower(last_error) LIKE lower(?) ESCAPE '\\'"
+            params.append(f"%{escaped}%")
+        with self._connect() as con:
+            self._begin_write(con)
+            rows = con.execute(f"SELECT * FROM jobs WHERE {where} ORDER BY priority, created_at, job_id", params).fetchall()
+            matched = [_job(r) for r in rows]
+            if matched and not dry_run:
+                stamp = self._enc_ts(now or _now())
+                for job in matched:  # by id, still guarded by state, so a concurrent change wins
+                    con.execute(
+                        "UPDATE jobs SET state='pending', attempts=0, retry_at=NULL, updated_at=? "
+                        f"WHERE job_id=? AND state IN ({', '.join('?' for _ in wanted)})",
+                        (stamp, job.job_id, *[s.value for s in wanted]),
+                    )
+        return matched
+
     def count_jobs(self) -> dict[JobState, int]:
         with self._connect() as con:
             rows = con.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state").fetchall()

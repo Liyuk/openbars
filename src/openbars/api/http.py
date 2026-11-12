@@ -121,6 +121,7 @@ def create_app(
         adjustment: str | None = None,
         as_of: str | None = None,
         source: str | None = None,
+        id_kind: str = "auto",
     ) -> dict[str, Any]:
         return list_bars(
             _store(),
@@ -133,6 +134,7 @@ def create_app(
             adjustment=parse_adjustment(adjustment),
             as_of=parse_date(as_of, "as_of"),
             source=source,
+            id_kind=id_kind,
         )
 
     @app.get("/api/v1/flags")
