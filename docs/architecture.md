@@ -55,7 +55,7 @@ flowchart TD
 
     subgraph Read["⑩ 读取 API"]
         LIB[Python: BarReader<br/>查询时派生复权]
-        HTTP[HTTP 可选]
+        HTTP[本机只读 UI]
     end
 
     CFG --> CLI --> PLAN --> ORCH --> NODE --> GATE --> Providers
@@ -79,7 +79,7 @@ flowchart TD
 | ⑦ 仲裁 | `openbars.reconcile` | 多源对齐、优先级、容差、兜底拼接、质量标记、审计记录 | 抓取 |
 | ⑧ 规范层 | `openbars.reconcile` 输出 | 唯一源 `bars_canonical` | — |
 | ⑨ 存储 | `openbars.storage` | Raw/Canonical/主数据/日志的读写，原子写入、分区 | 业务规则 |
-| ⑩ 读取 | `openbars.api` | 查询 canonical、派生复权、导出；可选 HTTP | 写入 |
+| ⑩ 读取 | `openbars.api` | 查询 canonical、派生复权、导出；可选的本机只读 HTTP（`openbars serve`，仅回环，见 §13） | 写入 |
 
 ## 3. 核心数据模型（`openbars.core.models`）
 
@@ -675,15 +675,27 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 ```text
 src/openbars/
   core/          models.py · ohlcv.py · series.py · schema.py · errors.py · calendar.py
-  calendars/     xnys.py · crypto.py · cn.py（后续：hk）
+  calendars/     xnys.py · crypto.py · cn.py · hk.py
   config/        schema.py · loader.py
-  cli/           main.py
+  cli/           main.py · serve.py · init.py · shadow.py · wiring.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
   quota/         policy.py · gate.py
   providers/     base.py · registry.py · (us/alpaca … · crypto/binance · crypto/coinbase 实现随 issue 加入)
   raw/           store.py · archive.py
   normalize/     instruments.py · crypto_pairs.py · cn_instruments.py · cn_ingest.py · cn_adjust.py · cn_quality.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py
-  storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py
-  api/           reader.py · http.py
+  storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py · bar_reader.py
+  api/           reader.py · http.py · queries.py
+  web/           static/   （本机只读界面：index.html、assets、vendor/lightweight-charts 4.2.3）
 ```
+
+## 13. 本机只读界面（`openbars serve`）
+
+v0.5 提供一个本地数据查看界面，用来看覆盖、质量问题和 K 线，而不是做一个交易终端。入口是 `openbars serve`（需要 `uv sync --extra http`）。
+
+**访问边界。** 默认绑定 `127.0.0.1:8787`。这一版一律拒绝非回环 `--host`：只要传入非回环地址就报错退出，不会在局域网或公网端口上监听。存储以只读方式打开；界面不提供任何写入或抓取入口。额度快照只返回用量，不含密钥。没有 `quota.db` 时不会创建该文件。
+
+**`/api/v1` 不是公开 API。** 这些 JSON 路由只给本机页面内部使用，本版不承诺稳定，也不提供 OpenAPI / 文档页。外部系统应继续使用 Python `BarReader`。
+
+**页面（中英可切换）。** 看板展示各市场覆盖、首末交易日、质量标记计数和额度用量；质量标记页列出明细；K 线页用随包固定版本的 TradingView Lightweight Charts（4.2.3，Apache-2.0）画图。K 线默认显示按规则对齐填充后的聚合数据（canonical），可通过 `source=canonical|<provider>` 切换到各渠道原始数据；原始数据中的缺日以缺口和标注显示，缺字段也会标出。
+
