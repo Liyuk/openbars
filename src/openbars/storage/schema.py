@@ -155,6 +155,10 @@ CANONICAL_BARS_FIELDS = [
     _f("sources_seen", STR_LIST),
     _f("reconcile_rule", pa.string()),
     _f("generated_at", TS),
+    # Additive (#154): earliest moment the bar may be used for research (the selected price
+    # source's raw ``ingested_at``, or the upstream source row's ``received_at``). Older files
+    # and pre-#154 Postgres tables lack it and read back as null; ``SCHEMA_VERSION`` stays 1.
+    _f("available_at", TS, True),
 ]
 
 INSTRUMENTS_FIELDS = [

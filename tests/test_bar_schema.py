@@ -243,7 +243,7 @@ CANONICAL_FIELD_NAMES = (
     "instrument_id", "session_date", "policy_version", "selected_source_bar_id", "provider",
     "feed", "adjustment", "revision", "open", "high", "low", "close", "volume",
     "selection_reason", "quality_status", "capabilities", "source_fingerprint", "generated_at",
-    "currency",
+    "currency", "available_at",
 )  # fmt: skip
 
 

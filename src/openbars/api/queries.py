@@ -14,6 +14,7 @@ from typing import Any
 
 from openbars.core.models import Adjustment, DateRange, HourlyAlignment, Interval, Market, QualityFlag
 from openbars.reconcile import policy_version_for_market
+from openbars.storage.rows import available_by_utc, is_available
 from openbars.storage.schema import AUTO_POLICY_VERSION
 
 MAX_BARS = 8000
@@ -231,19 +232,36 @@ def load_canonical(
     adjustment: Adjustment = Adjustment.SPLIT,
     as_of: date | None = None,
     market: Market | None = None,
+    available_by: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Load canonical bars via ``BarReader`` when present, else ``scan_rows``."""
+    """Load canonical bars via ``BarReader`` when present, else ``scan_rows``.
+
+    ``available_by`` (#154, tz-aware): only stored rows with ``available_at <= available_by``;
+    rows without ``available_at`` are left out. ``None`` = no point-in-time filter.
+    """
+    if available_by is not None:
+        try:
+            available_by = available_by_utc(available_by)
+        except ValueError as exc:
+            raise QueryError(str(exc)) from exc
+
+    def visible(rows: list[Any]) -> list[Any]:
+        if available_by is None:
+            return rows
+        return [row for row in rows if is_available(row, available_by)]
+
     if interval == Interval.H1:
         if as_of is not None:
             raise QueryError("as_of is not supported for canonical hourly bars")
-        rows = [_from_canonical_row(row) for row in _scan_canonical(
+        rows = [_from_canonical_row(row) for row in visible(_scan_canonical(
             backend, instrument_ids, interval=interval, start=start, end=end, market=market
-        )]
+        ))]
         if any(row["adjustment"] != adjustment.value for row in rows):
             raise QueryError("requested adjustment is not available for canonical hourly bars")
         return rows
     reader = getattr(backend, "reader", None)
     if reader is not None and hasattr(reader, "bars"):
+        extra = {} if available_by is None else {"available_by": available_by}
         result = reader.bars(
             instrument_ids,
             interval=interval,
@@ -252,6 +270,7 @@ def load_canonical(
             adjustment=adjustment,
             as_of=as_of,
             market=market,
+            **extra,
         )
         if hasattr(result, "to_pylist"):
             return _from_arrow_table(result)
@@ -265,7 +284,7 @@ def load_canonical(
         market=market,
         policy_version=AUTO_POLICY_VERSION,
     )
-    return [_from_canonical_row(row) for row in rows]
+    return [_from_canonical_row(row) for row in visible(rows)]
 
 
 def _mappings(backend: Any) -> list[Any]:
