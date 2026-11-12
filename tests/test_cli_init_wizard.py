@@ -61,3 +61,22 @@ def test_cancelled_wizard_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr("getpass.getpass", cancel)
     assert main(["init", str(tmp_path)]) == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_hourly_wizard_enables_twelve_data_and_hides_its_key(tmp_path, monkeypatch, capsys):
+    secret = "private-" + "hourly-sample"
+    prompts = []
+    monkeypatch.setattr("sys.stdin", Terminal("us\n1h\ntwelve_data\n"))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: prompts.append(prompt) or secret)
+    assert main(["init", str(tmp_path)]) == 0
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert config["providers"]["twelve_data"]["enabled"]
+    assert "TWELVE_DATA_API_KEY" in prompts[0]
+    assert secret in (tmp_path / ".env").read_text()
+    output = capsys.readouterr()
+    assert secret not in output.out + output.err
+    assert "#117" in output.out and "#118" in output.out
+    assert main(["--config", str(tmp_path / "config.yaml"), "config"], env={}) == 0
+    output = capsys.readouterr()
+    assert secret not in output.out + output.err
+    assert "set" in output.out

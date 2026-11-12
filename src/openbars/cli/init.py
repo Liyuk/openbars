@@ -62,18 +62,21 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     intervals = _choose("粒度 / Intervals (1d, 1h; 1h US only / 小时线仅美股)",
                         {"1d", "1h"} if "us" in markets else {"1d"}, "1d")
     if "1h" in intervals:
-        out.line("提示 / Note: 1h is US-only; no hourly provider is wired in this version / 当前版本尚无接入的小时线源。")
+        out.line("提示 / Note: 1h runs need a version with #117/#118 / 小时线运行需要包含 #117/#118 的版本。")
     available = set()
     for market, names in {"us": {"alpaca", "massive", "yfinance"}, "hk": {"yfinance"},
                           "crypto": {"binance", "coinbase"}, "cn": {"baostock"}}.items():
         if market in markets:
             available.update(names)
+    if "us" in markets and "1h" in intervals:
+        available.add("twelve_data")
     choices = ",".join(sorted(available))
     providers = _choose(f"数据源 / Providers ({choices}; comma-separated / 逗号分隔)", available, choices)
     config["markets"], config["intervals"] = markets, intervals
     for name, body in config["providers"].items():
         body["enabled"] = name in providers
-    keys = {"alpaca": ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"), "massive": ("MASSIVE_API_KEY",)}
+    keys = {"alpaca": ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"), "massive": ("MASSIVE_API_KEY",),
+            "twelve_data": ("TWELVE_DATA_API_KEY",)}
     lines = ["# Private credentials / 私有凭据；不要提交"]
     for provider in providers:
         for name in keys.get(provider, ()):
