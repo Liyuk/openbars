@@ -1,0 +1,33 @@
+{
+  "results": [
+    {
+      "id": "synthetic-split-1",
+      "ticker": "TEST1",
+      "execution_date": "2024-01-03",
+      "adjustment_type": "forward_split",
+      "split_from": 1,
+      "split_to": 4,
+      "historical_adjustment_factor": 0.25
+    },
+    {
+      "id": "synthetic-split-2",
+      "ticker": "ZZZA",
+      "execution_date": "2024-01-04",
+      "adjustment_type": "reverse_split",
+      "split_from": 10,
+      "split_to": 1,
+      "historical_adjustment_factor": 10
+    },
+    {
+      "id": "synthetic-split-3",
+      "ticker": "ZZZA",
+      "execution_date": "2024-01-04",
+      "adjustment_type": "something_else",
+      "split_from": 1,
+      "split_to": 1
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0200",
+  "next_url": "https://api.massive.com/stocks/v1/splits?cursor=synthetic-cursor-2&limit=1000"
+}

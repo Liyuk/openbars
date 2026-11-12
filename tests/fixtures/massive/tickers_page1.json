@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "ticker": "TEST1",
+      "name": "Test One Corp",
+      "market": "stocks",
+      "locale": "us",
+      "primary_exchange": "XNAS",
+      "type": "CS",
+      "active": true
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0400",
+  "count": 1,
+  "next_url": "https://api.massive.com/v3/reference/tickers?cursor=synthetic-cursor-3&limit=1000"
+}

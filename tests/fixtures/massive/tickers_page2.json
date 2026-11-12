@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "ticker": "ZZZA",
+      "name": "Zed Corp",
+      "market": "stocks",
+      "locale": "us",
+      "primary_exchange": "XNYS",
+      "type": "CS",
+      "active": true
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0401",
+  "count": 1
+}

@@ -37,6 +37,7 @@ xnys = "openbars.calendars.xnys:XNYSCalendar"
 
 [project.entry-points."openbars.providers"]
 alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
+massive = "openbars.providers.us.massive:MassiveProvider"
 yfinance = "openbars.providers.us.yfinance:YFinanceProvider"
 
 [build-system]

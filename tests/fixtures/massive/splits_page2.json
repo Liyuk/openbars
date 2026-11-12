@@ -1,0 +1,14 @@
+{
+  "results": [
+    {
+      "id": "synthetic-split-4",
+      "ticker": "TEST1",
+      "execution_date": "2024-01-05",
+      "adjustment_type": "stock_dividend",
+      "split_from": 20,
+      "split_to": 21
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0201"
+}

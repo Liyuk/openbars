@@ -1,0 +1,29 @@
+{
+  "results": {
+    "name": "Test One Corp",
+    "composite_figi": "SYNTHETIC0001",
+    "cik": "0000000000",
+    "events": [
+      {
+        "date": "2024-01-04",
+        "type": "ticker_change",
+        "ticker_change": {
+          "ticker": "TEST1"
+        }
+      },
+      {
+        "date": "2024-01-05",
+        "type": "other_event"
+      },
+      {
+        "date": "2020-01-04",
+        "type": "ticker_change",
+        "ticker_change": {
+          "ticker": "OLD1"
+        }
+      }
+    ]
+  },
+  "status": "OK",
+  "request_id": "synthetic-request-0300"
+}
