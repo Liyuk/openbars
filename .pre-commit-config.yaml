@@ -1,0 +1,35 @@
+# Install once: pipx install pre-commit && pre-commit install
+# Run on everything: pre-commit run --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: check-sanitized
+        name: openbars sanitization check (private paths, hosts, emails, private terms)
+        entry: python3 scripts/check_sanitized.py
+        language: system
+        types: [text]
+      - id: no-data-files
+        name: refuse market-data files (openbars never commits data)
+        entry: data files must not be committed
+        language: fail
+        files: '\.(parquet|duckdb|sqlite3?|feather|arrow|csv\.gz)$'
+      - id: local-check
+        name: openbars local checks (pytest, sanitization, gitleaks)
+        entry: bash scripts/check.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

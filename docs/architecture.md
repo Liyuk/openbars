@@ -1,6 +1,6 @@
 # openbars 架构设计
 
-状态：draft v0.1 · 2026-11-11 · 讨论见 GitHub Discussion「v0.1 架构与范围」
+状态：draft v0.1 · 2026-11-11（11-11 补充 §11 搬运与兼容） · 讨论见 GitHub Discussion「v0.1 架构与范围」
 
 ## 1. 目标与非目标
 
@@ -9,7 +9,7 @@
 - 在**免费额度**内，把用户选定的市场 × 粒度的 K 线稳定拉全，并持续增量更新。
 - 多源数据经清洗、对齐、仲裁后形成**唯一的规范层（canonical）**，每根 bar 可追溯来源与质量。
 - 高抽象、分层清晰：新增一个市场或数据源只需新增 provider 插件与口径配置，不改核心。
-- 将来能替换 equity-research-platform backend 的抓取与清洗服务（见 §11）。
+- 将来能替换上游内部实现（一套已在运行的研究 backend）的抓取与清洗服务，并保持口径兼容（见 §11）。
 
 **非目标**
 
@@ -247,7 +247,7 @@ class BarReader(Protocol):
 2. **覆盖索引**：从存储读已有 raw/canonical 覆盖 → 差集即待抓窗口。
 3. **源路由**：对每个待抓窗口，按 `reconcile` 优先级和 `SourceCapability`（历史深度、批形状、延迟）挑选能覆盖的源，生成**最省额度**的 Job（例：Massive 一天一请求覆盖全市场；Alpaca 200 只一批；yfinance 只补 2016 年前）。
 4. **执行**：worker 从队列租用 Job → `QuotaGate.acquire` → provider 请求 → `RawStore.append` → 更新 Checkpoint。
-5. **错误**：`ProviderError(code, retryable, retry_at)` 统一错误模型（沿用 backend）；429 → `penalize` 整个 provider；连续失败 N 次 → 熔断该 provider 一段时间；不可重试 → `dead` 并进入 `status` 报告。
+5. **错误**：`ProviderError(code, retryable, retry_at)` 统一错误模型（沿用上游内部实现）；429 → `penalize` 整个 provider；连续失败 N 次 → 熔断该 provider 一段时间；不可重试 → `dead` 并进入 `status` 报告。
 6. **每日增量**：按各源 `latency` 定时（例如美股 06:30 ET 后跑前一交易日），先主源后兜底源。
 7. **回补预算**：`openbars plan` 输出每个源预计请求数、耗时下限与额度占用；启用非日线粒度时若超过预算，要求用户确认（`--accept-budget`）。
 
@@ -281,7 +281,7 @@ A 股/港股的部分源（东财等）对海外 IP 不可用，Binance 主站�
 | 时间戳 | 一律存 UTC 的 **bar 开始时刻** `ts_start`；另存交易所时区的 `session_date`。适配层负责把“收盘时刻标识”的源转换过来。 |
 | 日线切分 | 股票：交易所本地交易日，只含常规时段（盘前盘后不并入日线）。加密：**UTC 00:00 切日**。 |
 | 小时线（预留） | 美股默认按开盘对齐（9:30 起，最后一根 15:30–16:00），整点对齐可选；A 股每天 4 根（午休不出 bar）；港股含午休，收市竞价口径待定。 |
-| 复权 | **落库只存不复权价 + 公司行动表**；复权在查询时按 `adjustment` 参数派生。前复权（qfq）不落库，因为每次除权都会改写整段历史。默认读取口径 `split`。 |
+| 复权 | v0.1 默认使用兼容 profile `research-daily-v2`：只拆股复权、按源交付落库（见 §11.2）。后续可选 profile：**落库只存不复权价 + 公司行动表**；复权在查询时按 `adjustment` 参数派生。前复权（qfq）不落库，因为每次除权都会改写整段历史。默认读取口径 `split`。 |
 | 拆股时点冲突 | 以公司行动表为准，多源投票；不一致区段标 `divergent` 并记审计。 |
 | 成交量 | 每根 bar 标 `feed`；**不同 feed 的成交量不混用**（如 Alpaca IEX vs SIP）；volume 优先级与 price 分开配置。 |
 | 货币 | 存交易所原币种，不做汇率换算。 |
@@ -305,25 +305,74 @@ data/
 - zstd 压缩；分区键 `market / interval / year`（分钟线再加 `month`）。
 - Postgres 后端实现同一 `StorageBackend` 接口，表结构与 Parquet schema 一一对应。
 
-## 11. 与 equity-research-platform backend 的对应关系
+## 11. 上游搬运来源与 backend 兼容与切换
 
-| backend 现有 | openbars 对应 | 处置 |
+openbars 的数据层**以一套已在生产运行的上游内部实现（下称 upstream）为主搬运**，不是重新发明；搬运时按 [`docs/sanitization.md`](sanitization.md) 脱敏。upstream 的模块路径与 openbars 的逐文件对照只记录在仓库外的私有笔记中，本文与 issue 只写功能描述。
+
+### 11.1 搬运来源（按层）
+
+| openbars 层 | 来自 upstream 的功能 | 搬运方式 |
 | --- | --- | --- |
-| `providers/base.py`：`ProviderError`、`DailyBarSource.load` | `providers.base.Provider` + `core.errors.ProviderError` | 错误模型直接沿用；接口泛化到市场×粒度 |
-| `providers/alpaca*.py`、`massive*.py`、`yfinance*.py`、`twelve_data.py`、`alpha_vantage.py` | 内置 provider 插件 | 抽取请求/分页/解析逻辑，去掉私有配置 |
-| `providers/rate_limit.py`（RequestPacer / PersistentRequestPacer）、`jobs/provider_limits.py` | `quota.QuotaGate` + 各 provider 的 `QuotaPolicy` 默认值 | 常量迁为能力声明；持久化后端可插拔 |
-| `providers/listings.py`、`reference.py`、`massive_tickers.py` | `normalize.InstrumentMaster` | 重写：引入稳定 `instrument_id` + 有效期映射 |
-| `*_corporate_actions.py` | `CorporateAction` + 复权派生 | 重写为“不复权 + 行动表” |
-| `services/research_series.py`（research-daily-v2：按源优先级、divergent / spike_suspect / volume_missing） | `reconcile.Reconciler` + `ReconcilePolicy` | 规则改为配置；标记集合沿用并扩展 |
-| #189 对账脚本 | `openbars verify` | 一致率作为回归基准 |
-| SEC、FRED、计费、策略、quant | 不进入 openbars | 留在私有仓库 |
+| `core.errors` / `providers.base` | 统一错误模型 `ProviderError(code, retryable, retry_at, status_code, request_id)`、有界诊断信息、HTTP 状态 → 错误码映射、响应中凭据替换为 `[REDACTED]` | 直接搬 |
+| `providers`（HTTP 公共层） | 共享 httpx 客户端、请求前限速钩子、超时/传输错误映射、分页 token 防死循环、payload 摘要与数值校验 | 直接搬 |
+| `providers.us.*` | Alpaca SIP/IEX 日线（多代码批量、免费档最近时段处理）、Massive grouped daily / 单代码区间 / 代码清单 / 退市清单 / 代码类型、yfinance 批量（`auto_adjust=False`）、公司行动适配器；Twelve Data、Alpha Vantage 作为可选兜底源 | 直接搬，改导入与配置注入 |
+| `quota` | 进程内固定节奏限速、**持久化令牌闸门**（按 provider 行锁预约下一个请求时刻）、可选日额度（UTC 日 / 滚动 24h）与 `retry_at`、各源请求上限常量 | 改接口后搬：常量变为 `QuotaPolicy` 默认值；新增 SQLite 实现（upstream 只有 PG 行锁） |
+| `orchestrator` | Job 租约与重试、优先级策略、过期租约回收、调度单例锁、每日同步计划与批次切分、历史回补窗口与“覆盖即废弃”规则、每会话重建调度 | 改接口后搬：脱离 upstream ORM 与 worker 进程模型 |
+| `core.calendar` | XNYS 交易日历（`exchange_calendars`）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬 |
+| `normalize.instruments` | 点时（point-in-time）身份证据与解析、代码别名有效期、退市目录、身份对账、代码类型 → 证券类型映射、ETF 作为独立证券类型 | 改接口后搬 |
+| `normalize.adjust` | 公司行动“观测追加 + 规范修订”模型、拆股后旧历史重抓检测、`adjustment_as_of` 一致性检查（只拆股复权，不含分红） | 改接口后搬 |
+| `reconcile` | **research-daily-v2 选数**：按源优先级、兼容性闸门、兜底源能力集、价格 0.5% / 成交量 5% 容差、独立源佐证（quorum 2）、质量标记、人工/规则覆盖、确定性数据修复 R1–R4（预览/应用、熔断上限、可撤销审计） | 核心逻辑直接搬，持久化改接口 |
+| `storage` / `raw` | 原始响应归档（内容摘要、许可标签）、按源 bar 表、规范层表、水位表 | Parquet+DuckDB 重写；PG 提供 upstream 兼容适配（§11.3） |
+| `verify` | 跨源对比与每日校准、覆盖率对账、覆盖汇总、历史深度报告 | 改接口后搬 |
 
-**迁移路径**
+不搬：基本面与申报、宏观序列、新闻、扫描/策略/回测/提醒/选股、研究代理、HTTP API 与鉴权、计费与权限、运维控制台、指数成分校验、AI 辅助退市复核、依赖授权数据的成分股导入。理由：不属于“行情采集与清洗”，或包含私有业务/授权数据。
 
-1. openbars v0.1 达到美股日线端到端可用，用 `verify` 与 backend 现有数据对账（目标：与 #189 一致率同量级）。
-2. backend 新增一个 `openbars` 数据源适配：从 openbars canonical（Parquet 或 PG 后端）读取日线，与现有 research series 并行运行、双写对比。
-3. 对比稳定后，backend 的抓取 worker 逐个下线（先 yfinance/twelve-data 兜底线，再 alpaca/massive 主线），backend 只保留业务层。
-4. 之后 backend 的多市场需求直接通过 openbars 配置开启。
+### 11.2 口径对齐
+
+openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `research-daily-v2`**，v0.1 美股日线默认使用它；§9 中“落库只存不复权 + 查询时派生复权”的模式作为后续可选 profile（见 roadmap），不影响兼容 profile。
+
+| 项 | `research-daily-v2` 约定（与 upstream 一致） |
+| --- | --- |
+| 源身份 | 三元组 `(provider, feed, adjustment)`，取值保持原字符串：`massive/eod/split`、`alpaca/sip/split`、`alpaca/iex/split`、`yfinance/yahoo/split`、`twelve_data/daily/split`、`alpha_vantage/daily/raw` |
+| 序列语义 | 每根源 bar 带 `price_basis`、`adjustment_scope`、`adjustment_as_of`、`session_semantics`、`currency`、`volume_basis`；由单一目录（catalog）按源身份保守解析，未知即 `unknown` |
+| 复权 | **只拆股复权**（split-adjusted as delivered），不做分红复权，不是总回报序列；拆股后旧历史按新基准重抓；同一窗口内 `adjustment_as_of` 混用视为 `mismatch` |
+| 选数优先级 | 主源 `massive/eod/split`(0) → `alpaca/sip/split`(1)；兜底按信任度 `yfinance`（价量可用）→ `twelve_data`（仅价格，成交量口径未知）。实际效果：近端由 Massive 覆盖，2016 起历史由 Alpaca SIP 覆盖，2016 前由 yfinance 补齐 |
+| 容差与佐证 | 价格 0.5%、成交量 5%；与次源分歧时需 2 个独立源佐证主源，才判定次源出错 |
+| `selection_reason` | `primary_source`、`primary_source_corroborated`、`compatible_gap_fill`、`fill_<provider>`、`spike_replaced` |
+| `quality_status` | `complete`、`divergent`、`volume_missing`（价格有变动但成交量为 0）、`spike_suspect`（R4 标记，是否排除由开关控制） |
+| `capabilities` | 有序字符串集合，如 `price_basis:split_adjusted`、`adjustment_scope:splits`、`session_semantics:provider_aligned`、`volume_basis:*`、`currency:USD`、`adjustment_as_of:YYYY-MM-DD`、`price_ohlc`、`consolidated_volume`、`split_adjusted_volume` |
+| 规范层行 | `instrument_id, session_date, policy_version, selected_source_bar_id, provider, feed, adjustment, revision, open, high, low, close, volume, selection_reason, quality_status, capabilities, source_fingerprint, generated_at`；唯一键 `(instrument_id, session_date, policy_version)` |
+| 数值 | 价格 `Numeric(20,8)`、成交量 `Numeric(28,8)`，内存中用 `Decimal`，不经 float 往返 |
+| 会话 | 交易所会话日（XNYS），非交易日 bar 拒收；当日会话收盘后等待可配置分钟数才视为完成 |
+| 失效通知 | 每个 policy 一行版本水位 + 按日期的水位表，供下游缓存失效 |
+
+`policy_version` 是口径的版本号：任何改变选数结果的规则修改都必须换新版本号（如 `openbars-daily-v1`），不得静默改写 `research-daily-v2` 的语义。
+
+### 11.3 PG 兼容策略
+
+- `storage.postgres` 有两种 schema 模式：
+  - `native`：openbars 自己的表结构（与 Parquet schema 一一对应），由 openbars 迁移管理。
+  - `upstream_compat`：直接读写 upstream 现有表（`instrument`、`symbol_alias`、`daily_bar`、`research_daily_bar`、两张水位表、`provider_request_gate` / `provider_request_usage`、`source_artifact`、`data_ingest_run`、公司行动相关表）。
+- `upstream_compat` **不执行任何迁移**，表结构归 upstream 所有；启动时做列级 introspection，缺列或类型不符即拒绝运行并报告差异。
+- 默认只读；写入需显式 `storage.postgres.write: true`，并且只写 openbars 负责的表。
+- 并行期额度共享：`upstream_compat` 下 `QuotaGate` 使用同一套 `provider_request_gate` / `provider_request_usage`，保证 openbars 与 upstream 共用一个 key 时不会叠加超限（或者给 openbars 配独立 key）。
+- 互斥：规范层重建沿用 upstream 的 PG 事务级 advisory lock 键算法，避免两边同时重建同一 policy。
+
+### 11.4 backend 切换步骤
+
+1. **搬运 + 金标准**：按 11.1 顺序搬运；每个模块搬运时，用合成输入在 upstream 侧生成一次期望输出，冻结为 openbars 的金标准样例（§11.5）。
+2. **作为库导入**：upstream 依赖 `openbars`，把对应内部模块改为薄 shim（re-export openbars 的实现），行为由金标准保证不变。可以逐模块替换，先换纯函数层（日历、序列目录、兼容性闸门、选数），再换 provider 与额度闸门。
+3. **影子运行**：openbars 以 `upstream_compat` 只读 + 独立 `policy_version`（或独立 schema）跑完整日线管线，`openbars verify` 与 `research-daily-v2` 逐 bar 对比，指标：覆盖率、价格一致率、质量标记一致率。
+4. **切换写入**：对比稳定后，由 openbars 接管 `research-daily-v2` 的写入（`write: true`），upstream 抓取 worker 逐个下线：先兜底源，再主源。
+5. **回滚**：切换期间保留 upstream worker 代码与开关，任一指标回退时关闭 openbars 写入、恢复 upstream worker；因为口径与表结构一致，无需数据迁移。
+6. **之后**：多市场需求直接通过 openbars 配置开启；upstream 只保留业务层。
+
+### 11.5 兼容性测试（只用合成数据）
+
+- `tests/golden/research_daily_v2/`：合成代码（如 `ZZZA`）、合成价格的输入 → 期望的规范层行（含 `selection_reason`、`quality_status`、`capabilities`、`source_fingerprint`）。覆盖：仅主源；主次一致；主次分歧（`divergent`）；佐证 quorum 判定次源出错；兼容缺口填充；yfinance / twelve_data 兜底的能力差异；`volume_missing`；R4 覆盖（替换 / 标记）；非交易日拒收；代码复用的别名有效期；拆股后 `adjustment_as_of` 混用。
+- 金标准由维护者在私有环境用 upstream 纯函数对同一合成输入生成后冻结；openbars 测试要求逐字段一致，`source_fingerprint` 一致。
+- `tests/compat/upstream_schema.sql`：仅包含相关表的 DDL（无数据、无私有命名），测试时用 Postgres 建表后跑 `upstream_compat` 适配器的读写与 introspection 测试。
+- 禁止使用真实行情数据或 provider 抓包作为夹具（见 `docs/sanitization.md`）。
 
 ## 12. 代码结构
 

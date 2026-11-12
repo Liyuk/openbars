@@ -1,0 +1,59 @@
+# gitleaks configuration for openbars.
+# Extends the upstream default ruleset and adds market-data provider credentials.
+# Private names/paths are checked separately by scripts/check_sanitized.py.
+title = "openbars gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "alpaca-key-id"
+description = "Alpaca API key id"
+regex = '''\b(?:PK|AK|CK)[A-Z0-9]{16,24}\b'''
+keywords = ["pk", "ak", "ck"]
+entropy = 3.0
+
+[[rules]]
+id = "alpaca-secret"
+description = "Alpaca API secret"
+regex = '''(?i)alpaca[\w.\-]{0,20}(?:secret|key)[\w\-]{0,10}\s*[:=]\s*["']?([A-Za-z0-9/+]{32,48})'''
+secretGroup = 1
+keywords = ["alpaca"]
+entropy = 3.5
+
+[[rules]]
+id = "massive-polygon-key"
+description = "Massive (formerly Polygon.io) API key"
+regex = '''(?i)(?:massive|polygon)[\w.\-]{0,20}(?:key|token|apikey)[\w\-]{0,10}\s*[:=]\s*["']?([A-Za-z0-9_]{24,40})'''
+secretGroup = 1
+keywords = ["massive", "polygon"]
+entropy = 3.5
+
+[[rules]]
+id = "apikey-query-param"
+description = "API key passed in a URL query string"
+regex = '''(?i)[?&](?:apikey|api_key|token|access_key)=([A-Za-z0-9_\-]{16,})'''
+secretGroup = 1
+keywords = ["apikey", "api_key", "token=", "access_key"]
+entropy = 3.5
+
+[[rules]]
+id = "generic-market-data-key"
+description = "Twelve Data / Alpha Vantage / Tiingo / Tushare / Binance / OKX style keys in assignments"
+regex = '''(?i)(?:twelve[_\-]?data|alpha[_\-]?vantage|tiingo|tushare|binance|okx|coinbase|fred)[\w.\-]{0,20}(?:key|secret|token|passphrase)[\w\-]{0,10}\s*[:=]\s*["']?([A-Za-z0-9/+_\-]{16,96})'''
+secretGroup = 1
+keywords = ["twelve", "alpha", "tiingo", "tushare", "binance", "okx", "coinbase", "fred"]
+entropy = 3.5
+
+[allowlist]
+description = "Placeholders, lockfiles and synthetic fixtures"
+paths = [
+  '''uv\.lock$''',
+  '''scripts/sanitize_hashes\.txt$''',
+]
+regexes = [
+  '''\$\{[A-Z0-9_]+\}''',
+  '''<[a-z_\-]+>''',
+  '''(?i)your[_\-]?(?:key|secret|token)''',
+  '''(?i)(?:dummy|fake|test|example|placeholder)[_\-]?(?:key|secret|token)''',
+]
