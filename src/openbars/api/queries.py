@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from openbars.core.models import Adjustment, DateRange, Interval, Market, QualityFlag
+from openbars.core.models import Adjustment, DateRange, HourlyAlignment, Interval, Market, QualityFlag
 from openbars.reconcile import policy_version_for_market
 from openbars.storage.schema import AUTO_POLICY_VERSION
 
@@ -167,7 +167,8 @@ def _scan_canonical(
     window = _wide_window(start, end)
     pv: str | None
     if policy_version in {AUTO_POLICY_VERSION, "auto"}:
-        pv = None if interval == Interval.H1 else _policy_for(market, instrument_ids)
+        # Hourly and daily coverage use the same market policy selection.
+        pv = _policy_for(market, instrument_ids)
     else:
         pv = policy_version
     return list(
@@ -231,9 +232,14 @@ def load_canonical(
 ) -> list[dict[str, Any]]:
     """Load canonical bars via ``BarReader`` when present, else ``scan_rows``."""
     if interval == Interval.H1:
-        return [_from_canonical_row(row) for row in _scan_canonical(
+        if as_of is not None:
+            raise QueryError("as_of is not supported for canonical hourly bars")
+        rows = [_from_canonical_row(row) for row in _scan_canonical(
             backend, instrument_ids, interval=interval, start=start, end=end, market=market
         )]
+        if any(row["adjustment"] != adjustment.value for row in rows):
+            raise QueryError("requested adjustment is not available for canonical hourly bars")
+        return rows
     reader = getattr(backend, "reader", None)
     if reader is not None and hasattr(reader, "bars"):
         result = reader.bars(
@@ -613,10 +619,24 @@ def list_bars(
     missing_hours = []
     if interval == Interval.H1 and hasattr(calendar, "hourly_slots"):
         present_ts = {datetime.fromisoformat(b["ts_start"]).timestamp() for b in bars if b.get("ts_start")}
-        for day in session_list:
-            for slot in calendar.hourly_slots(day):
-                if slot.ts_start.timestamp() not in present_ts:
-                    missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
+        extended = any(b.get("session") in {"pre", "post"} for b in bars)
+        # The opening slot is shared by both grids; use all observed regular starts
+        # to choose the best match, falling back to session_open when ambiguous.
+        regular_ts = {datetime.fromisoformat(b["ts_start"]).timestamp() for b in bars
+                      if b.get("ts_start") and b.get("session") not in {"pre", "post"}}
+        grids = {}
+        for alignment in (HourlyAlignment.SESSION_OPEN, HourlyAlignment.CLOCK_HOUR):
+            grids[alignment] = [slot for day in session_list for slot in calendar.hourly_slots(
+                day, alignment=alignment, include_extended_hours=extended
+            )]
+        alignment = max(grids, key=lambda key: len(regular_ts & {
+            slot.ts_start.timestamp() for slot in grids[key] if slot.session.value == "regular"
+        }))
+        if len(grids[alignment]) > MAX_BARS:
+            raise QueryError(f"window has too many hourly slots (max {MAX_BARS}); pass a smaller start/end")
+        for slot in grids[alignment]:
+            if slot.ts_start.timestamp() not in present_ts:
+                missing_hours.append({"ts_start": slot.ts_start.isoformat(), "ts_end": slot.ts_end.isoformat(), "session": slot.session.value})
     missing = [d.isoformat() for d in session_list if d not in present]
     symbol_name = _symbol_for(iid, _mappings(backend), on=end)
     if symbol_name is None and inst is not None:
