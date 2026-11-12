@@ -144,7 +144,12 @@ def test_new_data_over_old_files_backfills_extra_and_compacts(backend):
 
 
 def test_bars_without_leftover_extras_store_null(backend):
-    bar = replace(CnFake().bar("sh.600000", WEEK[0], "x"), extra={})
+    bar = replace(CnFake().bar("sh.600000", WEEK[0], "x"), extra={}, series=None)
+    bar_with_series = replace(CnFake().bar("sh.600000", WEEK[1], "x"), extra={})
     backend.raw.append(RawBatch("baostock", "f", week_batch().request, (bar,)))
     assert backend.query("SELECT extra FROM raw_bars").column("extra").to_pylist() == [None]
     assert "tradestatus" not in scan(backend)[WEEK[0]].extra
+    backend.raw.append(RawBatch("baostock", "f", week_batch().request, (bar_with_series,)))
+    stored = backend.query("SELECT extra FROM raw_bars ORDER BY session_date").column("extra").to_pylist()
+    assert "_bar_series" in decode_extra(stored[1])
+    assert scan(backend)[WEEK[1]].series == bar_with_series.series
