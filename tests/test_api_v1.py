@@ -476,3 +476,42 @@ def test_hourly_raw_default_window_is_bounded_for_long_history(client, backend):
     body = response.json()
     assert days[0].isoformat() <= body['start'] <= body['end'] == days[-1].isoformat()
     assert body['bars'][-1]['session_date'] == days[-1].isoformat()
+
+
+def test_hourly_mixed_mapped_and_legacy_sources_and_rows(client, backend):
+    entries = [
+        ('prov_mixed', DAYS[0], T1),
+        ('prov_mixed', DAYS[1], None),
+        ('prov_legacy', DAYS[2], ''),
+        ('prov_other', DAYS[3], 'us:eq:xnys:OTHER'),
+    ]
+    for provider, day, iid in entries:
+        batch = raw_batch([SYM], [day], provider=provider, fetch_id='mixed-' + provider + str(day))
+        backend.raw.append_rows([replace(row, instrument_id=iid, market=Market.US, interval=Interval.H1)
+                                 for row in raw_rows_from_batch(batch)])
+    params = {'id': T1, 'interval': '1h'}
+    initial = client.get('/api/v1/bars', params=params).json()
+    assert initial['available_sources'] == ['prov_legacy', 'prov_mixed']
+    mixed = client.get('/api/v1/bars', params={**params, 'source': 'prov_mixed'}).json()
+    assert (mixed['start'], mixed['end']) == (str(DAYS[0]), str(DAYS[1]))
+    assert [bar['session_date'] for bar in mixed['bars']] == [str(DAYS[0]), str(DAYS[1])]
+    legacy = client.get('/api/v1/bars', params={**params, 'source': 'prov_legacy'}).json()
+    assert legacy['start'] == legacy['end'] == str(DAYS[2])
+    assert len(legacy['bars']) == 1
+
+
+def test_hourly_mixed_rows_deduplicate_and_prefer_mapped(client, backend, monkeypatch):
+    batch = raw_batch([SYM], [DAYS[0]], provider='prov_mixed', fetch_id='mapped')
+    mapped = replace(raw_rows_from_batch(batch)[0], instrument_id=T1, market=Market.US, interval=Interval.H1)
+    legacy = replace(mapped, instrument_id=None, close=D('999'))
+    scan = backend.raw.scan_rows
+
+    def mixed_scan(provider, market, interval, window, **kwargs):
+        if interval == Interval.H1 and (provider is None or provider == 'prov_mixed'):
+            return [mapped] if 'instrument_ids' in kwargs else [legacy]
+        return scan(provider, market, interval, window, **kwargs)
+
+    monkeypatch.setattr(backend.raw, 'scan_rows', mixed_scan)
+    body = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_mixed'}).json()
+    assert len(body['bars']) == 1
+    assert D(str(body['bars'][0]['close'])) == mapped.close

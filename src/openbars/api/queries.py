@@ -424,26 +424,9 @@ def available_sources(
         backend, [instrument_id], interval=interval, start=start, end=end, market=market
     ):
         names.append(SOURCE_CANONICAL)
-    window = _wide_window(start, end)
-    try:
-        raw_rows = list(
-            backend.raw.scan_rows(
-                None,
-                market,
-                interval,
-                window,
-                instrument_ids=[instrument_id],
-            )
-        )
-    except TypeError:
-        raw_rows = []
-    if not raw_rows:
-        # Fall back to current symbols so rows written before instrument_id was filled still count.
-        symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
-        if symbols:
-            raw_rows = list(
-                backend.raw.scan_rows(None, market, interval, window, symbols=symbols)
-            )
+    raw_rows = _raw_rows(
+        backend, instrument_id, None, market=market, interval=interval, start=start, end=end
+    )
     providers = sorted({r.provider for r in raw_rows if getattr(r, "provider", None)})
     for name in providers:
         if name not in names:
@@ -454,7 +437,7 @@ def available_sources(
 def _raw_rows(
     backend: Any,
     instrument_id: str,
-    provider: str,
+    provider: str | None,
     *,
     market: Market,
     interval: Interval,
@@ -462,17 +445,21 @@ def _raw_rows(
     end: date | None,
 ) -> list[Any]:
     window = _wide_window(start, end)
-    rows = list(
-        backend.raw.scan_rows(
+    try:
+        rows = list(backend.raw.scan_rows(
             provider, market, interval, window, instrument_ids=[instrument_id]
-        )
-    )
-    if rows:
-        return rows
+        ))
+    except TypeError:
+        rows = []
     symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
-    if not symbols:
-        return []
-    return list(backend.raw.scan_rows(provider, market, interval, window, symbols=symbols))
+    if symbols:
+        legacy = backend.raw.scan_rows(provider, market, interval, window, symbols=symbols)
+        rows.extend(row for row in legacy if not getattr(row, "instrument_id", None))
+    # Prefer ID-mapped rows when both representations describe the same bar.
+    unique = {}
+    for row in rows:
+        unique.setdefault((row.provider, row.ts_start), row)
+    return list(unique.values())
 
 
 def _from_raw_row(row: Any, instrument_id: str) -> dict[str, Any]:

@@ -130,3 +130,14 @@ def test_chart_source_and_interval_changes_reset_dates(client):
     assert 'loadChart()' in reset
     assert 'document.getElementById("chart-start").value = body.start' in js
     assert 'document.getElementById("chart-end").value = body.end' in js
+
+
+def test_chart_interactions_execute_in_node():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = Path(__file__).parent / "js" / "chart_interactions.test.js"
+    subprocess.run([node, "--test", str(script)], check=True, capture_output=True, text=True)
