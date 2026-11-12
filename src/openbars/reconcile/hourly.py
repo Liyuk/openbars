@@ -11,7 +11,7 @@ from openbars.core.series import (ALPACA_SIP_SPLIT, MASSIVE_AGGS_SPLIT,
 from openbars.reconcile.overrides import SelectionOverride
 from openbars.reconcile.policy import DEFAULT_POLICY
 from openbars.reconcile.projection import SourceObservation, _difference_pct, project_canonical_bars
-from openbars.storage.rows import CanonicalBarRow, hourly_adjustment
+from openbars.storage.rows import CanonicalBarRow, hourly_adjustment, raw_ingested_at
 
 # Reversible default: retain the daily policy version; interval is part of the storage key.
 HOURLY_POLICY = replace(
@@ -35,7 +35,8 @@ def reconcile_hourly(
         series = bar.series or BarSeriesCatalog.resolve(SourceIdentity(bar.provider, feed, adjustment), interval=Interval.H1)
         obs = SourceObservation(bar.instrument_id or None, bar.symbol_as_returned, bar.session_date,
                                 bar.open, bar.high, bar.low, bar.close, bar.volume,
-                                bar.provider, feed, adjustment, revision=bar.revision, series=series)
+                                bar.provider, feed, adjustment, revision=bar.revision, series=series,
+                                available_at=raw_ingested_at(bar))
         groups[(obs.key, bar.ts_start)].append((obs, bar))
     result = []
     for (key, ts), group in sorted(groups.items()):
@@ -59,6 +60,7 @@ def reconcile_hourly(
             revision=raw.revision, selection_reason=sel.selection_reason, quality_status=sel.quality_status,
             capabilities=sel.capabilities, sources_seen=tuple(s.provider for s in sel.sources_seen),
             currency=sel.selected.resolved_series.currency,
+            available_at=raw_ingested_at(raw),
         ))
     return tuple(result)
 

@@ -155,6 +155,10 @@ CANONICAL_BARS_FIELDS = [
     _f("sources_seen", STR_LIST),
     _f("reconcile_rule", pa.string()),
     _f("generated_at", TS),
+    # Additive (#154): earliest moment the bar may be used for research (the selected price
+    # source's raw ``ingested_at``, or the upstream source row's ``received_at``). Older files
+    # and pre-#154 Postgres tables lack it and read back as null; ``SCHEMA_VERSION`` stays 1.
+    _f("available_at", TS, True),
 ]
 
 INSTRUMENTS_FIELDS = [
@@ -213,7 +217,8 @@ CORPORATE_ACTIONS_FIELDS = [
     _f("currency", pa.string(), True),
 ]
 
-# A-share adjust factors (``ref/adjust_factors.parquet``, Parquet only; additive: a missing file
+# A-share adjust factors (``ref/adjust_factors.parquet``; Postgres native table ``adjust_factors``
+# since #124, outside ``TABLE_SCHEMAS``; additive: a missing file / table
 # is an empty table, so ``SCHEMA_VERSION`` does not change). One row per
 # ``(instrument_id, source, effective_from)``; ``source`` / ``method`` say who computed the
 # factors and how (never mixed for one instrument, see ``normalize.cn_adjust``).
@@ -277,7 +282,8 @@ REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
     "upstream_ids": UPSTREAM_IDS_SCHEMA,
 }
 
-# Parquet-only ref tables (not part of the Postgres native schema).
+# Ref tables outside ``TABLE_SCHEMAS`` / ``REF_IDENTITY_SCHEMAS``. ``adjust_factors`` also has a
+# Postgres native table (#124), created and checked separately (``postgres.ADJUST_FACTORS_REQUIRED``).
 REF_PARQUET_SCHEMAS: Mapping[str, pa.Schema] = {"adjust_factors": ADJUST_FACTORS_SCHEMA}
 
 # --- identity / dedup keys ---------------------------------------------------------------
@@ -312,6 +318,14 @@ CANONICAL_KEY_SQL: tuple[str, ...] = (
 # differs in these is a no-op (it does not create a new part file).
 RAW_LINEAGE_COLUMNS = frozenset({"fetch_id", "source_artifact_ref", "ingest_run_id", "ingested_at"})
 CANONICAL_LINEAGE_COLUMNS = frozenset({"generated_at"})
+# #154: a stored canonical row is the "same source bar" as an incoming one (so the earlier
+# ``available_at`` is kept) only when all of these match. ``source_fingerprint`` alone is not
+# enough: the daily path fingerprints without a source bar id, so a changed source or a price
+# correction could share it and would otherwise inherit an earlier availability (look-ahead).
+SAME_SOURCE_BAR_COLUMNS: tuple[str, ...] = (
+    "source_fingerprint", "provider", "feed", "adjustment", "price_source", "volume_source",
+    "open", "high", "low", "close", "volume", "vwap", "trade_count",
+)
 
 
 def key_exprs(template: tuple[str, ...], alias: str = "") -> list[str]:

@@ -192,7 +192,7 @@ _FIRST_CLASS_EXTRA = frozenset(
     {
         "session_date", "instrument_id", "adjustment", "price_basis", "adjustment_scope",
         "adjustment_as_of", "session_semantics", "currency", "volume_basis", "revision", "vwap",
-        "trade_count", "market", "source_artifact_ref", "ingest_run_id",
+        "trade_count", "market", "source_artifact_ref", "ingest_run_id", "ingested_at",
         "open_exact", "high_exact", "low_exact", "close_exact", "volume_exact",
     }
 )  # fmt: skip
@@ -369,6 +369,7 @@ class RawBarRow:
             "trade_count": self.trade_count,
             "source_artifact_ref": self.source_artifact_ref,
             "ingest_run_id": self.ingest_run_id,
+            "ingested_at": self.ingested_at,  # #154: canonical ``available_at`` of a selected source
             "open_exact": self.open,
             "high_exact": self.high,
             "low_exact": self.low,
@@ -402,6 +403,63 @@ class RawBarRow:
             instrument_id=self.instrument_id if self.interval is Interval.H1 else None,
             series=series,
         )
+
+
+def raw_ingested_at(bar: RawBar) -> datetime | None:
+    """The stored raw row's ``ingested_at`` (``to_raw_bar`` puts it in ``extra``), else None.
+
+    Bars straight from a provider (not read back from the raw layer) have none.
+    """
+    value = bar.extra.get("ingested_at")
+    if isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None:
+        return value.astimezone(UTC)
+    return None
+
+
+ID_KIND_AUTO = "auto"
+ID_KIND_UPSTREAM = "upstream"
+ID_KINDS = (ID_KIND_AUTO, ID_KIND_UPSTREAM)
+_UPSTREAM_ID = re.compile(r"[0-9]+")
+
+
+def check_id_kind(id_kind: str) -> str:
+    """``auto`` (default: ids or tickers, resolved through openbars' mappings) or ``upstream``."""
+    if id_kind not in ID_KINDS:
+        raise ValueError(f"id_kind must be one of {', '.join(ID_KINDS)}, got {id_kind!r}")
+    return id_kind
+
+
+def upstream_instrument_ids(items: Iterable[Any]) -> list[str]:
+    """``id_kind="upstream"`` (#155): upstream integer ids, matched verbatim to ``instrument_id``.
+
+    Each item must be a non-negative integer or its decimal string (``"42"``, ASCII digits only).
+    No symbol mapping, instrument master or alias lookup is involved; identity (aliases, ticker
+    reuse) is the upstream's business. ``"042"`` stays ``"042"`` (verbatim, never renumbered).
+    """
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, bool):
+            raise ValueError("upstream ids must be integers or digit strings")
+        text = str(item).strip() if isinstance(item, (int, str)) else None
+        if text is None or not _UPSTREAM_ID.fullmatch(text):
+            raise ValueError(f"upstream id must be a digit string, got {item!r}")
+        out.append(text)
+    return out
+
+
+def available_by_utc(value: datetime) -> datetime:
+    """Validate a point-in-time ``available_by`` (#154): tz-aware, returned in UTC."""
+    if not isinstance(value, datetime):
+        raise ValueError("available_by must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("available_by must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def is_available(row: Any, available_by: datetime) -> bool:
+    """``available_at <= available_by``; a row without ``available_at`` is not available."""
+    at = getattr(row, "available_at", None)
+    return at is not None and at <= available_by
 
 
 def hourly_adjustment(bar: RawBar) -> str:
@@ -507,6 +565,9 @@ class CanonicalBarRow:
     volume_source: str | None = None
     sources_seen: tuple[str, ...] = ()
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # #154: earliest moment the bar may be used for research (selected source's raw
+    # ``ingested_at`` / upstream ``received_at``); None = unknown (hidden by ``available_by``).
+    available_at: datetime | None = None
     currency: str | None = None  # ISO 4217 of the bar prices; not a schema column (see capabilities)
 
     def __post_init__(self) -> None:
@@ -530,6 +591,8 @@ class CanonicalBarRow:
             if flag not in QualityFlag.__members__ or flag == "NONE":
                 raise InvalidBarError(f"flags: unknown quality flag {flag!r}")
         _set(self, "generated_at", _utc(self.generated_at, "generated_at"))
+        if self.available_at is not None:
+            _set(self, "available_at", _utc(self.available_at, "available_at"))
         if self.currency is None:
             for cap in self.capabilities:
                 if isinstance(cap, str) and cap.lower().startswith("currency:"):

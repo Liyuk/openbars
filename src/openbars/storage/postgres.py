@@ -81,12 +81,14 @@ from openbars.storage.rows import (
     to_decimal,
 )
 from openbars.storage.schema import (
+    ADJUST_FACTORS_SCHEMA,
     CANONICAL_BARS_SCHEMA,
     CORPORATE_ACTIONS_SCHEMA,
     DEFAULT_POLICY_VERSION,
     INSTRUMENTS_SCHEMA,
     RAW_BARS_SCHEMA,
     REF_IDENTITY_SCHEMAS,
+    SAME_SOURCE_BAR_COLUMNS,
     STATE_TABLES,
     SYMBOL_MAPPINGS_SCHEMA,
     SCHEMA_VERSION,
@@ -292,8 +294,26 @@ def check_upstream_compat(catalog: Catalog) -> None:
         raise UpstreamSchemaError(problems)
 
 
+# Additive nullable columns a pre-migration database may lack (``write=True`` adds them).
+_OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at")})  # #154
+
+
+# #124: A-share adjust factors. Additive table: a database without it reads as empty and gets
+# it on ``write=True``; when present its columns must match. Not in ``NATIVE_REQUIRED`` /
+# ``TABLE_SCHEMAS`` (the shared raw / canonical mapping stays as it is).
+ADJUST_FACTORS_REQUIRED: Requirements = {
+    "adjust_factors": {f.name: _arrow_family(f.type) for f in ADJUST_FACTORS_SCHEMA}
+}
+_ADJUST_FACTORS_KEY = ("instrument_id", "source", "effective_from")
+
+
 def check_native(catalog: Catalog) -> None:
-    problems = check_schema(catalog, NATIVE_REQUIRED)
+    problems = [
+        p for p in check_schema(catalog, NATIVE_REQUIRED)
+        if not (p.kind == "missing_column" and (p.table, p.column) in _OPTIONAL_NATIVE_COLUMNS)
+    ]
+    if catalog.get("adjust_factors"):
+        problems += check_schema(catalog, ADJUST_FACTORS_REQUIRED)
     # ``raw_bars.extra`` is optional (pre-#122 databases). If present it must be JSON/JSONB.
     raw = catalog.get("raw_bars") or {}
     if "extra" in raw and raw["extra"].data_type not in _FAMILY_TYPES["json"]:
@@ -366,6 +386,8 @@ def native_ddl() -> list[str]:
         _table_ddl("canonical_bars", CANONICAL_BARS_SCHEMA),
         _unique_index("ux_canonical_bars_daily", "canonical_bars", _CANON_KEY_COLS, [], "session_date", True),
         _unique_index("ux_canonical_bars_intraday", "canonical_bars", _CANON_KEY_COLS, [], "ts_start", False),
+        # #154: additive, nullable; databases created before it get the column on write=True.
+        'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ',
         'CREATE INDEX IF NOT EXISTS "ix_canonical_bars_scan" ON "canonical_bars" ("market", "interval", "policy_version", "session_date")',
         _table_ddl("instruments", INSTRUMENTS_SCHEMA, _REF_KEYS["instruments"]),
         _table_ddl("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, _REF_KEYS["symbol_mappings"]),
@@ -376,6 +398,8 @@ def native_ddl() -> list[str]:
         _table_ddl("symbol_observations", REF_IDENTITY_SCHEMAS["symbol_observations"], _REF_KEYS["symbol_observations"]),
         _table_ddl("upstream_ids", REF_IDENTITY_SCHEMAS["upstream_ids"], _REF_KEYS["upstream_ids"]),
         'CREATE UNIQUE INDEX IF NOT EXISTS "ux_upstream_ids_upstream_id" ON "upstream_ids" ("upstream_id")',
+        # #124: additive table (CREATE TABLE IF NOT EXISTS doubles as the migration)
+        _table_ddl("adjust_factors", ADJUST_FACTORS_SCHEMA, _ADJUST_FACTORS_KEY),
         *state_ddl("postgres"),
     ]
     return stmts
@@ -513,16 +537,31 @@ def _write_raw_rows(conn: "_Conn", rows: Sequence[RawBarRow]) -> int:
 
 _RAW_DAILY_SQL = _raw_upsert_sql("session_date", True)
 _RAW_INTRADAY_SQL = _raw_upsert_sql("ts_start", False)
-_CANON_DAILY_SQL = _upsert_sql(
-    "canonical_bars", CANONICAL_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _CANON_KEY_COLS), "session_date"]),
-    "\"interval\" = '1d'", (*_CANON_KEY_COLS, "session_date"),
+# #154: the same source bar (every ``SAME_SOURCE_BAR_COLUMNS`` value matches) keeps the earliest
+# known ``available_at`` (``LEAST`` ignores NULL), like ``_PartitionedTable._carry_available_at``.
+_SAME_SOURCE_BAR_SQL = " AND ".join(
+    f'"canonical_bars".{qident(c)} IS NOT DISTINCT FROM EXCLUDED.{qident(c)}' for c in SAME_SOURCE_BAR_COLUMNS
 )
-_CANON_INTRADAY_SQL = _upsert_sql(
-    "canonical_bars", CANONICAL_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _CANON_KEY_COLS), "ts_start"]),
-    "\"interval\" <> '1d'", (*_CANON_KEY_COLS, "ts_start"),
+_CANON_AVAILABLE_SET = (
+    '"available_at" = EXCLUDED."available_at"',
+    f'"available_at" = CASE WHEN {_SAME_SOURCE_BAR_SQL} '
+    'THEN LEAST("canonical_bars"."available_at", EXCLUDED."available_at") '
+    'ELSE EXCLUDED."available_at" END',
 )
+
+
+def _canon_upsert_sql(time_col: str, daily: bool) -> str:
+    sql = _upsert_sql(
+        "canonical_bars", CANONICAL_BARS_SCHEMA,
+        ", ".join([*(qident(c) for c in _CANON_KEY_COLS), time_col]),
+        "\"interval\" = '1d'" if daily else "\"interval\" <> '1d'", (*_CANON_KEY_COLS, time_col),
+    )
+    assert sql.count(_CANON_AVAILABLE_SET[0]) == 1
+    return sql.replace(*_CANON_AVAILABLE_SET)
+
+
+_CANON_DAILY_SQL = _canon_upsert_sql("session_date", True)
+_CANON_INTRADAY_SQL = _canon_upsert_sql("ts_start", False)
 
 
 def _write_rows(conn: _Conn, rows: Sequence[Any], schema: pa.Schema, daily_sql: str, intraday_sql: str) -> int:
@@ -765,6 +804,66 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
             CorporateAction(
                 r["instrument_id"], r["ex_date"], CorporateActionKind(r["kind"]), r["source"],
                 r["ratio"], r["amount"], currency=r.get("currency"),
+            )
+            for r in records
+        ]
+
+    # -- A-share adjust factors (#124; a database without the table reads as empty) --
+
+    def upsert_adjust_factors(self, factors: Iterable[Any]) -> int:
+        """Upsert by ``(instrument_id, source, effective_from)`` (new wins), like the Parquet master.
+
+        Returns the number of incoming rows. Factors are ``NUMERIC(20,8)``; more fractional
+        digits are rounded half-even to 8 (the Parquet rule). Other sources' rows for the same
+        instrument stay side by side.
+        """
+        self.require_write()
+        latest: dict[tuple, list[Any]] = {}
+        count = 0
+        for f in factors:
+            count += 1
+            latest[(f.instrument_id, f.source, f.effective_from)] = [
+                f.instrument_id, f.source, f.method, f.effective_from,
+                *(to_decimal(_round_action_value(Decimal(getattr(f, name))), precision=20, name=name)
+                  for name in ("fore_adjust_factor", "back_adjust_factor", "adjust_factor")),
+                f.symbol,
+            ]
+        if not latest:
+            return 0
+        with self._session() as conn:
+            conn.executemany(
+                "INSERT INTO adjust_factors (instrument_id, source, method, effective_from, "
+                "fore_adjust_factor, back_adjust_factor, adjust_factor, symbol) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT (instrument_id, source, effective_from) DO UPDATE SET method=EXCLUDED.method, "
+                "fore_adjust_factor=EXCLUDED.fore_adjust_factor, back_adjust_factor=EXCLUDED.back_adjust_factor, "
+                "adjust_factor=EXCLUDED.adjust_factor, symbol=EXCLUDED.symbol",
+                list(latest.values()),
+            )
+        return count
+
+    def adjust_factors(
+        self, instrument_ids: Sequence[str] | None = None, source: str | None = None
+    ) -> list[Any]:
+        """``AdjustFactor`` rows (exact ``Decimal``), ordered by the key; [] without the table."""
+        from openbars.normalize.cn_adjust import AdjustFactor
+
+        sql, params = "SELECT * FROM adjust_factors WHERE TRUE", []
+        if instrument_ids is not None:
+            sql += " AND instrument_id = ANY(?)"
+            params.append(list(instrument_ids))
+        if source is not None:
+            sql += " AND source = ?"
+            params.append(source)
+        with self._session() as conn:
+            if conn.execute("SELECT to_regclass('adjust_factors') AS t").fetchone()["t"] is None:
+                return []  # pre-#124 database opened read-only
+            records = conn.execute(sql + ' ORDER BY instrument_id COLLATE "C", source COLLATE "C", effective_from', params).fetchall()
+        return [
+            AdjustFactor(
+                instrument_id=r["instrument_id"], effective_from=r["effective_from"], source=r["source"],
+                method=r["method"], fore_adjust_factor=r["fore_adjust_factor"],
+                back_adjust_factor=r["back_adjust_factor"], adjust_factor=r["adjust_factor"],
+                symbol=r["symbol"],
             )
             for r in records
         ]

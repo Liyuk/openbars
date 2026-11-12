@@ -151,19 +151,63 @@ class RawStoreCoverage:
     ) -> tuple[set[date], dict[str, set[date]]]:
         key = (provider, market, interval, window)
         if key not in self._cache:
+            if market is Market.US and interval is Interval.H1:
+                self._cache[key] = self._load_us_hourly(provider, window)
+                return self._cache[key]
             whole: set[date] = set()
             per_symbol: dict[str, set[date]] = defaultdict(set)
             for bar in self._raw.scan(provider, market, interval, window):
-                day = bar.session_date or (
-                    bar.ts_start.astimezone(NEW_YORK).date()
-                    if market is Market.US and interval is Interval.H1 else bar.ts_start.date()
-                )
+                day = bar.session_date or bar.ts_start.date()
                 whole.add(day)
                 per_symbol[bar.symbol_as_returned].add(day)
                 if bar.instrument_id:
                     per_symbol[bar.instrument_id].add(day)
             self._cache[key] = (whole, per_symbol)
         return self._cache[key]
+
+    def _load_us_hourly(self, provider: str, window: DateRange) -> tuple[set[date], dict[str, set[date]]]:
+        """US 1h coverage on the expected regular-session grid (#144).
+
+        A (symbol, session) is covered only when every regular hourly slot of that session is
+        stored, under either alignment (``session_open`` or ``clock_hour``; early closes have
+        fewer slots). A session with only some hours stored stays uncovered so the planner
+        fetches it again. Sessions a successful fetch already answered are added separately
+        from the job history (see ``_attempts``): hours missing after such a fetch are treated
+        as no-trade hours (thin trading, halts) instead of being re-fetched forever.
+        """
+        grids: dict[date, tuple[dict[datetime, int], int, int]] = {}
+
+        def grid(day: date):
+            if day not in grids:
+                bits: dict[datetime, int] = {}
+                fulls = []
+                for offset, alignment in ((0, HourlyAlignment.SESSION_OPEN), (16, HourlyAlignment.CLOCK_HOUR)):
+                    slots = xnys.hourly_slots(day, alignment=alignment)
+                    for i, slot in enumerate(slots):
+                        bits[slot.ts_start] = bits.get(slot.ts_start, 0) | (1 << (offset + i))
+                    fulls.append(((1 << len(slots)) - 1) << offset if slots else -1)
+                grids[day] = (bits, fulls[0], fulls[1])
+            return grids[day]
+
+        whole: set[date] = set()
+        masks: dict[str, dict[date, int]] = defaultdict(dict)
+        for bar in self._raw.scan(provider, Market.US, Interval.H1, window):
+            day = bar.session_date or bar.ts_start.astimezone(NEW_YORK).date()
+            bit = grid(day)[0].get(bar.ts_start.astimezone(UTC), 0)
+            if not bit:
+                continue
+            whole.add(day)
+            for name in (bar.symbol_as_returned, bar.instrument_id):
+                if name:
+                    days = masks[name]
+                    days[day] = days.get(day, 0) | bit
+        per_symbol: dict[str, set[date]] = {}
+        for name, days in masks.items():
+            per_symbol[name] = {
+                day for day, mask in days.items()
+                if any(full != -1 and mask & full == full for full in grid(day)[1:])
+            }
+        return whole, per_symbol
 
     def covered(self, provider, market, interval, window, *, symbol=None) -> set[date]:  # noqa: ANN001
         whole, per_symbol = self._load(provider, market, interval, window)

@@ -71,6 +71,7 @@ class SourceObservation:
     revision: int = 1
     source_bar_id: str | None = None
     series: BarSeriesIdentity | None = None  # None: resolved via BarSeriesCatalog
+    available_at: datetime | None = None  # #154: the source row's raw ``ingested_at`` when known
 
     def __post_init__(self) -> None:
         if type(self.session_date) is not date:
@@ -149,6 +150,7 @@ class CanonicalSelection:
             source_fingerprint=self.source_fingerprint,
             generated_at=generated_at,
             currency=bar.resolved_series.currency,
+            available_at=bar.available_at,
         )
 
 
