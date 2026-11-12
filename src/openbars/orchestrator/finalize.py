@@ -43,6 +43,7 @@ from openbars.reconcile.crypto import POLICY_VERSION_CN_DAILY_V1
 from openbars.raw.store import RawStore
 from openbars.reconcile.projection import SourceObservation
 from openbars.reconcile.reconciler import MemoryReconciler
+from openbars.storage.rows import hourly_adjustment
 
 CanonicalWriter = Callable[[Sequence[CanonicalDailyRow], Market], object]
 
@@ -65,10 +66,10 @@ def observation_from_raw(bar: RawBar) -> SourceObservation | None:
     if bar.volume is None:
         return None
     if bar.series is not None:
-        feed, adjustment = bar.series.feed, bar.series.legacy_adjustment
+        feed = bar.series.feed
     else:
         feed = (bar.feed or "default").split(":")[-1]
-        adjustment = str(bar.extra.get("adjustment") or "split")
+    adjustment = hourly_adjustment(bar)
     symbol = bar.symbol_as_returned
     return SourceObservation(
         instrument_id=bar.instrument_id or None,
