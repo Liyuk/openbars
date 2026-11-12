@@ -487,6 +487,22 @@ class ParquetRawStore:
         for row in self.scan_rows(provider, market, interval, window):
             yield row.to_raw_bar()
 
+    def coverage_summary(self, provider: str, market: Market, interval: Interval) -> tuple[date | None, date | None, int, int]:
+        """Summarize visible raw rows inside DuckDB without returning the rows to Python."""
+        files = self._table.parts(filters={"provider": [provider], "market": [market.value], "interval": [interval.value]})
+        if not files:
+            return None, None, 0, 0
+        self._table.backend.check_versions(files)
+        source = _dedup_sql(RAW_LAYER, 'read_parquet(?, filename=true, union_by_name=true)')
+        con = _mem_connection()
+        try:
+            return con.execute(
+                f'SELECT min(session_date), max(session_date), count(DISTINCT session_date), count(*) FROM ({source})',
+                [[str(path) for path in files]],
+            ).fetchone()
+        finally:
+            con.close()
+
     def compact(self, *, min_parts: int = 2) -> list[CompactionResult]:
         return self._table.compact(min_parts=min_parts)
 
