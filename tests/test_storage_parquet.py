@@ -11,7 +11,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from synth import canonical_bars, raw_batch, utc, weekdays
+from synth import canonical_bars, canonical_bars_h1, hourly_starts, raw_batch, raw_batch_h1, utc, weekdays
 
 from openbars.core.atomic import atomic_write
 from openbars.core.models import (
@@ -199,6 +199,71 @@ def test_intraday_partitions_by_month(backend):
     (part,) = raw_parts(backend)
     assert "year=2024" in part.parts and "month=01" in part.parts
     assert len(backend.raw.scan_rows("prov_a", Market.US, Interval.M5, WINDOW)) == 1
+
+
+def test_h1_partition_layout_and_daily_coexistence(backend):
+    backend.raw.append(raw_batch(["TEST1"], DAYS[:1]))
+    backend.raw.append(raw_batch_h1(["TEST1"], DAYS[:1]))
+    daily, hourly = sorted(raw_parts(backend), key=lambda p: str(p))
+    d_rel = daily.relative_to(backend.root).parts
+    h_rel = hourly.relative_to(backend.root).parts
+    assert d_rel[:-1] == ("raw", "provider=prov_a", "market=us", "interval=1d", "year=2024")
+    assert h_rel[:-1] == ("raw", "provider=prov_a", "market=us", "interval=1h", "year=2024", "month=01")
+    assert not any(seg.startswith("month=") for seg in d_rel)
+    assert pq.read_schema(hourly).metadata[METADATA_VERSION_KEY] == pq.read_schema(daily).metadata[METADATA_VERSION_KEY]
+    assert pq.read_schema(hourly).metadata[METADATA_VERSION_KEY] == str(SCHEMA_VERSION).encode()
+    assert len(backend.raw.scan_rows("prov_a", Market.US, Interval.D1, WINDOW)) == 1
+    h_rows = backend.raw.scan_rows("prov_a", Market.US, Interval.H1, WINDOW)
+    assert len(h_rows) == 7 and {r.interval for r in h_rows} == {Interval.H1}
+
+
+def test_h1_multiple_bars_same_session_date_survive_dedup(backend):
+    day = DAYS[1]  # 2024-01-03
+    window = DateRange(day, day)
+    batch = raw_batch_h1(["TEST1"], [day])
+    assert backend.raw.append(batch) == 7
+    rows = backend.raw.scan_rows("prov_a", Market.US, Interval.H1, window)
+    assert [r.ts_start for r in rows] == hourly_starts(day)
+    assert {r.session_date for r in rows} == {day}
+    assert len({r.key() for r in rows}) == 7
+    assert backend.raw.append(batch) == 0  # identical batch is a no-op
+    assert len(raw_parts(backend)) == 1
+    # same key, same revision: only that ts_start changes
+    changed = dataclasses.replace(
+        batch, fetch_id="fetch-2", bars=(dataclasses.replace(batch.bars[2], fetch_id="fetch-2", close=Decimal("99.5"), high=Decimal("100")),)
+    )
+    assert backend.raw.append(changed) == 1
+    after = backend.raw.scan_rows("prov_a", Market.US, Interval.H1, window)
+    assert [r.ts_start for r in after] == hourly_starts(day)
+    assert [r.close for r in after if r.close == Decimal("99.5")] == [Decimal("99.5")]
+    assert after[2].close == Decimal("99.5") and after[2].fetch_id == "fetch-2"
+    for i in (0, 1, 3, 4, 5, 6):
+        assert after[i].close == rows[i].close and after[i].fetch_id == "fetch-1"
+    # a new revision is a new row and keeps the old one
+    rev = dataclasses.replace(
+        batch, fetch_id="fetch-3",
+        bars=(dataclasses.replace(batch.bars[0], extra={**batch.bars[0].extra, "revision": 1}),),
+    )
+    assert backend.raw.append(rev) == 1
+    assert len(backend.raw.scan_rows("prov_a", Market.US, Interval.H1, window)) == 8
+    assert backend.query("SELECT count(*) AS n FROM raw_bars").column("n")[0].as_py() == 8
+
+
+def test_h1_raw_compaction_preserves_every_hour(backend):
+    day = DAYS[1]
+    window = DateRange(day, day)
+    for i in range(3):  # three parts; part i rewrites the first i+1 hours
+        batch = raw_batch_h1(["TEST1"], [day], base=Decimal("11.25") + i, fetch_id=f"f{i}")
+        batch = dataclasses.replace(batch, bars=batch.bars[: i + 1] if i else batch.bars)
+        backend.raw.append(batch)
+    before = backend.raw.scan_table("prov_a", Market.US, Interval.H1, window)
+    assert before.num_rows == 7
+    (res,) = backend.compact("raw")
+    assert res.rows_after == 7 and len(raw_parts(backend)) == 1
+    assert "month=01" in raw_parts(backend)[0].parts
+    after = backend.raw.scan_table("prov_a", Market.US, Interval.H1, window)
+    assert after.equals(before)
+    assert after.column("ts_start").to_pylist() == hourly_starts(day)
 
 
 # --- atomic write / interruption ---
@@ -405,6 +470,40 @@ def test_canonical_duplicate_upsert_and_update(backend):
     backend.canonical.upsert_rows([dataclasses.replace(rows[0], policy_version="openbars-daily-v1")])
     assert len(backend.canonical.scan_rows(None, Interval.D1, WINDOW, policy_version=None)) == 11
     assert len(backend.canonical.scan_rows(None, Interval.D1, WINDOW)) == 10
+
+
+def test_canonical_h1_multiple_bars_same_session_date_and_compaction(backend):
+    day = DAYS[1]
+    window = DateRange(day, day)
+    iid = "us:eq:T1"
+    bars = canonical_bars_h1([iid], [day])
+    assert backend.canonical.upsert(bars) == 7
+    assert backend.canonical.upsert(bars) == 0
+    (part,) = list((backend.root / "canonical").rglob("part-*.parquet"))
+    assert part.relative_to(backend.root).parts[:-1] == (
+        "canonical", "market=us", "interval=1h", "year=2024", "month=01",
+    )
+    assert pq.read_schema(part).metadata[METADATA_VERSION_KEY] == str(SCHEMA_VERSION).encode()
+    rows = backend.canonical.scan_rows([iid], Interval.H1, window)
+    assert [r.ts_start for r in rows] == hourly_starts(day)
+    assert len({r.key() for r in rows}) == 7 and {r.session_date for r in rows} == {day}
+    # update one hour: only that ts_start changes
+    changed = dataclasses.replace(rows[3], close=Decimal("77"), high=Decimal("78"))
+    assert backend.canonical.upsert_rows([changed]) == 1
+    after = backend.canonical.scan_rows([iid], Interval.H1, window)
+    assert len(after) == 7
+    assert [r.close for r in after if r.close == Decimal("77")] == [Decimal("77")] and after[3].close == Decimal("77")
+    assert [r.close for i, r in enumerate(after) if i != 3] == [r.close for i, r in enumerate(rows) if i != 3]
+    # daily and hourly coexist independently
+    backend.canonical.upsert(canonical_bars([iid], [day]))
+    assert len(backend.canonical.scan_rows([iid], Interval.D1, window)) == 1
+    assert len(backend.canonical.scan_rows([iid], Interval.H1, window)) == 7
+    # compaction keeps every hourly row and key
+    keys = {r.key() for r in after}
+    results = [r for r in backend.compact("canonical") if "interval=1h" in r.partition]
+    assert len(results) == 1 and results[0].parts_before == 2 and results[0].rows_after == 7
+    compacted = backend.canonical.scan_rows([iid], Interval.H1, window)
+    assert {r.key() for r in compacted} == keys and compacted == after
 
 
 def test_canonical_market_resolution(backend):
