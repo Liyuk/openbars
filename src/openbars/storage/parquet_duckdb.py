@@ -69,6 +69,7 @@ from openbars.raw.archive import RawArchive
 from openbars.reconcile.crypto import policy_version_for_market
 from openbars.storage.errors import SchemaVersionError, StorageError
 from openbars.storage.rows import (
+    normalize_legacy_daily,
     CanonicalBarRow,
     InvalidBarError,
     ID_KIND_AUTO,
@@ -533,8 +534,8 @@ class ParquetRawStore:
         return self._table.query(self._table.parts(filters=filters), where, params)
 
     def scan_rows(self, provider: str | None, market: Market, interval: Interval, window: DateRange, **kw: Any) -> list[RawBarRow]:
-        """Exact ``Decimal`` rows."""
-        return table_to_rows(self.scan_table(provider, market, interval, window, **kw), RawBarRow)
+        """Exact ``Decimal`` rows; pre-#145 daily identities normalized (#149)."""
+        return normalize_legacy_daily(table_to_rows(self.scan_table(provider, market, interval, window, **kw), RawBarRow))
 
     def scan(self, provider: str, market: Market, interval: Interval, window: DateRange) -> Iterator[RawBar]:
         """Protocol scan: ``RawBar`` with ``Decimal`` prices and volumes."""

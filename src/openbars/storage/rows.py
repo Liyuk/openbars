@@ -21,7 +21,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, InvalidOperation
 from enum import Enum
@@ -460,6 +460,49 @@ def is_available(row: Any, available_by: datetime) -> bool:
     """``available_at <= available_by``; a row without ``available_at`` is not available."""
     at = getattr(row, "available_at", None)
     return at is not None and at <= available_by
+
+
+# #149: before #145, daily raw rows took ``adjustment`` from ``extra["adjustment"]`` only, so
+# split-adjusted US daily sources without that key were stored as ``raw`` (and without
+# ``_bar_series``). For these (market, provider, feed) the stored series can only have been
+# split-adjusted: Massive refuses non-adjusted responses, openbars US daily jobs never set an
+# adjustment so Alpaca defaults to ``split``, and yfinance's US capability is SPLIT only.
+LEGACY_SPLIT_DAILY_SOURCES: frozenset[tuple[str, str, str]] = frozenset({
+    ("us", "massive", "eod"),
+    ("us", "alpaca", "iex"),
+    ("us", "alpaca", "sip"),
+    ("us", "yfinance", "yahoo"),
+})
+
+
+def is_legacy_daily_row(row: "RawBarRow") -> bool:
+    """A pre-#145 daily row whose ``adjustment=raw`` is known to mean ``split`` (#149)."""
+    return (
+        row.interval is Interval.D1
+        and row.adjustment == Adjustment.RAW.value
+        and not (row.extra or {}).get("_bar_series")
+        and (Market(row.market).value, row.provider, row.feed) in LEGACY_SPLIT_DAILY_SOURCES
+    )
+
+
+def normalize_legacy_daily(rows: Sequence["RawBarRow"]) -> list["RawBarRow"]:
+    """Read-time fix for #149: legacy rows get ``adjustment=split``; when a current row with the
+    same (now identical) key exists, the legacy duplicate is dropped. Order is preserved.
+
+    Applied by the native raw stores' ``scan_rows`` (Parquet and Postgres native), not to
+    ``upstream_compat`` rows, whose ``adjustment`` is owned by the upstream schema.
+    """
+    if not any(is_legacy_daily_row(r) for r in rows):
+        return list(rows)
+    fixed: list[tuple[RawBarRow, bool]] = []
+    current: set[tuple] = set()
+    for row in rows:
+        if is_legacy_daily_row(row):
+            fixed.append((replace(row, adjustment="split"), True))
+        else:
+            fixed.append((row, False))
+            current.add(row.key())
+    return [row for row, legacy in fixed if not (legacy and row.key() in current)]
 
 
 def hourly_adjustment(bar: RawBar) -> str:

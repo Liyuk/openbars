@@ -72,6 +72,7 @@ from openbars.storage.errors import (
     UpstreamSchemaError,
 )
 from openbars.storage.rows import (
+    normalize_legacy_daily,
     CanonicalBarRow,
     RawBarRow,
     encode_extra,
@@ -628,7 +629,7 @@ class PgRawStore(_Guard):
         sql += " ORDER BY session_date, ts_start, coalesce(instrument_id, symbol_as_returned), provider, feed, adjustment, revision"
         with self._session() as conn:
             records = conn.execute(sql, params).fetchall()
-        return records_to_rows((_fix(r) for r in records), RawBarRow)
+        return normalize_legacy_daily(records_to_rows((_fix(r) for r in records), RawBarRow))  # #149
 
     def scan(self, provider: str, market: Market, interval: Interval, window: DateRange) -> Iterator[RawBar]:
         for row in self.scan_rows(provider, market, interval, window):
