@@ -30,12 +30,10 @@ from typing import Any, Protocol
 
 from openbars.core.models import DateRange, Interval, Market, QualityFlag, RawBar, Session
 from openbars.core.series import SELECTION_PRIMARY_SOURCE, CanonicalDailyRow
-from openbars.normalize.cn_adjust import from_baostock
-from openbars.normalize.cn_ingest import ensure_cn_instruments
+from openbars.normalize.cn_ingest import ensure_cn_instruments, ingest_job_adjust_factors
 from openbars.normalize.cn_quality import flags_for_cn_series, is_suspended
 from openbars.orchestrator.jobs import Job
 from openbars.normalize.instruments import InstrumentMaster
-from openbars.providers.base import FetchRequest
 from openbars.reconcile.crypto import POLICY_VERSION_CN_DAILY_V1
 from openbars.raw.store import RawStore
 from openbars.reconcile.projection import SourceObservation
@@ -229,12 +227,13 @@ class CnCanonicalSink:
       ``primary_source``. They never go through the US XNYS reconciler.
     * **Adjust factors**: with a ``factor_store`` (``upsert_adjust_factors``) and a provider that has
       ``fetch_adjust_factors``, each symbol's factors are fetched and stored after the canonical
-      write, so QFQ / HFQ work after a run. The window is the job window, or
-      ``[factor_start, job end]`` when ``factor_start`` is given: BaoStock factors are cumulative
-      from listing, so a late start silently misses earlier ex-dates. Pass a long start (listing
-      date / ``1990-01-01``) for a complete history; it costs one extra request per symbol and job.
-      A factor failure never fails the job (the bars are already written); it is recorded in
-      ``factor_errors`` as ``(symbol, error code)``. No ``CorporateAction`` rows are invented.
+      write, so QFQ / HFQ work after a run. The window comes from
+      ``cn_ingest.adjust_factor_fetch_window``: full history (listing date / ``1990-01-01``) the
+      first time, then from the latest stored ``effective_from``; ``factor_start`` overrides the
+      start. A listed-but-never-adjusted stock gets a seed factor of 1 (see
+      ``ingest_job_adjust_factors``). A factor failure never fails the job (the bars are already
+      written); it is recorded in ``factor_errors`` as ``(symbol, error code)``. No
+      ``CorporateAction`` rows are invented.
     """
 
     master: InstrumentMaster
@@ -316,15 +315,10 @@ class CnCanonicalSink:
         fetch = getattr(provider, "fetch_adjust_factors", None)
         if self.factor_store is None or fetch is None:
             return
-        window = DateRange(min(self.factor_start or job.window.start, job.window.end), job.window.end)
-        for iid, group in sorted(by_id.items()):
-            symbol = group[0].symbol_as_returned
-            try:
-                request = FetchRequest(Market.CN, Interval.D1, (symbol,), window)
-                found = [from_baostock(f, iid) for f in fetch(request)]
-                self.factor_store.upsert_adjust_factors(found)
-            except Exception as exc:  # noqa: BLE001 - bars are written; a factor outage must not fail the job
-                self.factor_errors.append((symbol, getattr(exc, "code", type(exc).__name__)))
+        ingest_job_adjust_factors(
+            fetch, self.factor_store, job.window, by_id,
+            listed_on=self._listed_on, factor_start=self.factor_start, errors=self.factor_errors,
+        )  # fmt: skip
 
 
 @dataclass
