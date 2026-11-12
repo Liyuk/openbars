@@ -157,6 +157,7 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **yfinance `.HK` 映射**（#71）：`to_yahoo_hk_ticker` 把 5 位代码 / `hk:eq:xhkg:00700` 写成 Yahoo 常见的 `0700.HK`（去掉一位前导 0）。适配器港股源身份为 `yfinance/yahoo/raw`（`auto_adjust=False`，Discussion #68 默认；美股仍是 `yfinance/yahoo/split`），按 XHKG 丢弃非交易日行；不把 Yahoo 复权序列当规范层。规划器接入见 #77（只用 yfinance；AKShare 不进规划器）。规范层见 #99。
 - **复权口径**（#75 / #99）：规范层 profile 为 `hk-daily-v1`，**落库只存不复权（`RAW`）**，查询时由 `openbars.normalize.hk_adjust`（薄封装 `adjust_rows`）派生 `SPLIT` / `SPLIT_DIVIDEND` / `ALL`（默认读取 `SPLIT`，与美股同一套 Adjustment 枚举，不是 A 股的 QFQ/HFQ）。拆股 `hk_split`、合股 `hk_consolidation` 都是 `kind=SPLIT`（ratio = 新/旧，合股 < 1）。红股 `hk_bonus` 编码为带 `ratio` 的股票股利，**默认不按拆股套用**（与美股 `include_stock_dividends=False` 一致，Discussion #68 默认，以后可改），需显式 `include_bonus=True`。供股 `hk_rights` 是独立的 `kind=RIGHTS`，只记录、永不参与价格调整。现金分红 `hk_cash_dividend` 带 ISO 4217 `currency`（默认 `HKD`），仅当分红币种与 K 线币种一致时才套用；ADR 的美元分红不能套到港币 K 线上。以上四项默认见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)，以后可以改。
 - **AKShare 港股备源**（#72）：`openbars.providers.hk.akshare`，入口 `stock_hk_hist`，代码用 5 位（`00700`）。只请求不复权（`adjust=""`），按 XHKG 丢弃非交易日；源身份 `akshare/eastmoney/raw`。库为 MIT，**不转授**东财等上游数据权；官方声明偏学术研究；[东财法律声明](https://about.eastmoney.com/home/disclaimer) 禁止未经交易所书面同意复制传播行情。openbars 只在用户本机落库。默认低频限流（4 次/分钟、80 次/24h），按代码逐只请求，不在默认配置里鼓励批量爬取。规划器（#77）仍只用 yfinance，本备源不自动进 plan/run。
+- **Futu OpenD 港股日线**（#73）：`openbars.providers.hk.futu`，经用户本机自行登录的 OpenD（`providers.futu.host` / `port`，默认 `127.0.0.1:11111`）调用 `request_history_kline`（`K_DAY`、`AuType.NONE`，按 `page_req_key` 翻页），代码写成 `HK.00700`；源身份 `futu/opend/raw`。openbars 不碰富途登录，也不假定登录即有港股行情权：行情档位、历史 K 线额度（滚动周期内可取的不同标的数，周期与数量以官方当前规则为准）与境内/国际判定以账户和官方为准；OpenD 的频率、额度、权限错误分别映射为可重试 `rate_limited`、不可重试 `history_quota_exhausted` / `no_entitlement`，错误文本不回显。富途用户协议、OpenAPI 协议与交易所行情权禁止未授权转发与商用再分发，只做本机私存。SDK `futu-api` 不是 openbars 依赖，用户自行安装；限速默认 30 次/30 秒（官方 60 次/30 秒的一半）。基类 `openbars.providers.hk.broker` 负责 XHKG 会话、窗口、精度与游标。与 AKShare 一样不进入规划器（#77 仍只用 yfinance）。
 
 ### 3.3 Bar
 
@@ -581,6 +582,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `yfinance/yahoo/split` | `provider_defined` | `unknown` | `provider_aligned` | `provider_defined`（可检视，不视为已证明兼容） |
 | `yfinance/yahoo/raw`（港股日线，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
 | `akshare/eastmoney/raw`（港股日线备源，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
+| `futu/opend/raw`（港股日线，用户自己的 OpenD，`currency=HKD`） | `raw` | `none` | `regular` | `as_traded` |
 | `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `coinbase/exchange/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `baostock/ashare/raw` | `raw` | `none` | `regular` | `as_traded` |

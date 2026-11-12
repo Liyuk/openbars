@@ -71,6 +71,8 @@ COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
 # AKShare HK daily, unadjusted Eastmoney bars. Not US, not in KNOWN_SOURCES.
 AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
+# Futu OpenD HK daily (AuType.NONE), user's own OpenD login (#73). Not US, not in KNOWN_SOURCES.
+FUTU_OPEND_RAW = SourceIdentity("futu", "opend", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -203,6 +205,13 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         currency="HKD",
     ),
     (AKSHARE_EASTMONEY_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
+    (FUTU_OPEND_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.REGULAR,
