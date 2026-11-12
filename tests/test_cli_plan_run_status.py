@@ -407,3 +407,136 @@ providers:
     assert code == 2
     assert "storage.postgres.dsn is required" in captured.err
     assert "postgresql://" not in captured.out + captured.err
+
+
+def test_sparse_hourly_session_is_not_planned_after_run(tmp_path, capsys):
+    from dataclasses import replace
+    from openbars.calendars import xnys
+
+    class SparseHourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1,
+                           ts_start=xnys.hourly_slots(day)[0].ts_start)
+
+    provider = SparseHourly("massive", interval=Interval.H1)
+    settings = config(tmp_path, intervals="[1h]", extra_universe="[TEST1]", start="2026-03-09")
+    kw = dict(provider_factory=lambda settings, gate: {"massive": provider},
+              clock=lambda: NOW, env={"TEST_API_KEY": SECRET})
+    assert main(["--config", settings, "plan"], **kw) == 0
+    assert "plan: 1 jobs" in capsys.readouterr().out
+    assert main(["--config", settings, "run"], **kw) == 0
+    assert "done 1" in capsys.readouterr().out
+    assert len(provider.requests) == 1
+    assert main(["--config", settings, "plan"], **kw) == 0
+    assert "plan: 0 jobs" in capsys.readouterr().out
+
+
+def test_hourly_cli_reports_raw_coverage_and_resume(tmp_path, capsys):
+    from dataclasses import replace
+    from openbars.calendars import xnys
+
+    class Hourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1,
+                           ts_start=xnys.hourly_slots(day)[0].ts_start)
+
+    provider = Hourly("massive", interval=Interval.H1)
+    cfg = config(tmp_path, intervals="[1h]", extra_universe="[TEST1]", start="2026-03-09")
+    kw = dict(provider_factory=lambda settings, gate: {"massive": provider},
+              clock=lambda: NOW, env={"TEST_API_KEY": SECRET})
+    assert main(["--config", cfg, "plan"], **kw) == 0
+    assert "1h" in capsys.readouterr().out
+    assert main(["--config", cfg, "run", "--max-jobs", "0"], **kw) == 0
+    capsys.readouterr()
+    assert main(["--config", cfg, "backfill"], **kw) == 0
+    assert "canonical" in capsys.readouterr().out
+    assert main(["--config", cfg, "status"], **kw) == 0
+    out = capsys.readouterr().out
+    assert "raw coverage" in out and "us/1h" in out and "2026-03-09" in out
+    assert len(provider.requests) == 1
+    assert any("interval=1h" in str(path) for path in (tmp_path / "data").rglob("*.parquet"))
+    assert not list((tmp_path / "data" / "canonical").rglob("*.parquet"))
+
+
+def test_mixed_intervals_plan_and_status(tmp_path, capsys):
+    from dataclasses import replace
+    from openbars.calendars import xnys
+
+    class Hourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1,
+                           ts_start=xnys.hourly_slots(day)[0].ts_start)
+
+    daily = FakeProvider("massive")
+    hourly = Hourly("twelve_data", interval=Interval.H1)
+    cfg = config(tmp_path, intervals="[1d, 1h]", extra_universe="[TEST1]", start="2026-03-09")
+    with open(cfg, "a") as file:
+        file.write("  twelve_data:\n    enabled: true\n    api_key: ${TWELVE_DATA_API_KEY}\n")
+    kw = dict(provider_factory=lambda settings, gate: {"massive": daily, "twelve_data": hourly},
+              clock=lambda: NOW, env={"TEST_API_KEY": SECRET, "TWELVE_DATA_API_KEY": SECRET})
+    assert main(["--config", cfg, "plan"], **kw) == 0
+    out = capsys.readouterr().out
+    assert "interval 1d" in out and "interval 1h" in out and "twelve_data" in out
+    assert main(["--config", cfg, "run"], **kw) == 0
+    capsys.readouterr()
+    assert main(["--config", cfg, "status"], **kw) == 0
+    out = capsys.readouterr().out
+    assert "massive us/1d: 2026-03-09" in out
+    assert "twelve_data us/1h: 2026-03-09" in out
+    assert main(["--config", cfg, "config"], **kw) == 0
+    out = capsys.readouterr().out
+    assert "1d: 2026-03-09" in out and "1h: 2026-03-09" in out
+    assert "twelve_data:" in out and SECRET not in out
+
+
+def test_status_summarizes_large_raw_store_without_state_or_scan(tmp_path, capsys, monkeypatch):
+    import duckdb
+    from openbars.storage.parquet_duckdb import ParquetRawStore
+
+    assert cli(["run", "--max-jobs", "1"], tmp_path) == 0
+    capsys.readouterr()
+    part = next((tmp_path / "data" / "raw").rglob("*.parquet"))
+    synthetic = part.with_name("part-9999999999999999999-synthetic.parquet")
+    con = duckdb.connect()
+    con.execute("COPY (SELECT * REPLACE (symbol_as_returned || i::VARCHAR AS symbol_as_returned) FROM read_parquet(?) CROSS JOIN range(20000) t(i)) TO ? (FORMAT PARQUET)", [str(part), str(synthetic)])
+    con.close()
+    (tmp_path / "data" / "state.db").unlink()
+    monkeypatch.setattr(ParquetRawStore, "scan", lambda *a, **k: pytest.fail("full scan called"))
+    assert cli(["status"], tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "no state database" in out
+    assert "massive us/1d: 2026-03-09" in out
+    assert "40002 bars" in out
+    assert "1 sessions" in out
+
+
+def test_hourly_pagination_resumes_saved_cursor(tmp_path, clock):
+    from dataclasses import replace
+    from datetime import date
+    from test_orchestrator import Env
+    from openbars.core.models import DateRange, Market
+    from openbars.orchestrator.jobs import Job, JobKind, make_job_id
+
+    def interrupt(req, number):
+        if number == 2:
+            raise ProviderError("timeout", "interrupted", retryable=True)
+
+    class Hourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1)
+
+    provider = Hourly(page_size=1, behavior=interrupt, interval=Interval.H1)
+    env = Env(tmp_path, clock, [provider])
+    window = DateRange(date(2026, 3, 3), date(2026, 3, 5))
+    symbols = ("TEST1",)
+    job = Job(make_job_id(JobKind.BACKFILL, "fake", Market.US, Interval.H1, symbols, window),
+              JobKind.BACKFILL, "fake", Market.US, Interval.H1, symbols, window)
+    env.orch.submit([job])
+    env.orch.run()
+    assert env.state(job).state is JobState.FAILED
+    assert env.store.load_checkpoint(job.job_id).cursor == "1"
+    clock.advance(seconds=5)
+    env.orch.run()
+    assert env.state(job).state is JobState.DONE
+    assert [request.cursor for request in provider.requests] == [None, "1", "1", "2"]
+    assert len(env.raw.rows) == 3
