@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from typing import Protocol
 
 from openbars.calendars.xnys import XNYSCalendar, reject_non_session_bars
+from openbars.core.calendar import TradingCalendar
 from openbars.core.models import Bar
 from openbars.core.series import CanonicalDailyRow
 from openbars.reconcile.audit import AuditRecord, audit_record
@@ -67,11 +68,11 @@ class MemoryReconciler:
         store: CanonicalRowStore | None = None,
         *,
         policy: ReconcilePolicy | None = None,
-        calendar: XNYSCalendar | None = None,
+        calendar: TradingCalendar | None = None,
     ) -> None:
         self.store: CanonicalRowStore = store if store is not None else InMemoryCanonicalStore()
         self.policy = policy or DEFAULT_POLICY
-        self.calendar = calendar or XNYSCalendar()
+        self.calendar: TradingCalendar = calendar or XNYSCalendar()
 
     def reconcile_range(
         self,
@@ -92,13 +93,8 @@ class MemoryReconciler:
         """
         generated_at = generated_at or datetime.now(timezone.utc)
         mine = [o for o in observations if o.key == instrument_id and start <= o.session_date <= end]
-        filtered = reject_non_session_bars(mine)
-        rejected = tuple(
-            RejectedObservation(r.bar, REJECT_NON_SESSION) for r in filtered.rejected
-        )
-        selections = project_canonical_bars(
-            filtered.accepted, policy=self.policy, overrides=overrides
-        )
+        accepted, rejected = self._split_non_session(mine)
+        selections = project_canonical_bars(accepted, policy=self.policy, overrides=overrides)
 
         rows: list[CanonicalDailyRow] = []
         audits: list[AuditRecord] = []
@@ -125,6 +121,22 @@ class MemoryReconciler:
             known_gaps=report.known_gaps,
             rejected=rejected,
         )
+
+    def _split_non_session(
+        self, observations: Sequence[SourceObservation]
+    ) -> tuple[list[SourceObservation], tuple[RejectedObservation, ...]]:
+        if isinstance(self.calendar, XNYSCalendar):  # unchanged US behaviour
+            filtered = reject_non_session_bars(observations)
+            return list(filtered.accepted), tuple(
+                RejectedObservation(r.bar, REJECT_NON_SESSION) for r in filtered.rejected
+            )
+        accepted = [o for o in observations if self.calendar.is_session(o.session_date)]
+        dropped = tuple(
+            RejectedObservation(o, REJECT_NON_SESSION)
+            for o in observations
+            if not self.calendar.is_session(o.session_date)
+        )
+        return accepted, dropped
 
     def _write(
         self, sel: CanonicalSelection, generated_at: datetime

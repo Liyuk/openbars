@@ -54,6 +54,7 @@ MODULES = [
     "openbars.normalize.normalizer",
     "openbars.normalize.adjust",
     "openbars.reconcile.policy",
+    "openbars.reconcile.crypto",
     "openbars.reconcile.reconciler",
     "openbars.reconcile.compatibility",
     "openbars.reconcile.projection",

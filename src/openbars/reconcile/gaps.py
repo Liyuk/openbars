@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from openbars.calendars.xnys import XNYSCalendar
+from openbars.core.calendar import TradingCalendar
 
 GAP_REASON = "gap"
 NO_SOURCE_COVERAGE = "no_source_coverage"
@@ -41,10 +42,10 @@ def missing_sessions(
     end: date,
     present: Iterable[date],
     *,
-    calendar: XNYSCalendar | None = None,
+    calendar: TradingCalendar | None = None,
 ) -> tuple[date, ...]:
     have = set(present)
-    cal = calendar or XNYSCalendar()
+    cal: TradingCalendar = calendar or XNYSCalendar()
     return tuple(d for d in cal.sessions(start, end) if d not in have)
 
 
@@ -54,7 +55,7 @@ def detect_gaps(
     end: date,
     present: Iterable[date],
     *,
-    calendar: XNYSCalendar | None = None,
+    calendar: TradingCalendar | None = None,
     unfillable: Collection[date] = (),
     refill: bool = True,
     known_gap_reason: str = NO_SOURCE_COVERAGE,
