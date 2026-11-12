@@ -49,6 +49,7 @@ echo "新词" | python3 scripts/check_sanitized.py --hash-term >> scripts/saniti
 - [ ] `python3 scripts/check_sanitized.py --history --release` 通过（全部历史、提交信息、作者邮箱；不使用基线）。`scripts/sanitize_history_baseline.txt` 记录了护栏建立前已推送历史中的已知问题，日常 `--history` 只把它们报为警告；转公开前必须清零：重写历史，或以一个全新的 squash 提交作为公开仓库的起点。
 - [ ] `gitleaks git --config .gitleaks.toml --redact -v .` 与 `gitleaks dir --config .gitleaks.toml --redact -v .` 均无发现。
 - [ ] 所有 issue、PR、Discussion 正文与评论用 `--stdin` 检查过；无 upstream 路径、包名、仓库名、内部编号。
+- [ ] **编辑历史**：GitHub 会保留 issue / PR / Discussion 正文与评论的历史版本，有读权限的人都能看到。脱敏前写过内部信息的条目，需在网页“edited”下拉中逐条删除旧版本（或关闭后新建干净的条目）。
 - [ ] 仓库中无数据文件、无真实 provider 响应；测试夹具均为合成数据。
 - [ ] README 中的 provider 条款说明完整：openbars 不分发数据，用户自带 key，遵守各源条款。
 - [ ] GitHub 仓库设置：开启 secret scanning 与 push protection；Actions 中不存在需要的 secret。
