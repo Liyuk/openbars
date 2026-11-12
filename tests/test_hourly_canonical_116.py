@@ -122,3 +122,43 @@ def test_daily_stored_instrument_id_does_not_change_symbol_reconciliation():
     assert observation.key == 'TEST1'
     result = MemoryReconciler().reconcile_range('TEST1', day, day, [observation])
     assert result.canonical[0].instrument_id == 'TEST1'
+
+
+@pytest.mark.parametrize('order', [('massive', 'alpaca'), ('alpaca', 'massive')])
+@pytest.mark.parametrize('with_master', [False, True])
+def test_hourly_mixed_identity_reconciles(order, with_master):
+    from dataclasses import replace
+    from openbars.core.models import DateRange
+    from openbars.orchestrator.jobs import JobKind
+
+    day = date(2025, 1, 2)
+    window = DateRange(day, day)
+    stored = {}
+    writes = []
+
+    class Raw:
+        def scan(self, provider, market, interval, window):
+            return stored.get(provider, [])
+
+    class Master:
+        def resolve(self, symbol, *, on, provider, market):
+            assert (symbol, on, market) == ('TEST1', day, Market.US)
+            return 'us:TEST1'
+
+    sink = ReconcilingSink(MemoryReconciler(), lambda rows, market: writes.append(rows),
+                           Raw(), ('massive', 'alpaca'), master=Master() if with_master else None)
+    for provider in order:
+        b = bar(15, provider, 'aggs' if provider == 'massive' else 'sip',
+                '10' if provider == 'massive' else '15')
+        if provider == 'alpaca':
+            b = replace(b, instrument_id=None)
+        stored[provider] = [b]
+        job = Job('job', JobKind.BACKFILL, provider, Market.US, Interval.H1, ('TEST1',), window)
+        sink.after_fetch(job, [b])
+    if not with_master and order[0] == 'alpaca':
+        # An unresolved first write uses the symbol until another source supplies an ID.
+        assert writes[0][0].instrument_id == 'TEST1'
+    assert len(writes[-1]) == 1
+    assert writes[-1][0].instrument_id == 'us:TEST1'
+    assert writes[-1][0].quality_status == 'divergent'
+    assert set(writes[-1][0].sources_seen) == {'massive', 'alpaca'}

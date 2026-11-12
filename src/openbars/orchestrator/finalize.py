@@ -98,6 +98,7 @@ class ReconcilingSink:
     writer: CanonicalWriter
     raw: RawStore | None = None
     other_providers: Sequence[str] = ()
+    master: InstrumentMaster | None = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is Interval.H1 and Market(job.market) is Market.US:
@@ -111,8 +112,27 @@ class ReconcilingSink:
             if self.raw is not None:
                 for provider in self.other_providers:
                     extra.extend(self.raw.scan(provider, Market.US, Interval.H1, window))
-            touched = {(b.instrument_id or b.symbol_as_returned, b.ts_start) for b in bars}
-            rows = reconcile_hourly(b for b in (*bars, *extra)
+            all_bars = (*bars, *extra)
+            cache: dict[tuple[str, str, date], str | None] = {}
+            resolved = []
+            for bar in all_bars:
+                key = (bar.provider, bar.symbol_as_returned, _session_date(bar))
+                instrument_id = bar.instrument_id
+                if not instrument_id and self.master is not None:
+                    if key not in cache:
+                        cache[key] = self.master.resolve(
+                            bar.symbol_as_returned, on=key[2], provider=bar.provider, market=Market.US
+                        )
+                    instrument_id = cache[key]
+                resolved.append(instrument_id)
+            known = {(bar.symbol_as_returned, _session_date(bar)): instrument_id
+                     for bar, instrument_id in zip(all_bars, resolved) if instrument_id}
+            normalized = [replace(bar, instrument_id=instrument_id or
+                                  known.get((bar.symbol_as_returned, _session_date(bar))))
+                          for bar, instrument_id in zip(all_bars, resolved)]
+            touched = {(b.instrument_id or b.symbol_as_returned, b.ts_start)
+                       for b in normalized[:len(bars)]}
+            rows = reconcile_hourly(b for b in normalized
                                     if (b.instrument_id or b.symbol_as_returned, b.ts_start) in touched)
             if rows:
                 self.writer(rows, Market.US)
