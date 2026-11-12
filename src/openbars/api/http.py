@@ -88,8 +88,8 @@ def create_app(
         return {"ok": True, "version": __version__}
 
     @app.get("/api/v1/markets")
-    def markets() -> dict[str, Any]:
-        return {"markets": list_markets(_store())}
+    def markets(interval: str | None = None) -> dict[str, Any]:
+        return {"markets": list_markets(_store(), interval=parse_interval(interval))}
 
     @app.get("/api/v1/instruments")
     def instruments(
@@ -139,6 +139,7 @@ def create_app(
     def flags(
         market: str | None = None,
         flag: str | None = None,
+        interval: str | None = None,
         start: str | None = None,
         end: str | None = None,
         limit: int = DEFAULT_FLAG_LIMIT,
@@ -152,6 +153,7 @@ def create_app(
             _store(),
             market=parse_market(market),
             flag=flag,
+            interval=parse_interval(interval),
             start=parse_date(start, "start"),
             end=parse_date(end, "end"),
             limit=limit,
