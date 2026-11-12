@@ -84,6 +84,8 @@ conventions:
   include_extended_hours: false
 ```
 
+类似 `ON` 或数字的代码请加引号，例如 `"ON"`、`"0001"`。
+
 启用所需 provider 并配置自己的凭据；所有美股 1h 来源都需要显式 `universe.us.symbols`，包括 Massive。`session_open` 按纽约时间 9:30 开盘对齐；也可选 `clock_hour`，但规划器会跳过只支持 `session_open` 的 yfinance 和 Twelve Data。默认只存常规时段；Twelve Data 不支持盘前盘后。Massive 和 Alpaca 将 30 分钟数据合成为网格上的 1 小时数据。
 
 将 `storage.path` 指向仓库外的位置；默认 `./data` 位于仓库内且被 git 忽略，请勿把行情数据提交进 git。先运行 `uv run openbars plan` 查看任务和请求预算，再运行 `uv run openbars run --accept-budget`；非日线提交或执行需要此确认。可用 `uv run openbars status` 查看进度，重跑可从断点续抓。
@@ -116,7 +118,7 @@ uv run openbars plan && uv run openbars run
 
 ### 港股日线
 
-- 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `00700` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
+- 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `"00700"` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
 - `verify`（港股）：按 XHKG 日历、`hk-daily-v1`，评分落库的 RAW 序列，不评分读取时派生的调整结果。
 
 ### 数据条款声明（重要）
@@ -194,6 +196,8 @@ conventions:
   include_extended_hours: false
 ```
 
+Quote tickers like `ON` or numeric codes, for example `"ON"` and `"0001"`.
+
 Enable the providers you need and configure your own credentials. Every US 1h source, including Massive, needs explicit `universe.us.symbols`. `session_open` aligns to the 9:30 New York open; `clock_hour` is also available, but the planner skips yfinance and Twelve Data, which require `session_open`. Only regular hours are stored by default; Twelve Data does not support extended hours. Massive and Alpaca aggregate 30-minute bars onto the hourly grid.
 
 Point `storage.path` outside the repository; the default `./data` is inside the repository and git-ignored. Do not commit market data. First run `uv run openbars plan` to inspect jobs and the request budget, then `uv run openbars run --accept-budget`; submitting or running non-daily jobs requires this acceptance. Check progress with `uv run openbars status`; rerunning resumes from checkpoints.
@@ -226,7 +230,7 @@ uv run openbars plan && uv run openbars run
 
 ### Hong Kong daily
 
-- Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `00700` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
+- Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `"00700"` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
 - `verify` (Hong Kong): XHKG calendar, `hk-daily-v1`, scores the stored RAW series, not the read-time adjusted view.
 
 ### Data terms disclaimer
