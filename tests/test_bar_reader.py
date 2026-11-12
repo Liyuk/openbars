@@ -8,7 +8,7 @@ from decimal import Decimal as D
 
 import pyarrow.parquet as pq
 import pytest
-from synth import weekdays
+from synth import canonical_bars, canonical_bars_h1, hourly_starts, weekdays
 
 from openbars.core.models import (
     Adjustment,
@@ -350,3 +350,45 @@ def test_corporate_actions_roundtrip_exact_decimal_types(backend):
     assert not any(isinstance(v, float) for a in got for v in (a.ratio, a.amount))
     assert got[0].ratio == D("0.33333333")  # decimal(20,8) storage: rounded half-even, stated
     assert got[1].amount == D("0.12345678")
+
+
+# --- hourly ---------------------------------------------------------------------------------
+
+
+H1_DAY, H1_NEXT = date(2024, 1, 3), date(2024, 1, 4)
+
+
+def seed_hourly(backend):
+    backend.canonical.upsert(canonical_bars_h1([T1], [H1_DAY, H1_NEXT]))
+    backend.canonical.upsert(canonical_bars([T1], [H1_DAY, H1_NEXT]))
+
+
+def test_reader_returns_hourly_bars_and_default_stays_daily(backend):
+    seed_hourly(backend)
+    t = backend.reader.bars([T1], interval=Interval.H1, start=H1_DAY, end=H1_DAY)
+    assert t.num_rows == 7
+    assert set(t.column("interval").to_pylist()) == {"1h"}
+    assert set(t.column("session_date").to_pylist()) == {H1_DAY}
+    assert t.column("ts_start").to_pylist() == hourly_starts(H1_DAY)
+    assert set(t.column("adjustment").to_pylist()) == {"split"}
+    both = backend.reader.bars([T1], interval=Interval.H1)
+    assert both.num_rows == 14
+    assert both.column("ts_start").to_pylist() == hourly_starts(H1_DAY) + hourly_starts(H1_NEXT)
+    daily = backend.reader.bars([T1])
+    assert daily.num_rows == 2 and set(daily.column("interval").to_pylist()) == {"1d"}
+    assert daily.column("session_date").to_pylist() == [H1_DAY, H1_NEXT]
+    nxt = backend.reader.bars([T1], interval=Interval.H1, start=H1_NEXT, end=H1_NEXT)
+    assert set(nxt.column("session_date").to_pylist()) == {H1_NEXT} and nxt.num_rows == 7
+
+
+def test_store_bar_reader_hourly_stored_basis(backend):
+    from openbars.storage.bar_reader import StoreBarReader
+
+    seed_hourly(backend)
+    reader = StoreBarReader(backend)
+    rows = reader.bars([T1], interval=Interval.H1, start=H1_DAY, end=H1_DAY)
+    assert [r.ts_start for r in rows] == hourly_starts(H1_DAY)
+    assert {r.interval for r in rows} == {Interval.H1} and {r.session_date for r in rows} == {H1_DAY}
+    assert len(reader.bars([T1], interval=Interval.H1, start=H1_DAY, end=H1_NEXT)) == 14
+    daily = reader.bars([T1], start=H1_DAY, end=H1_NEXT)
+    assert [r.interval for r in daily] == [Interval.D1, Interval.D1]
