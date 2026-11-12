@@ -6,6 +6,7 @@ Layout (``root`` is normally ``./data``; see docs/architecture.md section 10)::
     raw/provider=P/market=M/interval=I/year=Y[/month=MM]/part-*.parquet
     canonical/market=M/interval=I/year=Y[/month=MM]/part-*.parquet
     ref/{instruments,symbol_mappings,corporate_actions}.parquet
+    ref/{unresolved,symbol_observations,upstream_ids}.parquet   identity layer side tables
     raw-archive/provider=P/...                             JSON response sidecars
     audit/                                                 reserved
     openbars.duckdb                                        views only; ``rebuild_catalog()``
@@ -55,6 +56,7 @@ from openbars.core.models import (
     RawBar,
     SymbolMapping,
 )
+from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
 from openbars.raw.archive import RawArchive
@@ -82,7 +84,11 @@ from openbars.storage.schema import (
     RAW_LINEAGE_COLUMNS,
     SCHEMA_VERSION,
     SYMBOL_MAPPINGS_SCHEMA,
+    SYMBOL_OBSERVATIONS_SCHEMA,
+    REF_IDENTITY_SCHEMAS,
     TABLE_SCHEMAS,
+    UNRESOLVED_SCHEMA,
+    UPSTREAM_IDS_SCHEMA,
     duckdb_type,
     key_exprs,
     qident,
@@ -506,12 +512,16 @@ class ParquetCanonicalStore:
 # --- ref: instrument master --------------------------------------------------------------
 
 
-class ParquetInstrumentMaster:
+class ParquetInstrumentMaster(_ResolveMixin):
     """``ref/instruments.parquet`` + ``symbol_mappings.parquet`` + ``corporate_actions.parquet``.
 
     Small tables: each upsert rewrites the whole file atomically (merge by key, new wins).
     Keys: instruments ``instrument_id``; mappings ``(instrument_id, provider, symbol,
     valid_from)``; actions ``(instrument_id, ex_date, kind, source)``.
+
+    Point-in-time ``resolve`` rules live in ``openbars.normalize.instruments``. The identity
+    side tables (``unresolved``, ``symbol_observations``, ``upstream_ids``) back the
+    ``InstrumentDirectory`` and the unresolved queue.
     """
 
     def __init__(self, backend: "ParquetDuckDbBackend") -> None:
@@ -578,30 +588,9 @@ class ParquetInstrumentMaster:
         self._by_symbol = dict(by_symbol)
         self._cache_sig = sig
 
-    def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
-        """Instrument a symbol meant on ``on`` (``valid_to`` inclusive), else ``None``.
-
-        Provider-specific mappings take precedence over ``"*"`` mappings; more than one
-        distinct instrument at the winning precedence means ambiguity -> ``None``.
-        """
+    def _resolution_view(self):
         self._load()
-        market = Market(market)
-        specific: set[str] = set()
-        generic: set[str] = set()
-        for m in self._by_symbol.get(symbol, ()):
-            if m.valid_from > on or (m.valid_to is not None and on > m.valid_to):
-                continue
-            inst = self._instruments.get(m.instrument_id)
-            if inst is None or inst.market is not market:
-                continue
-            if m.provider == provider:
-                specific.add(m.instrument_id)
-            elif m.provider == "*":
-                generic.add(m.instrument_id)
-        for ids in (specific, generic):
-            if ids:
-                return next(iter(ids)) if len(ids) == 1 else None
-        return None
+        return self._instruments, self._by_symbol
 
     def get(self, instrument_id: str) -> Instrument | None:
         self._load()
@@ -625,6 +614,102 @@ class ParquetInstrumentMaster:
     def mappings(self) -> list[SymbolMapping]:
         self._load()
         return [m for ms in self._by_symbol.values() for m in ms]
+
+    # -- identity layer: mapping removal, unresolved queue, sightings, upstream ids --
+
+    def remove_mappings(self, mappings: Iterable[SymbolMapping]) -> None:
+        drop = {(m.instrument_id, m.provider, m.symbol, m.valid_from) for m in mappings}
+        if not drop:
+            return
+        with self.backend.lock:
+            kept = [
+                r for r in self._read_records("symbol_mappings")
+                if (r["instrument_id"], r["provider"], r["symbol"], r["valid_from"]) not in drop
+            ]
+            self._write_records("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, kept)
+
+    def record_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        new = list(records)
+        if not new:
+            return
+        with self.backend.lock:
+            merged = {r.key: r for r in self._read_unresolved()}
+            merged.update((r.key, r) for r in new)
+            self._write_unresolved(merged.values())
+
+    def unresolved(self, kind: str | None = None) -> list[UnresolvedRecord]:
+        return [r for r in self._read_unresolved() if kind is None or r.kind == kind]
+
+    def unresolved_count(self, kind: str | None = None) -> int:
+        return len(self.unresolved(kind))
+
+    def discard_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        drop = {r.key for r in records}
+        if not drop:
+            return
+        with self.backend.lock:
+            self._write_unresolved(r for r in self._read_unresolved() if r.key not in drop)
+
+    def _read_unresolved(self) -> list[UnresolvedRecord]:
+        return [
+            UnresolvedRecord(
+                r["kind"], r["reason_code"], r["symbol"], r["provider"], r["session_date"],
+                Market(r["market"]), r["detail"],
+            )
+            for r in self._read_records("unresolved")
+        ]
+
+    def _write_unresolved(self, records: Iterable[UnresolvedRecord]) -> None:
+        rows = [
+            {
+                "kind": r.kind, "reason_code": r.reason_code, "symbol": r.symbol, "provider": r.provider,
+                "market": Market(r.market).value, "session_date": r.session_date, "detail": r.detail,
+            }
+            for r in sorted(records, key=lambda r: (r.kind, r.provider, r.symbol, r.session_date or date.min))
+        ]
+        self._write_records("unresolved", UNRESOLVED_SCHEMA, rows)
+
+    def observe(self, observations: Iterable[tuple[str, str, str, date]]) -> None:
+        new = list(observations)
+        if not new:
+            return
+        with self.backend.lock:
+            merged = {
+                (r["instrument_id"], r["symbol"], r["provider"]): r["last_observed"]
+                for r in self._read_records("symbol_observations")
+            }
+            for instrument_id, symbol, provider, on in new:
+                k = (instrument_id, symbol, provider)
+                if k not in merged or merged[k] < on:
+                    merged[k] = on
+            self._write_records(
+                "symbol_observations",
+                SYMBOL_OBSERVATIONS_SCHEMA,
+                [
+                    {"instrument_id": k[0], "symbol": k[1], "provider": k[2], "last_observed": merged[k]}
+                    for k in sorted(merged)
+                ],
+            )
+
+    def observations(self) -> list[tuple[str, str, str, date]]:
+        return [
+            (r["instrument_id"], r["symbol"], r["provider"], r["last_observed"])
+            for r in self._read_records("symbol_observations")
+        ]
+
+    def set_upstream_id(self, instrument_id: str, upstream_id: int) -> None:
+        with self.backend.lock:
+            existing = self.upstream_ids()
+            _check_upstream(existing, instrument_id, upstream_id)
+            existing[instrument_id] = int(upstream_id)
+            self._write_records(
+                "upstream_ids",
+                UPSTREAM_IDS_SCHEMA,
+                [{"instrument_id": k, "upstream_id": existing[k]} for k in sorted(existing)],
+            )
+
+    def upstream_ids(self) -> dict[str, int]:
+        return {r["instrument_id"]: r["upstream_id"] for r in self._read_records("upstream_ids")}
 
     def corporate_actions_table(self, instrument_ids: Sequence[str] | None = None) -> pa.Table:
         """Exact-decimal Arrow table of corporate actions."""
@@ -832,7 +917,7 @@ class ParquetDuckDbBackend:
         sig = {"root": str(self.root.resolve()), "schema_version": str(SCHEMA_VERSION)}
         for spec in LAYERS.values():
             sig[spec.name] = str(self._layer_files_exist(spec))
-        for name in ("instruments", "symbol_mappings", "corporate_actions"):
+        for name in ("instruments", "symbol_mappings", "corporate_actions", "unresolved", "symbol_observations", "upstream_ids"):
             sig[name] = str(self._ref_exists(name))
         return sig
 
@@ -851,13 +936,13 @@ class ParquetDuckDbBackend:
                         con.execute(f"CREATE VIEW {spec.view} AS {_dedup_sql(spec, source)}")
                     else:
                         con.execute(f"CREATE VIEW {spec.view} AS {_empty_select(spec.schema)}")
-                for name in ("instruments", "symbol_mappings", "corporate_actions"):
+                for name in ("instruments", "symbol_mappings", "corporate_actions", "unresolved", "symbol_observations", "upstream_ids"):
                     con.execute(f"DROP VIEW IF EXISTS {name}")
                     if sig[name] == "True":
                         path = (self.ref_dir / f"{name}.parquet").resolve().as_posix()
                         con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet({_sql_str(path)})")
                     else:
-                        con.execute(f"CREATE VIEW {name} AS {_empty_select(TABLE_SCHEMAS[name])}")
+                        con.execute(f"CREATE VIEW {name} AS {_empty_select({**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS}[name])}")
                 con.execute("DROP TABLE IF EXISTS catalog_meta")
                 con.execute("CREATE TABLE catalog_meta (key VARCHAR PRIMARY KEY, value VARCHAR)")
                 con.executemany("INSERT INTO catalog_meta VALUES (?, ?)", list(sig.items()))
@@ -884,7 +969,7 @@ class ParquetDuckDbBackend:
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> pa.Table:
         """Run SQL against the catalog views (``raw_bars``, ``canonical_bars``, ``instruments``,
-        ``symbol_mappings``, ``corporate_actions``) and return a ``pyarrow.Table``."""
+        ``symbol_mappings``, ``corporate_actions``, plus the identity side tables) and return a ``pyarrow.Table``."""
         self.ensure_catalog()
         con = duckdb.connect(str(self.catalog_path), read_only=True)
         try:

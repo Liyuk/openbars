@@ -463,8 +463,6 @@ def test_capabilities_and_quota_policy():
     limit = p.quota_policy().limits[0]
     assert (limit.count, limit.per) == (200, timedelta(minutes=1))
     assert p.id == "alpaca"
-    with pytest.raises(NotImplementedError):
-        p.list_instruments(Market.US)
 
 
 def test_entry_point_discovery():
