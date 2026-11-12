@@ -93,6 +93,7 @@ from openbars.storage.schema import (
     RAW_BARS_PARQUET_SCHEMA,
     RAW_KEY_SQL,
     RAW_LINEAGE_COLUMNS,
+    SAME_SOURCE_BAR_COLUMNS,
     SCHEMA_VERSION,
     SYMBOL_MAPPINGS_SCHEMA,
     SYMBOL_OBSERVATIONS_SCHEMA,
@@ -361,8 +362,9 @@ class _PartitionedTable:
     def _carry_available_at(self, incoming: pa.Table, existing_files: Sequence[Path]) -> pa.Table:
         """Keep the earliest known ``available_at`` of an unchanged source bar (#154).
 
-        When the visible row with the same key has the same ``source_fingerprint`` (same
-        selected source bar), the incoming row gets the earlier of the two non-null values.
+        When the visible row with the same key is the same selected source bar (every
+        ``SAME_SOURCE_BAR_COLUMNS`` value matches: fingerprint, source and prices), the incoming
+        row gets the earlier of the two non-null values.
         A re-run of the same fetch therefore never moves a bar's availability later, and a
         null stored value can still be filled. Postgres native applies the same rule in SQL.
         """
@@ -379,7 +381,8 @@ class _PartitionedTable:
         sql = (
             f"WITH e AS ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')}) "
             f"SELECT i._idx, e.available_at FROM incoming i JOIN e ON {on} "
-            "AND i.source_fingerprint = e.source_fingerprint WHERE e.available_at IS NOT NULL"
+            + "".join(f" AND i.{c} IS NOT DISTINCT FROM e.{c}" for c in SAME_SOURCE_BAR_COLUMNS)
+            + " WHERE e.available_at IS NOT NULL"
         )
         con = _mem_connection()
         try:
