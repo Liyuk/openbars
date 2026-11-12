@@ -62,6 +62,23 @@ def test_native_summary_is_one_bounded_aggregate():
     assert _store(empty).coverage_summary("prov_a", Market.US, Interval.H1) == (None, None, 0, 0)
 
 
+def test_compat_summary_filters_superseded_revisions():
+    conn = FakeConn({"first": DAYS[0], "last": DAYS[-1], "sessions": 5, "bars": 5})
+    from openbars.storage.compat_write import CompatIdentity
+    from openbars.storage.postgres import PgCompatRawStore
+
+    @contextmanager
+    def session():
+        yield conn
+
+    store = PgCompatRawStore(session, write=False, identity=CompatIdentity())
+    assert store.coverage_summary("prov_a", Market.US, Interval.D1) == (DAYS[0], DAYS[-1], 5, 5)
+    sql = conn.sql[1][0]
+    assert "row_number() OVER" in sql
+    assert "PARTITION BY instrument_id, session_date, provider, feed, adjustment" in sql
+    assert "revision DESC" in sql and "revision_rank = 1" in sql
+
+
 def test_timeout_becomes_coverage_timeout():
     with pytest.raises(CoverageTimeout, match="exceeded 1s"):
         _store(FakeConn(cancel=True)).coverage_summary("prov_a", Market.US, Interval.D1, timeout_ms=1000)
@@ -179,14 +196,14 @@ def test_live_compat_summary_reads_daily_bar(pg_dsn, tmp_path):
         with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
             conn.execute("INSERT INTO instrument (id, asset_class, security_type) VALUES (10, 'equity', 'common_stock')")
             for i, day in enumerate(DAYS[:3]):
-                for revision in (1, 2):  # two revisions of a day count as two bars, one session
+                for revision in (1, 2):  # only the latest revision is visible
                     conn.execute(
                         "INSERT INTO daily_bar (instrument_id, session_date, provider, feed, adjustment, revision, "
                         "open, high, low, close, volume) VALUES (10, %s, 'massive', 'eod', 'split', %s, 1, 2, 1, 2, 5)",
                         [day, revision],
                     )
         pg = PostgresBackend(pg_dsn, mode="upstream_compat", write=False, schema=schema, state_path=tmp_path / "state.db")
-        assert pg.raw.coverage_summary("massive", Market.US, Interval.D1) == (DAYS[0], DAYS[2], 3, 6)
+        assert pg.raw.coverage_summary("massive", Market.US, Interval.D1) == (DAYS[0], DAYS[2], 3, 3)
         assert pg.raw.coverage_summary("alpaca", Market.US, Interval.D1) == (None, None, 0, 0)
         assert pg.raw.coverage_summary("massive", Market.US, Interval.H1) == (None, None, 0, 0)
         assert pg.raw.coverage_summary("massive", Market.CRYPTO, Interval.D1) == (None, None, 0, 0)

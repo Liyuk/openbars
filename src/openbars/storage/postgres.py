@@ -1415,8 +1415,14 @@ class PgCompatRawStore(_Guard):
         if Market(market) is not _COMPAT_MARKET or Interval(interval) is not Interval.D1:
             return None, None, 0, 0
         sql = (
-            "SELECT min(session_date) AS first, max(session_date) AS last, "
-            "count(DISTINCT session_date) AS sessions, count(*) AS bars FROM daily_bar WHERE provider = ?"
+            "WITH visible AS ("
+            "SELECT session_date, row_number() OVER ("
+            "PARTITION BY instrument_id, session_date, provider, feed, adjustment "
+            "ORDER BY revision DESC) AS revision_rank "
+            "FROM daily_bar WHERE provider = ?"
+            ") SELECT min(session_date) AS first, max(session_date) AS last, "
+            "count(DISTINCT session_date) AS sessions, count(*) AS bars "
+            "FROM visible WHERE revision_rank = 1"
         )
         return _coverage(self._session, sql, [provider], timeout_ms)
 
