@@ -33,6 +33,15 @@ from openbars.calendars.hk import session_bounds as hk_session_bounds
 from openbars.calendars.hk import sessions as hk_sessions
 from openbars.calendars.hk import trading_session as hk_trading_session
 from openbars.calendars.hk import trading_sessions as hk_trading_sessions
+from openbars.calendars.hk_closures import (
+    AdhocClosure,
+    JsonAdhocClosureStore,
+    MemoryAdhocClosureStore,
+    default_closure_store,
+    discard_adhoc_closure,
+    load_adhoc_closures,
+    register_adhoc_closure,
+)
 from openbars.calendars.xnys import (
     BarFilterResult,
     BarRejection,
@@ -45,11 +54,14 @@ from openbars.calendars.xnys import (
 from openbars.core.calendar import TradingSession
 
 __all__ = [
+    "AdhocClosure",
     "BarFilterResult",
     "BarRejection",
     "CNCalendar",
     "CryptoCalendar",
     "HKCalendar",
+    "JsonAdhocClosureStore",
+    "MemoryAdhocClosureStore",
     "TradingSession",
     "XHKGCalendar",
     "XNYSCalendar",
@@ -68,6 +80,8 @@ __all__ = [
     "crypto_session_bounds",
     "crypto_session_index",
     "crypto_sessions",
+    "default_closure_store",
+    "discard_adhoc_closure",
     "hk_is_session",
     "hk_latest_completed_session",
     "hk_session_bounds",
@@ -76,6 +90,8 @@ __all__ = [
     "hk_trading_sessions",
     "is_non_session_date",
     "latest_completed_session",
+    "load_adhoc_closures",
+    "register_adhoc_closure",
     "reject_non_session_bars",
     "session_index",
 ]

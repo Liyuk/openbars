@@ -12,8 +12,11 @@ to the last close (the lunch break is not a gap in the session object).
 2027-11-11. Queries outside that range raise ``ValueError`` rather than inventing
 sessions or holidays. Historical unscheduled closures that the library already records
 (for example some typhoon / black-rain days in ``adhoc_holidays``) are used as-is.
-Future weather closures cannot be predicted and are **not** handwritten here; upgrade
-the package (or, later, ingest HKEX announcements) to extend coverage.
+Future weather closures cannot be predicted and are **not** handwritten here.
+Users (or a later importer they run) may register an announcement-backed day via
+``openbars.calendars.hk_closures``; the overlay starts empty and is never shipped
+with dates. Registration does not extend coverage: queries outside the library
+range still raise ``ValueError``.
 Design: https://github.com/Liyuk/openbars/discussions/68
 """
 
@@ -27,6 +30,7 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as xcals
 import pandas as pd
 
+from openbars.calendars.hk_closures import AdhocClosureStore, default_closure_store
 from openbars.core.calendar import TradingSession
 from openbars.core.models import Market
 
@@ -87,6 +91,12 @@ class HKCalendar:
     market = Market.HK
     timezone = "Asia/Hong_Kong"
 
+    def __init__(self, closures: AdhocClosureStore | None = None) -> None:
+        self._closures = default_closure_store() if closures is None else closures
+
+    def _overlay_closed(self, day: date) -> bool:
+        return self._closures.get(day) is not None
+
     def sessions(self, start: date, end: date) -> list[date]:
         if end < start:
             raise ValueError(f"end ({end}) must not be before start ({start})")
@@ -94,11 +104,14 @@ class HKCalendar:
         return [
             ts.date()
             for ts in _calendar().sessions_in_range(_label(start), _label(end))
+            if not self._overlay_closed(ts.date())
         ]
 
     def is_session(self, day: date) -> bool:
         _require_covered(day)
         if day.weekday() >= 5:
+            return False
+        if self._overlay_closed(day):
             return False
         return bool(_calendar().is_session(_label(day)))
 
@@ -123,6 +136,8 @@ class HKCalendar:
         cal = _calendar()
         out: list[TradingSession] = []
         for ts in cal.sessions_in_range(_label(start), _label(end)):
+            if self._overlay_closed(ts.date()):
+                continue
             segs = _segments(cal, ts.date())
             out.append(
                 TradingSession(
