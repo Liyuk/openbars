@@ -136,6 +136,16 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **编排器 / CLI 已接入（#51）**：`openbars run` 与 `openbars plan --submit`（写路径）在规划前自动对已启用、声明 `crypto` 能力的 provider（binance / coinbase）调用 `list_instruments(Market.CRYPTO)`，经 `listing_from_provider_instrument` 转换后 `ingest_crypto_pairs` 入库（`cli.wiring.ingest_crypto_listings`；缺 base/quote 的行计入 unresolved，某个 venue 列表失败只记一条 note 并继续，不会让整个 run 失败），随后以 `DefaultPlanner(instruments=backend.instruments)` 规划。不会对 alpaca / massive / yfinance 调用；仅美股配置不产生额外网络请求，也不入库加密交易对。`plan`（dry-run）不入库、不调用 `list_instruments`、不写 master；master 里已有交易对时可用于规划，否则沿用 symbol 启发式。
 - 不改 instruments 表 schema / `SCHEMA_VERSION`，也不新增列。
 
+#### 3.2.2 A 股证券 id（`openbars.normalize.cn_instruments`）
+
+设计见 [discussion #54](https://github.com/Liyuk/openbars/discussions/54)（issue #56）。本节只含纯函数，尚无上市清单入库与 provider。
+
+- **格式**：`cn:eq:<venue>:<code>`。`venue` 为小写 slug：`xshg`（上交所，含科创板）或 `xshe`（深交所，含创业板）；北交所（`xbse`）预留，当前拒绝。`code` 恰为 6 位数字，保留前导 0（`000001`、`600000`、`688001`）。`asset_class` 不进 id。`market_of` 取首段得到 `cn`。
+- **必须带交易所**：裸 6 位代码不是合法 id，也不能被归一化。
+- **常见写法归一化**（`normalize_cn_symbol`，大小写不敏感）：`600000.SH` / `600000.SS` / `sh.600000` / `SH600000` → `xshg` + `600000`；`000001.SZ` / `000001.SZSE` / `sz.000001` / `SZ000001` → `xshe` + `000001`。
+- **代码复用与代际**：已退役的 id 永不给新公司复用。首次上市为 `cn:eq:xshg:600000`；同一 `(venue, code)` 再次上市则为 `cn:eq:xshg:600000:g2`（第 2 代，之后 `g3` …）。第 1 代无后缀，`:g1` 不是合法写法。`cn_instrument_id(venue, code, generation=1)` 构造，`parse_cn_instrument_id` 反解为 `(venue, code, generation)`，非法部分抛 `ValueError`。
+- 选择下一代的逻辑（读取已退役 id）属于后续的上市清单入库，不在本模块。
+
 ### 3.3 Bar
 
 ```text
@@ -192,6 +202,16 @@ Bar
 - `session_index(as_of, *, epoch=date(2000,1,1))`：不晚于 `as_of` 的最近一个会话的从 0 起序号，即 `(as_of - epoch).days`；`as_of < epoch` 返回 0。
 - `latest_completed_session(now, wait_minutes=30) -> date | None`：`now` 必须带时区；**在 UTC 比较**，`now >= closes_at + wait_minutes` 才算完成（即次日 00:00 UTC 之后再等 N 分钟）；向前最多找约 14 天；`wait_minutes < 0` 抛错。
 - `is_non_session_date(day)` 恒为 `False`；`reject_non_session_bars` 与 XNYS 版本签名、返回类型（`BarFilterResult` / `BarRejection`）一致，但不会拒收任何 bar（含周末日期）。
+
+#### 3.4.3 沪深日历（`openbars.calendars.cn`）
+
+设计见 [discussion #54](https://github.com/Liyuk/openbars/discussions/54)（issue #55）。
+
+- 包装 `exchange_calendars` 的 **XSHG**；该包没有 XSHE，而沪深交易所公布同一份年度休市安排，所以 **XSHE 作为 XSHG 的别名**（`XSHECalendar is XSHGCalendar is CNCalendar`）。北交所不在范围内。`market = Market.CN`，`timezone = "Asia/Shanghai"`，入口点 `cn`。
+- **午休**：连续竞价 09:30–11:30、13:00–15:00。`session_bounds(day)` 在交易日返回**两段** UTC `(open, close)`（11:30–13:00 上海时间为空档），非交易日返回空元组。`trading_session(s)` 的 `opens_at` / `closes_at` 为当日 09:30 与 15:00（Asia/Shanghai，带时区），不只是上午段。
+- `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（15:00 收盘后再等待 N 分钟）。`openbars.calendars` 以 `cn_` 前缀导出函数（`cn_sessions` 等），避免与 XNYS 同名函数冲突。
+- 覆盖范围：库内节假日只记录到固定年份（4.13.x 为 2026），超出时库抛 `ValueError`，不会静默当作无假日；需升级依赖来扩展。
+- **规划器尚未接入**：`Market.CN` 仍产生 `no_calendar` 并跳过，不会在没有 provider 时凭空生成作业。
 
 ### 3.5 Provider 能力声明
 
@@ -587,7 +607,7 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 ```text
 src/openbars/
   core/          models.py · ohlcv.py · series.py · schema.py · errors.py · calendar.py
-  calendars/     xnys.py · crypto.py（后续：cn · hk）
+  calendars/     xnys.py · crypto.py · cn.py（后续：hk）
   config/        schema.py · loader.py
   cli/           main.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py

@@ -36,6 +36,7 @@ openbars = "openbars.cli.main:main"
 [project.entry-points."openbars.calendars"]
 xnys = "openbars.calendars.xnys:XNYSCalendar"
 crypto = "openbars.calendars.crypto:CryptoCalendar"
+cn = "openbars.calendars.cn:CNCalendar"
 
 [project.entry-points."openbars.providers"]
 alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
