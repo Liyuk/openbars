@@ -33,7 +33,7 @@ from typing import Any
 
 import yaml
 
-from openbars.config.schema import NodeConfig, ProviderConfig, Selection, Settings
+from openbars.config.schema import RETAINABLE_LAYERS, NodeConfig, ProviderConfig, RetentionRule, Selection, Settings
 from openbars.core.errors import ConfigError
 from openbars.core.models import Adjustment, HourlyAlignment, Interval, Market
 
@@ -308,10 +308,46 @@ def parse_settings(data: Any) -> Settings:
         postgres_schema=schema_text,
         postgres_quota=quota,
         universe=universe,
+        retention=_retention_rules(storage.get("retention")),
         reconcile=dict(_section(data, "reconcile")),
         schedule=dict(_section(data, "schedule")),
         **kwargs,
     )
+
+
+_RETENTION_KEYS = frozenset({"layer", "keep_years", "provider", "market", "interval"})
+
+
+def _retention_rules(value: Any) -> tuple[RetentionRule, ...]:
+    """``storage.retention``: a list of rules; absent / empty = retention off (#127)."""
+    rules = []
+    for index, entry in enumerate(_as_list(value, "storage.retention")):
+        where = f"storage.retention[{index}]"
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"{where} must be a mapping with layer and keep_years")
+        unknown = sorted(set(map(str, entry)) - _RETENTION_KEYS)
+        if unknown:
+            raise ConfigError(f"{where}: unknown keys {unknown}")
+        layer = str(entry.get("layer", "")).strip()
+        if layer not in RETAINABLE_LAYERS:
+            raise ConfigError(
+                f"{where}.layer must be one of {list(RETAINABLE_LAYERS)}; canonical and ref are always kept"
+            )
+        years = entry.get("keep_years")
+        if isinstance(years, bool) or not isinstance(years, int) or years < 1:
+            raise ConfigError(f"{where}.keep_years must be a whole number >= 1")
+        market = entry.get("market")
+        interval = entry.get("interval")
+        rules.append(
+            RetentionRule(
+                layer=layer,
+                keep_years=years,
+                provider=str(entry["provider"]) if entry.get("provider") is not None else None,
+                market=_enum(Market, market, f"{where}.market").value if market is not None else None,
+                interval=_enum(Interval, interval, f"{where}.interval").value if interval is not None else None,
+            )
+        )
+    return tuple(rules)
 
 
 def _referenced_values(data: Any, env: Mapping[str, str], min_length: int = 4) -> list[str]:
