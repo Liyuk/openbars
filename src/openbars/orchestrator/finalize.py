@@ -16,6 +16,10 @@ placeholder), limit-up / limit-down closes get ``LIMIT_UP`` / ``LIMIT_DOWN`` fla
 (``normalize.cn_quality``), and the provider's adjust factors, when it has any, are ingested into
 the factor table so ``QFQ`` / ``HFQ`` can be derived at read time.
 
+Hong Kong jobs (``Market.HK``) go through ``HkCanonicalSink``: yfinance is the primary
+``hk-daily-v1`` source, AKShare raw already on disk is used only to corroborate, and rows
+are stored ``RAW``. They never go through the US XNYS reconciler.
+
 ``DispatchingSink`` picks the sink by ``job.market`` so callers keep passing one sink object.
 """
 
@@ -31,6 +35,7 @@ from typing import Any, Protocol
 from openbars.core.models import DateRange, Interval, Market, QualityFlag, RawBar, Session
 from openbars.core.series import SELECTION_PRIMARY_SOURCE, CanonicalDailyRow
 from openbars.normalize.cn_ingest import ensure_cn_instruments, ingest_job_adjust_factors
+from openbars.normalize.hk_ingest import ensure_hk_instruments
 from openbars.normalize.cn_quality import flags_for_cn_series, is_suspended
 from openbars.orchestrator.jobs import Job
 from openbars.normalize.instruments import InstrumentMaster
@@ -322,19 +327,129 @@ class CnCanonicalSink:
 
 
 @dataclass
-class DispatchingSink:
-    """One sink for every market: ``job.market`` selects the ``us``, ``crypto`` or ``cn`` sink.
+class HkCanonicalSink:
+    """Raw HK daily bars -> ``hk-daily-v1`` canonical rows (yfinance primary, AKShare corroboration).
 
-    A market without a sink (including HK in this version) is raw-only, never mis-reconciled.
+    Instrument ids come from the bar, then ``ensure_hk_instruments``. An unrecognised
+    spelling stays raw-only. Already-stored raw from other providers (AKShare) is scanned
+    for the same window and passed to ``reconcile_hk``; it is never planned by the
+    orchestrator and is not used as a gap fill. Rows are stored ``RAW``.
+    """
+
+    master: InstrumentMaster
+    writer: CanonicalWriter
+    raw: RawStore | None = None
+    other_providers: Sequence[str] = ()
+
+    def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
+        from openbars.reconcile.hk import reconcile_hk
+
+        if Interval(job.interval) is not Interval.D1 or Market(job.market) is not Market.HK:
+            return
+        ids = self._resolve(job, bars)
+        mine = self._observations(bars, ids)
+        if not mine:
+            return
+        by_key: dict[str, list[SourceObservation]] = defaultdict(list)
+        for obs in mine:
+            by_key[obs.key].append(obs)
+        days = [o.session_date for o in mine]
+        window = DateRange(min(days), max(days))
+        extra = self._others(job, window, ids)
+        rows: list[CanonicalDailyRow] = []
+        for key, observations in sorted(by_key.items()):
+            observations = observations + extra.get(key, [])
+            first = max(min(o.session_date for o in observations), window.start)
+            last = min(max(o.session_date for o in observations), window.end)
+            result = reconcile_hk(key, first, last, observations)
+            rows.extend(result.result.canonical)
+        if rows:
+            self.writer(rows, Market.HK)
+
+    def _resolve(self, job: Job, bars: Sequence[RawBar]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        first: dict[str, date] = {}
+        for bar in bars:
+            if bar.instrument_id:
+                out[bar.symbol_as_returned] = bar.instrument_id
+                continue
+            day = _session_date(bar)
+            first[bar.symbol_as_returned] = min(day, first.get(bar.symbol_as_returned, day))
+        for symbol, day in first.items():
+            try:
+                out.update(
+                    ensure_hk_instruments(self.master, [symbol], as_of=day, provider=job.provider)
+                )
+            except ValueError:
+                continue
+        return out
+
+    def _observations(
+        self, bars: Sequence[RawBar], ids: Mapping[str, str]
+    ) -> list[SourceObservation]:
+        out: list[SourceObservation] = []
+        for bar in bars:
+            obs = observation_from_raw(bar)
+            if obs is None:
+                continue
+            iid = obs.instrument_id or ids.get(bar.symbol_as_returned)
+            if iid is None:
+                continue
+            if obs.instrument_id != iid:
+                obs = replace(obs, instrument_id=iid)
+            out.append(obs)
+        return out
+
+    def _others(
+        self, job: Job, window: DateRange, ids: Mapping[str, str]
+    ) -> dict[str, list[SourceObservation]]:
+        out: dict[str, list[SourceObservation]] = defaultdict(list)
+        if self.raw is None:
+            return out
+        for provider in self.other_providers:
+            if provider == job.provider:
+                continue
+            bars = list(self.raw.scan(provider, Market.HK, Interval.D1, window))
+            more = dict(ids)
+            for bar in bars:
+                if bar.instrument_id or bar.symbol_as_returned in more:
+                    continue
+                try:
+                    more.update(
+                        ensure_hk_instruments(
+                            self.master,
+                            [bar.symbol_as_returned],
+                            as_of=_session_date(bar),
+                            provider=provider,
+                        )
+                    )
+                except ValueError:
+                    continue
+            for obs in self._observations(bars, more):
+                out[obs.key].append(obs)
+        return out
+
+
+@dataclass
+class DispatchingSink:
+    """One sink for every market: ``job.market`` selects the us / crypto / cn / hk sink.
+
+    A market without a sink is raw-only, never mis-reconciled.
     """
 
     us: CanonicalSink | None = None
     crypto: CanonicalSink | None = None
     cn: CanonicalSink | None = None
+    hk: CanonicalSink | None = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         market = Market(job.market)
-        sink = {Market.US: self.us, Market.CRYPTO: self.crypto, Market.CN: self.cn}.get(market)
+        sink = {
+            Market.US: self.us,
+            Market.CRYPTO: self.crypto,
+            Market.CN: self.cn,
+            Market.HK: self.hk,
+        }.get(market)
         if sink is not None:
             sink.after_fetch(job, bars)
 
@@ -373,6 +488,7 @@ def parquet_canonical_writer(canonical_store: object) -> CanonicalWriter:
                 volume_source=f"{r.provider}:{r.feed}",
                 sources_seen=(r.provider,),
                 generated_at=r.generated_at,
+                currency=r.currency,
             )
             for r in rows
         ]

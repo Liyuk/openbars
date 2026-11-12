@@ -468,14 +468,14 @@ def test_instrument_resolve_across_symbol_mapping_window(backend):
 def test_corporate_actions_roundtrip(backend):
     acts = [
         CorporateAction("us:eq:A", date(2022, 6, 1), CorporateActionKind.SPLIT, "prov_a", ratio=Decimal("4")),
-        CorporateAction("us:eq:A", date(2022, 7, 1), CorporateActionKind.DIVIDEND, "prov_a", amount=Decimal("0.125")),
+        CorporateAction("us:eq:A", date(2022, 7, 1), CorporateActionKind.DIVIDEND, "prov_a", amount=Decimal("0.125"), currency="USD"),
     ]
     backend.instruments.upsert_corporate_actions(acts)
     backend.instruments.upsert_corporate_actions(acts)
     got = backend.instruments.corporate_actions(["us:eq:A"])
-    assert [(a.kind, a.ratio, a.amount) for a in got] == [
-        (CorporateActionKind.SPLIT, Decimal("4"), None),
-        (CorporateActionKind.DIVIDEND, None, Decimal("0.125")),
+    assert [(a.kind, a.ratio, a.amount, a.currency) for a in got] == [
+        (CorporateActionKind.SPLIT, Decimal("4"), None, None),
+        (CorporateActionKind.DIVIDEND, None, Decimal("0.125"), "USD"),
     ]
     table = backend.instruments.corporate_actions_table()
     assert table.column("ratio").to_pylist()[0] == Decimal("4")

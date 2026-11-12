@@ -227,7 +227,7 @@ def split_fraction(ratio: Any) -> tuple[int, int] | None:
     return int(frac.numerator), int(frac.denominator)
 
 
-def action_details(kind: CorporateActionKind | str, *, ratio: Any = None, amount: Any = None) -> dict[str, Any]:
+def action_details(kind: CorporateActionKind | str, *, ratio: Any = None, amount: Any = None, currency: Any = None) -> dict[str, Any]:
     typ = action_type_for(kind, ratio=ratio, amount=amount)
     details: dict[str, Any] = {}
     if typ == "split":
@@ -244,6 +244,13 @@ def action_details(kind: CorporateActionKind | str, *, ratio: Any = None, amount
             details["old_shares_denominator"] = parts[1]
     elif typ == "spin_off" and ratio is not None:
         details["ratio"] = str(ratio)
+    elif typ == "rights":
+        if ratio is not None:
+            details["ratio"] = str(ratio)
+        if amount is not None:
+            details["amount"] = str(amount)
+    if currency:
+        details["currency"] = str(currency).strip().upper()
     return details
 
 
@@ -270,6 +277,8 @@ def kind_from_action_type(action_type: str) -> CorporateActionKind | None:
         return CorporateActionKind.SPINOFF
     if typ == "symbol_change":
         return CorporateActionKind.SYMBOL_CHANGE
+    if typ in {"rights", "rights_issue"}:
+        return CorporateActionKind.RIGHTS
     return None
 
 
@@ -313,8 +322,18 @@ def actions_from_revision(
     if not ids:
         return []
     src = (source or "").strip() or "unknown"
+    rec = _as_json(details) or {}
+    currency = rec.get("currency") if isinstance(rec, dict) else None
     return [
-        CorporateAction(instrument_id=i, ex_date=ex_date, kind=kind, source=src, ratio=ratio, amount=amount)
+        CorporateAction(
+            instrument_id=i,
+            ex_date=ex_date,
+            kind=kind,
+            source=src,
+            ratio=ratio,
+            amount=amount,
+            currency=currency,
+        )
         for i in ids
     ]
 

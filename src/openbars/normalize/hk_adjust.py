@@ -13,15 +13,13 @@ defined ``ratio = new / old``:
   dividend (``kind=DIVIDEND``, ``ratio=(held+bonus)/held``, no cash ``amount``).
   Like US stock dividends, it is applied as split-like **only** when
   ``include_stock_dividends=True`` (see ``hk_adjust_rows``). The default is off
-  and matches the US adjuster; whether HK should default to on is left open in
-  discussion #68, not decided here.
-* **现金分红**: use a ``DIVIDEND`` with ``amount`` and no ``ratio``, same factor
-  ``P/(P+amount)`` as the US path. ``amount`` has no currency field; this module
-  assumes the amount is in the same currency as the bar prices (typically HKD
-  for an XHKG ordinary). Mixing an ADR's USD dividend into HKD bars is out of
-  scope (also #68).
-* **供股** (rights issues) have no ``CorporateActionKind`` yet and are **not**
-  turned into a split factor here.
+  and matches the US adjuster (Discussion #68 default; can be changed later).
+* **现金分红**: use a ``DIVIDEND`` with ``amount``, no ``ratio``, and a
+  ``currency`` (default ``HKD``). Factor is ``P/(P+amount)`` as on the US path,
+  but only when the dividend currency matches the bar currency. An ADR's USD
+  dividend is never applied to HKD bars (Discussion #68 default).
+* **供股** (``hk_rights``): ``kind=RIGHTS``. Recorded only; never used as a
+  price-adjustment factor (Discussion #68 default).
 
 ``hk_adjust_rows`` is a thin wrapper around ``adjust_rows``. It does not invent
 a second formula.
@@ -44,6 +42,7 @@ __all__ = [
     "hk_bonus",
     "hk_cash_dividend",
     "hk_consolidation",
+    "hk_rights",
     "hk_split",
     "share_ratio",
 ]
@@ -129,10 +128,38 @@ def hk_cash_dividend(
     ex_date: date,
     amount: Decimal | int | str,
     source: str,
+    *,
+    currency: str = "HKD",
 ) -> CorporateAction:
-    """Cash dividend per share, same currency as the bar prices (typically HKD)."""
+    """Cash dividend per share. ``currency`` defaults to HKD for an XHKG ordinary."""
     return CorporateAction(
-        instrument_id, ex_date, CorporateActionKind.DIVIDEND, source, amount=amount
+        instrument_id,
+        ex_date,
+        CorporateActionKind.DIVIDEND,
+        source,
+        amount=amount,
+        currency=currency,
+    )
+
+
+def hk_rights(
+    instrument_id: str,
+    ex_date: date,
+    source: str,
+    *,
+    ratio: Decimal | int | str | None = None,
+    amount: Decimal | int | str | None = None,
+    currency: str | None = None,
+) -> CorporateAction:
+    """供股: recorded only; ``adjust_rows`` / ``hk_adjust_rows`` never apply it to prices."""
+    return CorporateAction(
+        instrument_id,
+        ex_date,
+        CorporateActionKind.RIGHTS,
+        source,
+        ratio=ratio,
+        amount=amount,
+        currency=currency,
     )
 
 

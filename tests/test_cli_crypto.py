@@ -207,10 +207,13 @@ def test_policy_version_for_market():
     from openbars.storage.schema import DEFAULT_POLICY_VERSION
 
     assert pv(Market.CRYPTO) == "crypto-daily-v1"
+    assert pv(Market.HK) == "hk-daily-v1"
+    assert pv(None, instrument_ids=["hk:eq:xhkg:00000"]) == "hk-daily-v1"
     assert pv(Market.US) == pv(None) == DEFAULT_POLICY_VERSION == "research-daily-v2"
     assert pv(None, instrument_ids=[BIN]) == "crypto-daily-v1"
     assert pv(Market.CRYPTO, "custom-v9") == "custom-v9"
     assert pv(Market.US, "crypto-daily-v1") == "crypto-daily-v1"
+    assert pv(Market.HK, "research-daily-v2") == "research-daily-v2"
 
 
 def _us_row(day: date, close: str):

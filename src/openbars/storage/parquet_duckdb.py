@@ -33,7 +33,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal
 from pathlib import Path
@@ -60,7 +60,7 @@ from openbars.core.models import (
     SymbolMapping,
 )
 from openbars.normalize.actions import stale_bar_indexes
-from openbars.normalize.adjust import AdjustmentError, adjust_rows, requires_derivation, with_flags
+from openbars.normalize.adjust import AdjustmentError, _row_currency, adjust_rows, requires_derivation, with_flags
 from openbars.normalize.cn_adjust import UNSUPPORTED_CN_ADJUSTMENT, AdjustFactor, adjust_cn_rows
 from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin, select_mappings
 from openbars.orchestrator.jobs import Checkpoint, Job
@@ -797,6 +797,7 @@ class ParquetInstrumentMaster(_ResolveMixin):
                 source=r["source"],
                 ratio=r["ratio"],
                 amount=r["amount"],
+                currency=r.get("currency"),
             )
             for r in self.corporate_actions_table(instrument_ids).to_pylist()
         ]
@@ -900,6 +901,7 @@ def _action_record(a: CorporateAction) -> dict[str, Any]:
         "source": a.source,
         "ratio": dec(a.ratio, "ratio"),
         "amount": dec(a.amount, "amount"),
+        "currency": a.currency,
     }
 
 
@@ -933,6 +935,7 @@ class _StaleProbe(NamedTuple):
 
 _CRYPTO = Market.CRYPTO.value
 _CN = Market.CN.value
+_HK = Market.HK.value
 
 
 class DuckDbBarReader:
@@ -1065,7 +1068,7 @@ class DuckDbBarReader:
             params.append(policy_version_for_market(market, None if auto else policy_version))
         if mode is not None and not derive:
             # crypto has no adjustment basis; CN rows are all stored RAW and handled in Python
-            where.append(f"(adjustment = ? OR market IN ('{_CRYPTO}', '{_CN}'))")
+            where.append(f"(adjustment = ? OR market IN ('{_CRYPTO}', '{_CN}', '{_HK}'))")
             params.append(mode.value)
         if market is not None:
             where.append("market = ?")
@@ -1106,10 +1109,12 @@ class DuckDbBarReader:
             return table
         # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they
         # bypass derivation / stale handling. CN rows are stored RAW and derive QFQ / HFQ from
-        # adjust factors. Both are merged back after the US rows are adjusted.
+        # adjust factors. HK rows are stored RAW and derive SPLIT / SPLIT_DIVIDEND / ALL from
+        # corporate actions. Special markets are merged back after the US rows are adjusted.
         is_crypto = pc.equal(table.column("market"), _CRYPTO)
         is_cn = pc.equal(table.column("market"), _CN)
-        special = pc.or_(is_crypto, is_cn)
+        is_hk = pc.equal(table.column("market"), _HK)
+        special = pc.or_(pc.or_(is_crypto, is_cn), is_hk)
         if not pc.any(special).as_py():
             return self._adjust(table, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
         parts = [table.filter(is_crypto)]
@@ -1118,6 +1123,9 @@ class DuckDbBarReader:
             parts.append(
                 self._adjust_cn(cn, mode, as_of, factor_source, on_missing_factors or on_missing_actions)
             )
+        hk = table.filter(is_hk)
+        if hk.num_rows:
+            parts.append(self._adjust_hk(hk, mode, as_of, end, segments, on_missing_actions))
         rest = table.filter(pc.invert(special))
         if rest.num_rows:
             parts.append(
@@ -1149,6 +1157,54 @@ class DuckDbBarReader:
             rows, factors, mode, as_of=as_of, source=factor_source, on_missing_factors=on_missing_factors
         )
         return canonical_rows_to_table(result.rows)
+
+    def _adjust_hk(
+        self,
+        table: pa.Table,
+        mode: Adjustment | None,
+        as_of: date | None,
+        end: date | None,
+        segments: Sequence[tuple[str, date | None, date | None]],
+        on_missing_actions: str,
+    ) -> pa.Table:
+        """HK rows: stored RAW; ``SPLIT`` / ``SPLIT_DIVIDEND`` / ``ALL`` derive from actions."""
+        from openbars.normalize.hk_adjust import hk_adjust_rows
+
+        if mode in (None, Adjustment.RAW):
+            return table
+        if mode in (Adjustment.QFQ, Adjustment.HFQ):
+            raise AdjustmentError(
+                f"{mode.value} is only derived for A-share (cn-daily-v1) bars", UNSUPPORTED_CN_ADJUSTMENT
+            )
+        ids = sorted(set(table.column("instrument_id").to_pylist()))
+        actions = self.backend.instruments.corporate_actions(ids)
+        currencies: dict[str, str] = {}
+        for iid in ids:
+            inst = self.backend.instruments.get(iid)
+            if inst is not None and inst.currency:
+                currencies[iid] = str(inst.currency).upper()
+        rows = []
+        for row in table_to_rows(table, CanonicalBarRow):
+            cur = _row_currency(row) or currencies.get(row.instrument_id)
+            rows.append(replace(row, currency=cur) if cur and row.currency != cur else row)
+        rows = hk_adjust_rows(rows, actions, mode, as_of=as_of, on_missing_actions=on_missing_actions).rows
+        if mode in (Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) and end is not None:
+            by_id: dict[str, list[tuple[date | None, date | None]]] = defaultdict(list)
+            for iid, lo, hi in segments:
+                by_id[iid].append((lo, hi))
+            rows = [
+                r
+                for r in rows
+                if r.session_date <= end
+                and (
+                    not by_id.get(r.instrument_id)
+                    or any(
+                        (lo is None or r.session_date >= lo) and (hi is None or r.session_date <= hi)
+                        for lo, hi in by_id[r.instrument_id]
+                    )
+                )
+            ]
+        return canonical_rows_to_table(rows)
 
     def _adjust(
         self,

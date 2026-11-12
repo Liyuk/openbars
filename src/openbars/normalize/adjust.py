@@ -120,7 +120,7 @@ class Adjuster(Protocol):
 @dataclass(frozen=True)
 class SkippedAction:
     action: CorporateAction
-    reason: str  # stock_dividend_not_applied | spinoff_not_adjusted | invalid_dividend_amount | invalid_prior_close
+    reason: str  # stock_dividend_not_applied | spinoff_not_adjusted | rights_not_adjusted | currency_mismatch | invalid_dividend_amount | invalid_prior_close
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,28 @@ def _prod(values: Iterable[Decimal]) -> Decimal:
     return out
 
 
+def _row_currency(row: object) -> str | None:
+    cur = getattr(row, "currency", None)
+    if cur:
+        return str(cur).upper()
+    series = getattr(row, "series", None)
+    cur = getattr(series, "currency", None) if series is not None else None
+    if cur:
+        return str(cur).upper()
+    for cap in getattr(row, "capabilities", ()) or ():
+        if not isinstance(cap, str) or not cap.lower().startswith("currency:"):
+            continue
+        token = cap.split(":", 1)[1]
+        if len(token) == 3 and token.isalpha():
+            return token.upper()
+    return None
+
+
+def _instrument_currency(rows: Sequence[Any]) -> str | None:
+    found = {c for c in (_row_currency(r) for r in rows) if c}
+    return next(iter(found)) if len(found) == 1 else None
+
+
 def _is_split_like(a: CorporateAction, include_stock_dividends: bool) -> bool:
     if a.ratio is None:
         return False
@@ -198,6 +220,7 @@ class _Instrument:
     """Per-instrument splits, cash dividends and prior-close lookup."""
 
     def __init__(self, rows: Sequence[Any], actions: Sequence[CorporateAction], include_stock: bool) -> None:
+        self.currency = _instrument_currency(rows)
         self.splits = sorted(
             ((a.ex_date, a.ratio) for a in actions if _is_split_like(a, include_stock)),
             key=lambda x: x[0],
@@ -323,15 +346,29 @@ def adjust_rows(
         for a in acts[iid]:
             if a.kind is CorporateActionKind.SPINOFF:
                 skipped.append(SkippedAction(a, "spinoff_not_adjusted"))
+            elif a.kind is CorporateActionKind.RIGHTS:
+                skipped.append(SkippedAction(a, "rights_not_adjusted"))
             elif a.kind is CorporateActionKind.DIVIDEND and not _is_split_like(a, include_stock_dividends):
                 if a.amount is None:
                     skipped.append(SkippedAction(a, "stock_dividend_not_applied"))
                 elif a.amount <= 0:
                     skipped.append(SkippedAction(a, "invalid_dividend_amount"))
+                elif (
+                    a.currency is not None
+                    and inst.currency is not None
+                    and a.currency != inst.currency
+                ):
+                    skipped.append(SkippedAction(a, "currency_mismatch"))
         factors: list[tuple[date, Decimal]] = []
         if dividend_mode:
             for a in inst.dividends:
                 if as_of is not None and a.ex_date > as_of:
+                    continue
+                if (
+                    a.currency is not None
+                    and inst.currency is not None
+                    and a.currency != inst.currency
+                ):
                     continue
                 p = inst.raw_close_before(a.ex_date)
                 if p is None:

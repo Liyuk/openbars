@@ -693,6 +693,7 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
                 a.instrument_id, a.ex_date, CorporateActionKind(a.kind).value, a.source,
                 None if a.ratio is None else to_decimal(_round_action_value(a.ratio), precision=20, name="ratio"),
                 None if a.amount is None else to_decimal(_round_action_value(a.amount), precision=20, name="amount"),
+                a.currency,
             ]
             for a in actions
         ]
@@ -700,9 +701,9 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
             return
         with self._session() as conn:
             conn.executemany(
-                "INSERT INTO corporate_actions (instrument_id, ex_date, kind, source, ratio, amount) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT (instrument_id, ex_date, kind, source) "
-                "DO UPDATE SET ratio=EXCLUDED.ratio, amount=EXCLUDED.amount",
+                "INSERT INTO corporate_actions (instrument_id, ex_date, kind, source, ratio, amount, currency) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT (instrument_id, ex_date, kind, source) "
+                "DO UPDATE SET ratio=EXCLUDED.ratio, amount=EXCLUDED.amount, currency=EXCLUDED.currency",
                 rows,
             )
 
@@ -717,7 +718,7 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
         return [
             CorporateAction(
                 r["instrument_id"], r["ex_date"], CorporateActionKind(r["kind"]), r["source"],
-                r["ratio"], r["amount"],
+                r["ratio"], r["amount"], currency=r.get("currency"),
             )
             for r in records
         ]
@@ -1422,7 +1423,9 @@ class PgCompatInstrumentMaster(_Guard):
                 iid = self._identity.resolve(
                     conn, action.instrument_id, symbol=symbol, on=action.ex_date,
                 )
-                details = action_details(kind, ratio=action.ratio, amount=action.amount)
+                details = action_details(
+                    kind, ratio=action.ratio, amount=action.amount, currency=action.currency
+                )
                 event_key = action_event_key(typ, iid, action.ex_date)
                 payload = {
                     "instrument_id": iid,
@@ -1431,6 +1434,7 @@ class PgCompatInstrumentMaster(_Guard):
                     "source": action.source,
                     "ratio": None if action.ratio is None else str(action.ratio),
                     "amount": None if action.amount is None else str(action.amount),
+                    "currency": action.currency,
                     "details": details,
                 }
                 payload_hash = hashlib.sha256(

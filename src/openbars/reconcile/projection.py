@@ -148,6 +148,7 @@ class CanonicalSelection:
             capabilities=self.capabilities,
             source_fingerprint=self.source_fingerprint,
             generated_at=generated_at,
+            currency=bar.resolved_series.currency,
         )
 
 

@@ -209,6 +209,8 @@ CORPORATE_ACTIONS_FIELDS = [
     _f("source", pa.string()),
     _f("ratio", PRICE, True),
     _f("amount", PRICE, True),
+    # Additive: older files omit the column; readers use None when missing.
+    _f("currency", pa.string(), True),
 ]
 
 # A-share adjust factors (``ref/adjust_factors.parquet``, Parquet only; additive: a missing file

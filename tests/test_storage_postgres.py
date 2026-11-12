@@ -388,7 +388,7 @@ def test_live_native_identity_tables_ingest_and_resolve(pg_dsn):
         summary = ingest_corporate_actions(
             [
                 CorporateAction("ZZZA", date(2020, 1, 8), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("4")),
-                CorporateAction("ZZZA", date(2020, 1, 20), CorporateActionKind.DIVIDEND, "prov_x", amount=Decimal("0.25")),
+                CorporateAction("ZZZA", date(2020, 1, 20), CorporateActionKind.DIVIDEND, "prov_x", amount=Decimal("0.25"), currency="USD"),
                 CorporateAction("ZZZA", date(2020, 1, 21), CorporateActionKind.SPLIT, "prov_x", ratio=third),
                 CorporateAction("ZZZA", date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("2")),
                 CorporateAction(a, date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("5")),  # id kept
@@ -404,6 +404,7 @@ def test_live_native_identity_tables_ingest_and_resolve(pg_dsn):
         assert not any(isinstance(v, float) for x in got for v in (x.ratio, x.amount))
         assert {x.ratio for x in got if x.ex_date == date(2020, 1, 21)} == {Decimal("0.33333333")}  # as in Parquet
         assert [x.amount for x in m.corporate_actions([b]) if x.amount] == [Decimal("0.25")]
+        assert [x.currency for x in m.corporate_actions([b]) if x.amount] == ["USD"]
         for _ in range(2):  # re-ingest: the unresolved row does not multiply
             ingest_corporate_actions(
                 [CorporateAction("ZZZA", date(2020, 1, 13), CorporateActionKind.SPLIT, "prov_x", ratio=Decimal("2"))], m
