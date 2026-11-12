@@ -80,7 +80,7 @@ def _iso_date(text: str) -> date:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha)")
+    parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha): daily 1d / hourly 1h (日线 / 小时线)")
     parser.add_argument("--version", action="version", version=f"openbars {__version__}")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help=f"config file (default {DEFAULT_CONFIG})")
     parser.add_argument("--data", default=None, help="storage directory (overrides storage.path)")
@@ -107,7 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--recent", type=int, default=20, help="also report the last N sessions (0 = off, default 20)")
     verify.add_argument("--json", default=None, metavar="PATH", help="also write the report as JSON under the data dir (several markets: {\"markets\": {name: report}})")
 
-    plan = sub.add_parser("plan", help="show the jobs and request budget (dry run; --submit to queue them)")
+    plan = sub.add_parser("plan", help="show daily/hourly jobs and request budget / 日线、小时线作业及请求预算 (dry run)")
     common(plan)
     plan.add_argument("--submit", action="store_true", help="write the planned jobs to the state db")
     plan.add_argument("--accept-budget", action="store_true", help="accept a large non-daily request budget")
@@ -123,7 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
         run.add_argument("--accept-budget", action="store_true", help="accept a large non-daily request budget")
         run.add_argument("--lease-ttl", type=float, default=DEFAULT_LEASE_TTL.total_seconds(), help=argparse.SUPPRESS)
 
-    status = sub.add_parser("status", help="job counts by state, dead jobs, checkpoints")
+    status = sub.add_parser("status", help="job counts and raw coverage by interval / 按周期查看作业与原始覆盖")
     common(status)
 
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
@@ -276,6 +276,8 @@ def _print_plan(out: _Out, plan: Plan, state: SqliteStateStore | None, extra_not
     out.line(f"plan: {len(plan)} jobs ({new} new, {len(plan) - new} already queued)")
     for (provider, kind), count in plan.counts().items():
         out.line(f"  {provider:<10} {kind:<9} {count}")
+    for interval in sorted({job.interval.value for job in plan.jobs}):
+        out.line(f"  interval {interval}: {sum(job.interval.value == interval for job in plan.jobs)} jobs")
     out.line("budget (estimated requests, lower-bound duration from quota):")
     if not plan.budget.providers:
         out.line("  none")
@@ -353,6 +355,11 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
     providers = factory(settings, gate)
     notes = skipped_providers(settings, providers)
 
+    from openbars.core.models import Interval, Market
+
+    if Market.US in settings.selection.markets and Interval.H1 in settings.selection.intervals:
+        out.line("note: US 1h bars are stored raw; hourly canonical reconciliation is not available yet")
+
     node = LocalNode(
         providers,
         store=state,
@@ -412,9 +419,21 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
         state = _job_state(_open_backend(settings, root, write=False), db)
     elif not db.exists():
         out.line(f"no state database at {db} (nothing planned yet)")
+        out.line("configured providers: " + (", ".join(sorted(settings.providers)) or "(none)"))
         return EXIT_OK
     else:
         state = SqliteStateStore(db)
+    from openbars.core.models import DateRange
+
+    backend = _open_backend(settings, root, write=False)
+    out.line("raw coverage (observed bar dates; not a completeness guarantee):")
+    for provider in sorted(settings.providers):
+        for market in sorted(settings.selection.markets, key=lambda item: item.value):
+            for interval in sorted(settings.selection.intervals, key=lambda item: item.value):
+                bars = backend.raw.scan(provider, market, interval, DateRange(date.min, date.max))
+                days = [bar.session_date or bar.ts_start.date() for bar in bars]
+                coverage = f"{min(days)}..{max(days)} ({len(days)} bars)" if days else "none"
+                out.line(f"  {provider} {market.value}/{interval.value}: {coverage}")
     counts = state.count_jobs()
     total = sum(counts.values())
     out.line(f"jobs: {total} total")
