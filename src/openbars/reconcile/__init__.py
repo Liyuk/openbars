@@ -2,7 +2,7 @@
 
 from openbars.reconcile.audit import AuditRecord
 from openbars.reconcile.compatibility import SeriesCompatibility, compare_series
-from openbars.reconcile.crypto import CRYPTO_DAILY_V1, reconcile_crypto
+from openbars.reconcile.crypto import CRYPTO_DAILY_V1, policy_version_for_market, reconcile_crypto
 from openbars.reconcile.gaps import BackfillJob, GapReport, KnownGap, detect_gaps
 from openbars.reconcile.overrides import SelectionOverride
 from openbars.reconcile.policy import DEFAULT_POLICY, ReconcilePolicy
@@ -34,6 +34,7 @@ __all__ = [
     "compare_series",
     "detect_gaps",
     "is_priority_source",
+    "policy_version_for_market",
     "project_canonical_bars",
     "reconcile_crypto",
     "source_fingerprint",

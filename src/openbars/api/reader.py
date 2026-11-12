@@ -25,6 +25,7 @@ class BarReader(Protocol):
         delivered, no dividends); other modes, or ``SPLIT`` at an earlier ``as_of``, are derived at
         query time. ``as_of`` is a knowledge date (rows generated later are hidden) and the
         adjustment as-of. A ticker resolves point-in-time per day across ``[start, end]``; an
-        ``instrument_id`` is queried as is.
+        ``instrument_id`` is queried as is. The parquet reader also takes ``market`` and
+        ``policy_version`` (default auto: ``crypto-daily-v1`` for crypto, else ``research-daily-v2``).
         """
         ...
