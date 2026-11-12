@@ -61,6 +61,7 @@ class ProviderInstrument:
     name: str | None = None
     exchange: str | None = None
     active: bool = True
+    native_id: str | None = None  # provider's own instrument id, when it publishes one
 
 
 @dataclass(frozen=True)

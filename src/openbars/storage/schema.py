@@ -172,6 +172,31 @@ SYMBOL_MAPPINGS_FIELDS = [
     _f("valid_to", pa.date32(), True),  # inclusive; null = open ended
 ]
 
+# Identity-layer side tables (ref/*.parquet, small): queue of bars / listing rows that could
+# not be mapped to exactly one instrument, per-(instrument, symbol, provider) last sighting,
+# and the optional link from an instrument id to an upstream integer id.
+UNRESOLVED_FIELDS = [
+    _f("kind", pa.string()),  # "bar" | "listing"
+    _f("reason_code", pa.string()),
+    _f("symbol", pa.string()),
+    _f("provider", pa.string()),
+    _f("market", pa.string()),
+    _f("session_date", pa.date32(), True),
+    _f("detail", pa.string(), True),
+]
+
+SYMBOL_OBSERVATIONS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("symbol", pa.string()),
+    _f("provider", pa.string()),
+    _f("last_observed", pa.date32()),
+]
+
+UPSTREAM_IDS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("upstream_id", pa.int64()),
+]
+
 CORPORATE_ACTIONS_FIELDS = [
     _f("instrument_id", pa.string()),
     _f("ex_date", pa.date32()),
@@ -197,6 +222,9 @@ CANONICAL_BARS_SCHEMA = _schema("canonical_bars", CANONICAL_BARS_FIELDS)
 INSTRUMENTS_SCHEMA = _schema("instruments", INSTRUMENTS_FIELDS)
 SYMBOL_MAPPINGS_SCHEMA = _schema("symbol_mappings", SYMBOL_MAPPINGS_FIELDS)
 CORPORATE_ACTIONS_SCHEMA = _schema("corporate_actions", CORPORATE_ACTIONS_FIELDS)
+UNRESOLVED_SCHEMA = _schema("unresolved", UNRESOLVED_FIELDS)
+SYMBOL_OBSERVATIONS_SCHEMA = _schema("symbol_observations", SYMBOL_OBSERVATIONS_FIELDS)
+UPSTREAM_IDS_SCHEMA = _schema("upstream_ids", UPSTREAM_IDS_FIELDS)
 
 TABLE_SCHEMAS: Mapping[str, pa.Schema] = {
     "raw_bars": RAW_BARS_SCHEMA,
@@ -204,6 +232,14 @@ TABLE_SCHEMAS: Mapping[str, pa.Schema] = {
     "instruments": INSTRUMENTS_SCHEMA,
     "symbol_mappings": SYMBOL_MAPPINGS_SCHEMA,
     "corporate_actions": CORPORATE_ACTIONS_SCHEMA,
+}
+
+# Identity-layer side tables live in ref/ but are not part of the Postgres native
+# schema yet (Parquet + DuckDB catalog only).
+REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
+    "unresolved": UNRESOLVED_SCHEMA,
+    "symbol_observations": SYMBOL_OBSERVATIONS_SCHEMA,
+    "upstream_ids": UPSTREAM_IDS_SCHEMA,
 }
 
 # --- identity / dedup keys ---------------------------------------------------------------

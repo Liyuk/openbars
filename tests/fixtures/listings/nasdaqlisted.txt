@@ -1,0 +1,5 @@
+Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
+ZZZA|Synthetic Alpha Corp. - Common Stock|Q|N|N|100|N|N
+ZZZB|Synthetic Basket Trust ETF|G|N|N|100|Y|N
+TESTX|Synthetic Test Issue|Q|Y|N|100|N|N
+File Creation Time: 0101202400:00|||||||

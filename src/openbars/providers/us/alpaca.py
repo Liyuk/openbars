@@ -50,11 +50,16 @@ from openbars.providers.us.alpaca_time import historical_end_parameter, normaliz
 from openbars.quota.gate import QuotaGate
 from openbars.quota.policy import QuotaPolicy, RateLimit
 
-__all__ = ["AlpacaProvider", "CorporateActionsResult", "historical_end_parameter"]
+__all__ = ["AlpacaProvider", "CorporateActionsResult", "historical_end_parameter", "parse_assets"]
 
 PROVIDER_ID = "alpaca"
 BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
 CORPORATE_ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
+# Trading API assets list: https://docs.alpaca.markets/reference/get-v2-assets
+ASSETS_URL = "https://api.alpaca.markets/v2/assets"
+_EXCHANGE_MIC = {
+    "NASDAQ": "XNAS", "NYSE": "XNYS", "ARCA": "ARCX", "AMEX": "XASE", "BATS": "BATS",
+}
 ENV_KEY_ID = "ALPACA_API_KEY_ID"
 ENV_SECRET_KEY = "ALPACA_API_SECRET_KEY"
 TERMS_URL = "https://alpaca.markets/disclosures"
@@ -122,6 +127,33 @@ def _parse_date(value: Any, field_name: str) -> date:
         return date.fromisoformat(value[:10])
     except ValueError:
         raise _invalid(f"{field_name} is not a valid date") from None
+
+
+def parse_assets(payload: Any) -> list[ProviderInstrument]:
+    """Parse an Alpaca ``/v2/assets`` array into ``ProviderInstrument`` rows."""
+    if not isinstance(payload, list):
+        raise _invalid("assets payload is not an array")
+    out: list[ProviderInstrument] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise _invalid("asset entry is not an object")
+        symbol = item.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise _invalid("asset entry has no symbol")
+        native = item.get("id")
+        exchange = item.get("exchange")
+        out.append(
+            ProviderInstrument(
+                symbol=symbol.strip().upper(),
+                market=Market.US,
+                asset_class=None,
+                name=item.get("name") if isinstance(item.get("name"), str) else None,
+                exchange=_EXCHANGE_MIC.get(exchange) if isinstance(exchange, str) else None,
+                active=item.get("status") == "active",
+                native_id=native if isinstance(native, str) and native else None,
+            )
+        )
+    return out
 
 
 class AlpacaProvider(HttpProviderAdapter):
@@ -207,7 +239,20 @@ class AlpacaProvider(HttpProviderAdapter):
         )
 
     def list_instruments(self, market: Market) -> Iterable[ProviderInstrument]:
-        raise NotImplementedError("instrument listing is not part of the Alpaca adapter yet")
+        """Active US equity assets (``asset_class`` is ``None``: the assets API does not
+        distinguish ETFs from common stock, so rows are symbol + native-id evidence only)."""
+        if market is not Market.US:
+            return []
+        response = self.get(
+            ASSETS_URL,
+            params={"status": "active", "asset_class": "us_equity"},
+            headers=self._headers(),
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise _invalid("assets response is not JSON") from None
+        return parse_assets(payload)
 
     # -- shared request helpers --------------------------------------------------------
     @staticmethod

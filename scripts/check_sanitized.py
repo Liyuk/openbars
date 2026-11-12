@@ -141,6 +141,14 @@ def scan_text(text: str, where: str, hashes: set[str]) -> list[Finding]:
                     continue
                 if rule == "email" and _email_allowed(match.group(1)):
                     continue
+                # URL userinfo (https://user:pw@host) is not an e-mail address.
+                if (
+                    rule == "email"
+                    and match.start()
+                    and line[match.start() - 1] == ":"
+                    and "://" in line[: match.start()]
+                ):
+                    continue
                 findings.append(Finding(where, number, rule))
                 break
         if hashes:

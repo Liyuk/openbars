@@ -114,6 +114,14 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 
 原则：**bar 永远挂在 `instrument_id` 上，不挂在 ticker 上**。provider 返回的 symbol 必须结合 bar 日期经 `InstrumentMaster.resolve(symbol, on=date, provider=…)` 映射；映射不到或歧义时进入 `unresolved` 队列，不写入 canonical。
 
+已知失败模式：ticker 被另一家公司回收后，按 ticker 存的历史会把新公司的 bar 挂到旧公司的 instrument 上。下面的规则（实现在 `openbars.normalize.*`，存储层只做持久化）保证这种情况不发生：
+
+- **稳定 ID**：`<market>:eq:<26 位 ULID 形 id>`，永不复用。已知 share-class FIGI 时 id 由 `sha256("share_class_figi:<FIGI>")` 前 128 位的 Crockford base32 确定性导出，否则是随机 ULID；新建前总是先按外部 id（FIGI / provider-native id）查找，已存在则复用同一个 instrument。`asset_class`（含独立的 `etf`）是属性，不进 id。可用 `upstream_ids` 表记录 `instrument_id` ↔ upstream 整数 id（兼容层用，一对一）。
+- **身份证据**（`normalize.identity`）：只有 share-class FIGI 或 provider-native id 能构成稳定 key；仅 ticker（`symbol_only_evidence`）、仅 CIK（`issuer_only_evidence`）、或只是复述 ticker 的 `symbol:` 兜底 id 都是 `unresolved`，不能创建、改名、回收或质疑任何 instrument。稳定 key 冲突 → `disputed`；单源 → `provisional`；多源互证 → `verified`。`observed_at` / `as_known_at` 必须带时区。
+- **上市清单入库**（`InstrumentDirectory.ingest`，输入为任意 provider 的 `ListingRecord` 快照）：新稳定身份 → 新 instrument + 开放映射（`valid_from` = 上市日，无则首次观测日）；**ticker 回收**（该 symbol 在另一 instrument 上仍有开放映射）→ 旧映射 `valid_to` 关在新上市日前一天，没有上市日则关在旧映射最后一次被观测的日期，两者都定不出来就进 `unresolved`，绝不猜；**改名**（同一稳定身份换 symbol）→ 旧 symbol 映射关闭，新 symbol 在同一 `instrument_id` 上开启；**退市** → 写 `delisted_on` 并关闭开放映射（provider 把“换 ticker”也报成退市时只关旧 symbol 的窗口）。默认股票池为快照中全部普通股 + ETF，额外类型（如 ADR、基金）只来自配置，默认为空；ticker type → `AssetClass` 的映射见 `normalize.security_types`，未列入的类型（优先股、权证等）不会被写成股票。
+- **`resolve` 规则**：只看同市场映射，`valid_to` 含当日；provider 专属映射优先于 `"*"`；同优先级多个 instrument → 歧义 → `None`。日期没被任何窗口覆盖时有一个**唯一历史回退**：该 symbol 历史上只绑定过一个 instrument，且日期不在其最后一个已关闭窗口之后，才返回该 instrument（应对首次观测日晚于真实上市日）；只要曾绑定过两个及以上 instrument（回收），**永远不回退**，未覆盖日期一律 unresolved。
+- **`unresolved` 队列**：映射不到、歧义、或证据冲突的 bar / 清单行写入 `ref/unresolved.parquet`（含 `kind`、`reason_code`、`symbol`、`provider`、`session_date`），`unresolved_count()` 供 `status` 展示；这些 bar 不写入 canonical。`assign_instrument` / `assign_instruments` 是纯函数式的入库助手：解析出 id 的 bar 填上 `instrument_id`，其余留空并入队。
+
 ### 3.3 Bar
 
 ```text

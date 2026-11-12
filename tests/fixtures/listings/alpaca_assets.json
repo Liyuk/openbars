@@ -1,0 +1,5 @@
+[
+  {"id": "00000000-0000-4000-8000-000000000001", "class": "us_equity", "exchange": "NASDAQ", "symbol": "ZZZA", "name": "Synthetic Alpha Corp.", "status": "active", "tradable": true},
+  {"id": "00000000-0000-4000-8000-000000000002", "class": "us_equity", "exchange": "ARCA", "symbol": "zzzb", "name": "Synthetic Basket Trust", "status": "active", "tradable": true},
+  {"id": "00000000-0000-4000-8000-000000000003", "class": "us_equity", "exchange": "OTC", "symbol": "TEST1", "name": "Synthetic Holdings", "status": "inactive", "tradable": false}
+]
