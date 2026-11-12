@@ -37,6 +37,7 @@ from openbars.reconcile.reconciler import MemoryReconciler, ReconcileResult
 from openbars.reconcile.store import CanonicalRowStore
 
 POLICY_VERSION_CRYPTO_DAILY_V1 = "crypto-daily-v1"
+POLICY_VERSION_CN_DAILY_V1 = "cn-daily-v1"  # A-share: stored RAW, QFQ/HFQ derived (normalize.cn_adjust)
 DEFAULT_POLICY_VERSION = "research-daily-v2"  # US default; same value as ``storage.schema``
 
 CRYPTO_PRICE_TOLERANCE_PCT = Decimal("1")
@@ -84,14 +85,20 @@ def policy_version_for_market(
     """The canonical ``policy_version`` a read should use.
 
     ``override`` always wins. Otherwise ``Market.CRYPTO`` (or any ``crypto:`` instrument id)
-    -> ``crypto-daily-v1``; everything else (US, unknown) -> ``research-daily-v2``.
+    -> ``crypto-daily-v1``; ``Market.CN`` (or any ``cn:`` id) -> ``cn-daily-v1``; everything
+    else (US, unknown) -> ``research-daily-v2``.
     """
     if override:
         return override
     if market is not None and Market(market) is Market.CRYPTO:
         return POLICY_VERSION_CRYPTO_DAILY_V1
-    if any(instrument_venue(i) is not None for i in instrument_ids):
+    if market is not None and Market(market) is Market.CN:
+        return POLICY_VERSION_CN_DAILY_V1
+    ids = list(instrument_ids)
+    if any(instrument_venue(i) is not None for i in ids):
         return POLICY_VERSION_CRYPTO_DAILY_V1
+    if any(i.startswith("cn:") for i in ids):
+        return POLICY_VERSION_CN_DAILY_V1
     return DEFAULT_POLICY_VERSION
 
 
@@ -181,6 +188,7 @@ def reconcile_crypto(
 __all__ = [
     "CRYPTO_DAILY_V1",
     "CryptoReconcileResult",
+    "POLICY_VERSION_CN_DAILY_V1",
     "POLICY_VERSION_CRYPTO_DAILY_V1",
     "REJECT_CROSS_VENUE",
     "REJECT_OTHER_INSTRUMENT",

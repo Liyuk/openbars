@@ -7,6 +7,7 @@ Layout (``root`` is normally ``./data``; see docs/architecture.md section 10)::
     canonical/market=M/interval=I/year=Y[/month=MM]/part-*.parquet
     ref/{instruments,symbol_mappings,corporate_actions}.parquet
     ref/{unresolved,symbol_observations,upstream_ids}.parquet   identity layer side tables
+    ref/adjust_factors.parquet                             A-share adjust factors (optional file)
     raw-archive/provider=P/...                             JSON response sidecars
     audit/                                                 reserved
     openbars.duckdb                                        views only; ``rebuild_catalog()``
@@ -59,7 +60,8 @@ from openbars.core.models import (
     SymbolMapping,
 )
 from openbars.normalize.actions import stale_bar_indexes
-from openbars.normalize.adjust import adjust_rows, requires_derivation, with_flags
+from openbars.normalize.adjust import AdjustmentError, adjust_rows, requires_derivation, with_flags
+from openbars.normalize.cn_adjust import UNSUPPORTED_CN_ADJUSTMENT, AdjustFactor, adjust_cn_rows
 from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin, select_mappings
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
@@ -78,6 +80,7 @@ from openbars.storage.rows import (
     to_decimal,
 )
 from openbars.storage.schema import (
+    ADJUST_FACTORS_SCHEMA,
     AUTO_POLICY_VERSION,
     CANONICAL_BARS_SCHEMA,
     CANONICAL_KEY_SQL,
@@ -93,6 +96,7 @@ from openbars.storage.schema import (
     SYMBOL_MAPPINGS_SCHEMA,
     SYMBOL_OBSERVATIONS_SCHEMA,
     REF_IDENTITY_SCHEMAS,
+    REF_PARQUET_SCHEMAS,
     TABLE_SCHEMAS,
     UNRESOLVED_SCHEMA,
     UPSTREAM_IDS_SCHEMA,
@@ -106,6 +110,10 @@ CATALOG_FILE = "openbars.duckdb"
 LOCK_FILE = ".lock"
 PART_GLOB = "part-*.parquet"
 
+_REF_VIEWS = (
+    "instruments", "symbol_mappings", "corporate_actions", "unresolved", "symbol_observations",
+    "upstream_ids", "adjust_factors",
+)
 _BASENAME_RE = r"[^/\\]+$"  # SQL literal (no escapes); RE2 sees [^/\\]
 
 
@@ -783,6 +791,45 @@ class ParquetInstrumentMaster(_ResolveMixin):
             for r in self.corporate_actions_table(instrument_ids).to_pylist()
         ]
 
+    # -- A-share adjust factors (ref/adjust_factors.parquet; a missing file is empty) --
+
+    def upsert_adjust_factors(self, factors: Iterable[AdjustFactor]) -> int:
+        """Merge factor rows by ``(instrument_id, source, effective_from)`` (new wins).
+
+        Returns the number of incoming rows. Factors are stored as ``decimal(20,8)``; values with
+        more fractional digits are rounded half-even to 8 digits (BaoStock sends 6). Other
+        sources' rows for the same instrument are kept side by side, never merged.
+        """
+        new = [_factor_record(f) for f in factors]
+        if not new:
+            return 0
+        key = lambda r: (r["instrument_id"], r["source"], r["effective_from"])  # noqa: E731
+        with self.backend.lock:
+            merged = {key(r): r for r in self._read_records("adjust_factors")}
+            merged.update((key(r), r) for r in new)
+            self._write_records("adjust_factors", ADJUST_FACTORS_SCHEMA, [merged[k] for k in sorted(merged)])
+        return len(new)
+
+    def adjust_factors(
+        self, instrument_ids: Sequence[str] | None = None, source: str | None = None
+    ) -> list[AdjustFactor]:
+        """``AdjustFactor`` rows (exact ``Decimal``), optionally for some instruments / one source."""
+        wanted = None if instrument_ids is None else set(instrument_ids)
+        return [
+            AdjustFactor(
+                instrument_id=r["instrument_id"],
+                effective_from=r["effective_from"],
+                source=r["source"],
+                method=r["method"],
+                fore_adjust_factor=r["fore_adjust_factor"],
+                back_adjust_factor=r["back_adjust_factor"],
+                adjust_factor=r["adjust_factor"],
+                symbol=r["symbol"],
+            )
+            for r in self._read_records("adjust_factors")
+            if (wanted is None or r["instrument_id"] in wanted) and (source is None or r["source"] == source)
+        ]
+
 
 def _instrument_record(i: Instrument) -> dict[str, Any]:
     return {
@@ -846,6 +893,22 @@ def _action_record(a: CorporateAction) -> dict[str, Any]:
     }
 
 
+def _factor_record(f: AdjustFactor) -> dict[str, Any]:
+    def dec(v: Decimal, name: str) -> Decimal:
+        return to_decimal(v.quantize(Decimal(1).scaleb(-8), rounding=ROUND_HALF_EVEN, context=_ACTION_CTX), precision=20, name=name)
+
+    return {
+        "instrument_id": f.instrument_id,
+        "source": f.source,
+        "method": f.method,
+        "effective_from": f.effective_from,
+        "fore_adjust_factor": dec(f.fore_adjust_factor, "fore_adjust_factor"),
+        "back_adjust_factor": dec(f.back_adjust_factor, "back_adjust_factor"),
+        "adjust_factor": dec(f.adjust_factor, "adjust_factor"),
+        "symbol": f.symbol,
+    }
+
+
 # --- reader ------------------------------------------------------------------------------
 
 
@@ -859,6 +922,7 @@ class _StaleProbe(NamedTuple):
 
 
 _CRYPTO = Market.CRYPTO.value
+_CN = Market.CN.value
 
 
 class DuckDbBarReader:
@@ -886,8 +950,19 @@ class DuckDbBarReader:
     the same text on two venues returns both venue instruments (never merged).
 
     **Policy.** ``policy_version`` defaults to ``"auto"``: ``market=CRYPTO`` or ``crypto:`` ids
-    read ``crypto-daily-v1``, everything else ``research-daily-v2`` (without ``market``, each
-    requested id gets its own). An explicit version always wins.
+    read ``crypto-daily-v1``, ``market=CN`` or ``cn:`` ids ``cn-daily-v1``, everything else
+    ``research-daily-v2`` (without ``market``, each requested id gets its own). An explicit
+    version always wins.
+
+    **A-share (``cn-daily-v1``).** ``market=CN`` or ``cn:`` ids read ``cn-daily-v1``, which stores
+    unadjusted ``RAW`` bars. The default ``adjustment=SPLIT`` means "the stored series" for those
+    rows (= ``RAW``, values verbatim); an explicit ``RAW`` is the same. ``QFQ`` / ``HFQ`` are
+    derived with ``normalize.cn_adjust`` from ``ref/adjust_factors.parquet`` (``as_of`` is the
+    factor knowledge date; ``factor_source`` picks one source, else the only one present).
+    Instruments without factor rows raise ``AdjustmentError`` (``missing_adjust_factors``) or,
+    with ``on_missing_factors="flag"`` (default: ``on_missing_actions``), come back as stored RAW
+    with ``ADJUSTMENT_UNVERIFIED``. US corporate actions are never applied to CN rows; ``QFQ`` /
+    ``HFQ`` on a US row is an ``AdjustmentError``.
 
     **Missing corporate actions.** Deriving a basis other than the stored one for an
     instrument with no corporate-action rows cannot be done honestly (no rows is not "never
@@ -956,6 +1031,8 @@ class DuckDbBarReader:
         policy_version: str = AUTO_POLICY_VERSION,
         stored_adjustment: Adjustment = Adjustment.SPLIT,
         on_missing_actions: str = "raise",
+        on_missing_factors: str | None = None,
+        factor_source: str | None = None,
     ) -> pa.Table:
         mode = None if adjustment is None else Adjustment(adjustment)
         stored = Adjustment(stored_adjustment)
@@ -977,13 +1054,14 @@ class DuckDbBarReader:
             where.append("policy_version = ?")
             params.append(policy_version_for_market(market, None if auto else policy_version))
         if mode is not None and not derive:
-            where.append(f"(adjustment = ? OR market = '{_CRYPTO}')")  # crypto has no adjustment basis
+            # crypto has no adjustment basis; CN rows are all stored RAW and handled in Python
+            where.append(f"(adjustment = ? OR market IN ('{_CRYPTO}', '{_CN}'))")
             params.append(mode.value)
         if market is not None:
             where.append("market = ?")
             params.append(Market(market).value)
-        # dividend modes load past ``end`` (US only); crypto rows are never adjusted and keep the bound
-        upper = f"(market <> '{_CRYPTO}' OR session_date <= ?)" if past_end else "session_date <= ?"
+        # dividend modes load past ``end`` (US only); crypto / CN rows are never adjusted that way
+        upper = f"(market NOT IN ('{_CRYPTO}', '{_CN}') OR session_date <= ?)" if past_end else "session_date <= ?"
         if symbols_or_ids:
             clauses = []
             for iid, lo, hi in segments:
@@ -1017,19 +1095,50 @@ class DuckDbBarReader:
         if table.num_rows == 0:
             return table
         # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they
-        # bypass derivation / stale handling and are merged back after the US rows are adjusted.
+        # bypass derivation / stale handling. CN rows are stored RAW and derive QFQ / HFQ from
+        # adjust factors. Both are merged back after the US rows are adjusted.
         is_crypto = pc.equal(table.column("market"), _CRYPTO)
-        if not pc.any(is_crypto).as_py():
+        is_cn = pc.equal(table.column("market"), _CN)
+        special = pc.or_(is_crypto, is_cn)
+        if not pc.any(special).as_py():
             return self._adjust(table, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
-        crypto = table.filter(is_crypto)
-        rest = table.filter(pc.invert(is_crypto))
-        if rest.num_rows == 0:
-            return crypto
-        rest = self._adjust(rest, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
-        if rest.num_rows == 0:
-            return crypto
-        merged = pa.concat_tables([crypto, rest.cast(crypto.schema)])
+        parts = [table.filter(is_crypto)]
+        cn = table.filter(is_cn)
+        if cn.num_rows:
+            parts.append(
+                self._adjust_cn(cn, mode, as_of, factor_source, on_missing_factors or on_missing_actions)
+            )
+        rest = table.filter(pc.invert(special))
+        if rest.num_rows:
+            parts.append(
+                self._adjust(rest, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
+            )
+        parts = [p for p in parts if p.num_rows]
+        if not parts:
+            return table.schema.empty_table()
+        if len(parts) == 1:
+            return parts[0]
+        merged = pa.concat_tables([p.cast(parts[0].schema) for p in parts])
         return merged.sort_by([("session_date", "ascending"), ("instrument_id", "ascending"), ("ts_start", "ascending")])
+
+    def _adjust_cn(
+        self,
+        table: pa.Table,
+        mode: Adjustment | None,
+        as_of: date | None,
+        factor_source: str | None,
+        on_missing_factors: str,
+    ) -> pa.Table:
+        """A-share rows: stored RAW is the default read; ``QFQ`` / ``HFQ`` derive from factors."""
+        if mode in (None, Adjustment.RAW, Adjustment.SPLIT):  # SPLIT default = the stored series
+            return table
+        ids = sorted(set(table.column("instrument_id").to_pylist()))
+        factors = self.backend.instruments.adjust_factors(ids)
+        rows = table_to_rows(table, CanonicalBarRow)
+        result = adjust_cn_rows(
+            rows, factors, mode, as_of=as_of, source=factor_source, on_missing_factors=on_missing_factors
+        )
+        return canonical_rows_to_table(result.rows)
 
     def _adjust(
         self,
@@ -1043,6 +1152,10 @@ class DuckDbBarReader:
         segments: Sequence[tuple[str, date | None, date | None]],
         on_missing_actions: str,
     ) -> pa.Table:
+        if mode in (Adjustment.QFQ, Adjustment.HFQ):
+            raise AdjustmentError(
+                f"{mode.value} is only derived for A-share (cn-daily-v1) bars", UNSUPPORTED_CN_ADJUSTMENT
+            )
         ids = sorted(set(table.column("instrument_id").to_pylist()))
         must_derive = derive or (mode is Adjustment.SPLIT and as_of is not None)
         actions = self.backend.instruments.corporate_actions(ids)
@@ -1175,7 +1288,7 @@ class ParquetDuckDbBackend:
         sig = {"root": str(self.root.resolve()), "schema_version": str(SCHEMA_VERSION)}
         for spec in LAYERS.values():
             sig[spec.name] = str(self._layer_files_exist(spec))
-        for name in ("instruments", "symbol_mappings", "corporate_actions", "unresolved", "symbol_observations", "upstream_ids"):
+        for name in _REF_VIEWS:
             sig[name] = str(self._ref_exists(name))
         return sig
 
@@ -1195,13 +1308,13 @@ class ParquetDuckDbBackend:
                         con.execute(f"CREATE VIEW {spec.view} AS {_dedup_sql(spec, source)}")
                     else:
                         con.execute(f"CREATE VIEW {spec.view} AS {_empty_select(spec.schema)}")
-                for name in ("instruments", "symbol_mappings", "corporate_actions", "unresolved", "symbol_observations", "upstream_ids"):
+                for name in _REF_VIEWS:
                     con.execute(f"DROP VIEW IF EXISTS {name}")
                     if sig[name] == "True":
                         path = (self.ref_dir / f"{name}.parquet").resolve().as_posix()
                         con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet({_sql_str(path)})")
                     else:
-                        con.execute(f"CREATE VIEW {name} AS {_empty_select({**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS}[name])}")
+                        con.execute(f"CREATE VIEW {name} AS {_empty_select({**TABLE_SCHEMAS, **REF_IDENTITY_SCHEMAS, **REF_PARQUET_SCHEMAS}[name])}")
                 con.execute("DROP TABLE IF EXISTS catalog_meta")
                 con.execute("CREATE TABLE catalog_meta (key VARCHAR PRIMARY KEY, value VARCHAR)")
                 con.executemany("INSERT INTO catalog_meta VALUES (?, ?)", list(sig.items()))
@@ -1228,7 +1341,7 @@ class ParquetDuckDbBackend:
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> pa.Table:
         """Run SQL against the catalog views (``raw_bars``, ``canonical_bars``, ``instruments``,
-        ``symbol_mappings``, ``corporate_actions``, plus the identity side tables) and return a ``pyarrow.Table``."""
+        ``symbol_mappings``, ``corporate_actions``, ``adjust_factors``, plus the identity side tables) and return a ``pyarrow.Table``."""
         self.check_schema_versions()
         self.ensure_catalog()
         con = duckdb.connect(str(self.catalog_path), read_only=True)

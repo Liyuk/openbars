@@ -14,6 +14,8 @@ version: 1
 # 选择市场（多选）: us | crypto | cn | hk
 # 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
 # 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
+# 改用 A 股：`markets: [cn]`，启用 providers.baostock，并在 universe.cn.symbols 写代码
+# （如 sh.600000 / 600000.SH；裸 6 位代码会被跳过）即可 plan / run（默认仍关闭）。
 markets: [us]
 
 # 选择粒度（多选）: 1d (default) | 1h | 30m | 15m | 5m | 1m
@@ -37,6 +39,11 @@ universe:
   # 日线按 UTC 00:00 切日，周末也是交易日；两家交易所是两个独立 instrument，不合并。
   # crypto:
   #   symbols: [TESTUSDT, TEST-USDT]
+  # A 股（markets 含 cn 时生效）。symbol 写 BaoStock 原生 `sh.600000` / `sz.000001`，或 `600000.SH`
+  # 等写法（同一只股票的多种写法只规划一次）；日期按上海时间，交易日取沪深日历（XSHG），
+  # 收盘 15:00 后再等 30 分钟才认为当日可取。
+  # cn:
+  #   symbols: [sh.600000, sz.000001]
 
 storage:
   backend: parquet_duckdb  # parquet_duckdb | postgres
@@ -83,6 +90,8 @@ providers:
     base_url: https://api.exchange.coinbase.com
   # A 股日线（BaoStock，无需 token）。默认关闭；需安装可选依赖 `pip install openbars[baostock]`。
   # 存不复权价（adjustflag=3），并取复权因子与停牌字段；限额无官方数字，默认保守。仅限个人本地使用。
+  # 启用后 `markets: [cn]` + `universe.cn.symbols` 即可：原始行含停牌占位，规范层（cn-daily-v1）
+  # 存 RAW、不写停牌占位、标记涨跌停；前/后复权（qfq / hfq）在读取时由复权因子派生。
   baostock:
     enabled: false
 

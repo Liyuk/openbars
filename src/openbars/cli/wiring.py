@@ -71,12 +71,14 @@ def build_providers(settings: Settings, gate: QuotaGate | None = None) -> dict[s
 
 
 def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN201
-    """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``) + crypto (``crypto-daily-v1``).
+    """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``), crypto (``crypto-daily-v1``)
+    and A-share (``cn-daily-v1``: RAW, suspensions dropped, limit flags, adjust factors).
 
     ``backend`` is a ``ParquetDuckDbBackend`` (``raw``, ``canonical``, ``instruments``). Drop-in
     for the sink ``run`` builds inline: ``LocalNode(..., sink=make_sink(backend, providers))``.
     """
     from openbars.orchestrator.finalize import (
+        CnCanonicalSink,
         CryptoReconcilingSink,
         DispatchingSink,
         ReconcilingSink,
@@ -91,6 +93,12 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
         us=ReconcilingSink(MemoryReconciler(), writer, raw=raw, other_providers=others),
         crypto=CryptoReconcilingSink(
             backend.instruments, writer, raw=raw, other_providers=others  # type: ignore[attr-defined]
+        ),
+        cn=CnCanonicalSink(
+            backend.instruments,  # type: ignore[attr-defined]
+            backend.canonical.upsert_rows,  # type: ignore[attr-defined]
+            providers=providers,
+            factor_store=backend.instruments,  # type: ignore[attr-defined]
         ),
     )
 

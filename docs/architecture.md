@@ -91,8 +91,8 @@ flowchart TD
 - `AssetClass`: `equity` | `etf` | `adr` | `index` | `crypto_spot` | `fund` …
 - `Interval`: `1d` | `1h` | `30m` | `15m` | `5m` | `1m`（带 `is_intraday`、`duration`）
 - `Session`: `regular` | `pre` | `post` | `continuous`（加密）
-- `Adjustment`: `raw` | `split` | `split_dividend` | `all`（A 股另有 `qfq`/`hfq` 视作查询时派生）
-- `QualityFlag`（位集合）：`divergent`（跨源超容差）、`spike_suspect`（无公司行动的大幅跳变）、`volume_missing`、`single_source`、`filled_from_fallback`、`stale`（源晚到/未更新；读取路径上还表示“抓取时间早于之后某次拆股，价格口径可能过时”，见 §3.4）、`gap`、`revised`（源修订过历史）、`adjustment_unverified`（该 instrument 没有任何公司行动行，无法验证/派生所请求的复权口径，bar 仍保持落库口径，见 §3.4）
+- `Adjustment`: `raw` | `split` | `split_dividend` | `all` | `qfq` | `hfq`（`qfq` 前复权 / `hfq` 后复权只用于 A 股 `cn-daily-v1`：落库存 `raw`，查询时由复权因子派生，见 §3.4）
+- `QualityFlag`（位集合）：`divergent`（跨源超容差）、`spike_suspect`（无公司行动的大幅跳变）、`volume_missing`、`single_source`、`filled_from_fallback`、`stale`（源晚到/未更新；读取路径上还表示“抓取时间早于之后某次拆股，价格口径可能过时”，见 §3.4）、`gap`、`revised`（源修订过历史）、`adjustment_unverified`（该 instrument 没有任何公司行动行 / A 股复权因子行，无法验证/派生所请求的复权口径，bar 仍保持落库口径，见 §3.4）、`limit_up` / `limit_down`（A 股收盘价恰在当日涨停 / 跌停价，§3.4.4）、`suspended`（A 股停牌日，`tradestatus=0`，§3.4.4）；三个 A 股标记不改变 `quality_status`（仍是 `complete`，flags 是事实来源）
 
 ### 3.2 Instrument 与代码映射（解决 ticker 重用串台）
 
@@ -188,9 +188,10 @@ Bar
 - **查询时复权**（`normalize.adjust`，纯函数 + `QueryTimeAdjuster`）：v0.1 默认 profile `research-daily-v2` 落库的就是按源交付的拆股复权序列（向最新一次拆股回溯复权，不含分红），所以 **`SPLIT` 且无 `as_of` = 落库值，原样返回**。其余口径由落库 bar + 公司行动派生（精确 `Decimal`，最后统一舍入到 8 位）：`RAW` = 撤销 `ex_date` 晚于该 bar `session_date` 的全部拆股（价格 × ratio，成交量 ÷ ratio）；`SPLIT` + `as_of=D` = 撤销 `ex_date > D` 的拆股，使序列呈现 D 当天所见；`SPLIT_DIVIDEND` / `ALL` = 先得 `SPLIT` 结果，再对每笔现金分红把 `session_date < ex_date` 的价格乘以 `P/(P+amount)`（`P` = 除息日前最后一个交易日的**未复权**收盘价，即落库收盘价撤销其后拆股；`ex_date ≤ as_of` 才生效，多笔连乘，成交量不变）。若落库的是 `RAW`（后续可选 profile），`RAW` 为 no-op，`SPLIT` 则按 `ex_date ≤ as_of` 的拆股向下复权。股票红利（`kind=dividend` 带 `ratio`、无 `amount`）含义因源而异，默认不当拆股处理（`include_stock_dividends=True` 才按拆股），拆分/分拆（spinoff）不做复权；任何未能应用的行动都不会悄悄改 bar，而是列在 `AdjustResult.skipped`（带原因）里。`adjustment_as_of` 不同的行混在同一窗口里 = `adjustment_cutoff_mismatch`（`AdjustmentError`）。
 - **入库时把 ticker 映射为稳定 id**：Alpaca / Massive 的 `fetch_corporate_actions` 在 provider 边界按“源返回”原样把 ticker 放在 `CorporateAction.instrument_id`；映射发生在**入库**（`normalize.instruments.ingest_corporate_actions`，其下 `assign_corporate_actions` 只做映射与入队）。`instrument_id` 已是主数据中已知的 id 则原样保留；否则当作 ticker，以 `resolve(symbol, on=ex_date, provider=action.source, market=…)` 解析（规则同 bar：provider 专属映射优先于 `"*"`、歧义 → unresolved、唯一历史回退只在该日期适用时生效）。解析出的行动 upsert 进公司行动表；映射不到/歧义的**不写**公司行动表，进 `unresolved` 队列（`kind="corporate_action"`），并返回摘要（resolved / unresolved / already_mapped / reason_code 计数）。之后能解析的事件会在下次入库时写入并移出队列。`upsert_corporate_actions` 本身仍是对已映射 id 的普通写入。
 - **缺公司行动时的 RAW / 派生口径**：没有任何公司行动行 ≠ 这只股票从未拆股，所以对**没有任何公司行动行**的 instrument，派生非落库口径（`RAW`、从落库 `SPLIT` 派生 `SPLIT_DIVIDEND` / `ALL`，或从落库 `RAW` 派生 `SPLIT` 等）**绝不把落库价格改标签**：默认抛 `AdjustmentError`（`reason_code="missing_corporate_actions"`）；显式 `on_missing_actions="flag"` 时改为原样返回落库口径的 bar（`adjustment` 仍是 `split`，不声称是 RAW）并打 `QualityFlag.ADJUSTMENT_UNVERIFIED`（`quality_status` 不变，仍以 flags 为准）。instrument 有公司行动行但某 bar 之后没有拆股 = 已核对过，scale = 1，`RAW` 照常有效。`SPLIT` + `as_of` 且该 instrument 没有任何公司行动行时，价格仍是落库的 `SPLIT`（不改标签、不报错），但 as-of 声称无法核实，打上 `ADJUSTMENT_UNVERIFIED`。默认 `SPLIT` 读（无 `as_of`、快路径）不受影响。
+- **A 股前/后复权（`normalize.cn_adjust`，#60）**：A 股走独立 profile `cn-daily-v1`，**落库只存不复权（`RAW`）**，绝不落 `qfq` / `hfq`（前复权每出现一次新除权日就要改写整段历史）。`QFQ` / `HFQ` 在查询时由落库 `RAW` bar + 复权因子表派生，不从因子“反推”出 `CorporateAction` 行。因子是独立的 Parquet 表 `ref/adjust_factors.parquet`（见 §10.3；缺文件 = 空表，`SCHEMA_VERSION` 不变），记录因子来源 `source` 与方法 `method`（BaoStock：`baostock` / `pct_return` 涨跌幅复权法），键 `(instrument_id, source, effective_from)`。公式用**稳定的累计后复权因子** `back_adjust_factor`：会话 `d` 的因子 `f(d)` 取 `effective_from ≤ d`（且 `as_of` 给定时 `≤ as_of`）的最后一个事件，没有则为 1（首个事件之前的会话）；`HFQ = raw × f(d)`，`QFQ = raw × f(d) / ref`，`ref` 为 `as_of`（缺省取最新）时可见的最后一个事件的 `back_adjust_factor`（没有可见事件则为 1，此时 `QFQ = HFQ = raw`）。`open/high/low/close` 及行上有的 `vwap` / `preclose` 一并缩放，统一舍入到 8 位（同 `adjust.py`）；`volume` / `amount` 保持成交口径、不缩放；结果行的 `adjustment` 标为所请求的口径。**同一 instrument 不混用不同来源的因子**：不传 `source` 且存在多个来源 → `AdjustmentError(ambiguous_factor_source)`，传 `source=` 则只用该来源。**缺因子**：与缺公司行动同一策略——instrument 一行因子都没有时，默认 `AdjustmentError(missing_adjust_factors)`，`on_missing_factors="flag"` 则原样返回落库 `RAW`（`adjustment` 仍是 `raw`）并打 `ADJUSTMENT_UNVERIFIED`；有至少一行因子 = 已核对过，首个事件前的会话因子为 1。`SPLIT_DIVIDEND` / `ALL` 对 A 股不适用（`unsupported_cn_adjustment`），美股行请求 `QFQ` / `HFQ` 同样报错。
 - **读取路径的 STALE 标记**：`DuckDbBarReader.bars` 在 instrument 有拆股行时对落库 bar 运行 `find_stale_after_split` 的逐 bar 版本（`stale_bar_indexes`），把 `QualityFlag.STALE` OR 到“抓取早于之后某次拆股”的 bar 上（只标记，不重抓、不调 API；派生口径的行保持同样的标记）。
 - **拆股后旧历史检测**（`normalize.actions.find_stale_after_split`，纯函数）：落库 bar 的 `session_date` 早于某次拆股 `ex_date`，且抓取时间（`generated_at` / `ingested_at`）也早于该 `ex_date`，则该段未经此次拆股复权，需在新价格基准下重抓；返回按（instrument, 拆股）聚合的区间。`raw` bar 不会过期；没有抓取时间的 bar 默认按过期报告（`treat_unknown_as_stale=False` 可关闭）。
-- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1、§3.4.2
+- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1–§3.4.3、§3.4.5
 
 #### 3.4.1 XNYS 日历（`openbars.calendars.xnys`）
 
@@ -222,9 +223,18 @@ Bar
 - **午休**：连续竞价 09:30–11:30、13:00–15:00。`session_bounds(day)` 在交易日返回**两段** UTC `(open, close)`（11:30–13:00 上海时间为空档），非交易日返回空元组。`trading_session(s)` 的 `opens_at` / `closes_at` 为当日 09:30 与 15:00（Asia/Shanghai，带时区），不只是上午段。
 - `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（15:00 收盘后再等待 N 分钟）。`openbars.calendars` 以 `cn_` 前缀导出函数（`cn_sessions` 等），避免与 XNYS 同名函数冲突。
 - 覆盖范围：库内节假日只记录到固定年份（4.13.x 为 2026），超出时库抛 `ValueError`，不会静默当作无假日；需升级依赖来扩展。
-- **规划器尚未接入**：`Market.CN` 仍产生 `no_calendar` 并跳过，不会在没有 provider 时凭空生成作业。
+- **规划器已接入（#62）**：`Market.CN` 不再产生 `no_calendar`：`_sessions` 用本日历、`_today` 取 `Asia/Shanghai`、`latest_ready_session(now, CN)` = `latest_completed_session(now, 30)`（15:00 收盘后再等 30 分钟）。没有声明 `cn`/`1d` 的 provider 时仍记 `no_provider`，不会凭空生成作业；仍无日历的市场（如 HK）继续 `no_calendar`。详见 §3.5.3 与 §3.4.4。
 
-#### 3.4.4 港股日历（`openbars.calendars.hk`）
+#### 3.4.4 A 股涨跌停与停牌标记（`openbars.normalize.cn_quality`，#61）
+
+- **板块**取自 6 位代码（保留前导 0；`sh.688001` / `688001.SH` / `cn:eq:xshg:688001` 都可）：`688`/`689` 科创板；`300`/`301` 创业板；`600`/`601`/`603`/`605`/`000`/`001`/`002`/`003` 主板（`002` 中小板按主板 ±10%）。北交所（`8xxxxx` / `43xxxx` / `92xxxx`）及 B 股等其它代码不在范围内：`board_of_code` 抛 `ValueError`，不虚构北交所限价，`flags_for_cn_bar` 对这类代码不打 `LIMIT_*`。
+- **涨跌幅比例**（`limit_ratio`）：主板 ±10%；创业板自 2020-08-24（含）起 ±20%，此前 ±10%；科创板自开板日 2019-07-22 起 ±20%；ST（`is_st`，BaoStock `isST=1`）按 issue 取 ±5%（单一比例 `st_ratio`，不按日期/板块建模：科创板/创业板改革后的 ST、以及主板风险警示股后来的调整未建模，只在 ±5% 适用时传 `is_st`）。**价格**以未复权前收盘（或除权参考价）计算，`limit_prices(preclose, ratio)` 得 `(涨停价, 跌停价)`，**精确到 0.01 元、`ROUND_HALF_UP`**（不是银行家舍入；`Decimal`，不经 float）。
+- **新股前期**按**上市时**的规则（`listed_on`，上市日算第 1 个交易日，交易日取沪深日历而非自然日）：科创板前 5 个交易日不设涨跌幅；创业板 2020-08-24 起上市的前 5 日不设，更早上市的仅第 1 日特殊（无常规涨跌幅）、之后 ±10%；主板 2023-04-10 起上市的前 5 日不设，更早上市的仅第 1 日特殊、之后 ±10%。无涨跌幅的时段 `limit_ratio` 返回 `None`，**无论涨跌多大都不打 `LIMIT_*`**；`listed_on` 未知则不假设新股窗口。
+- **参考价**优先 `RawBar.extra["preclose"]`（源给的未复权/除权参考价），否则取上一交易日未复权收盘。
+- **标记**（`flags_for_cn_bar(bar, *, previous_close, listed_on, sessions, is_st)` 与按序列的 `flags_for_cn_series`）：`SUSPENDED` = `extra["tradestatus"]` 为 `0`/`"0"`（停牌占位行成交量/成交额可为 0、OHLC = 前收）；未停牌且收盘价**恰等于**涨停价 → `LIMIT_UP`，恰等于跌停价 → `LIMIT_DOWN`（差 0.01 不标）；停牌行不会同时是 `LIMIT_*`。三个标记只进 `flags`，`quality_status` 保持 `complete`。
+- **raw 与 canonical**：raw 层保留停牌占位行（BaoStock 适配器如此）；canonical 默认**不为停牌日写占位 bar**（日历上的空洞 + 质量标记）。缺失日判断 `missing_sessions(calendar_sessions, present_session_dates, suspended_session_dates)`：停牌日**不算缺失**，不在日历里的日期（节假日）更不算，只有“日历内、无 bar、非停牌”的才是缺失。停牌事实要在 canonical 丢掉该 bar 之后仍可查，所以从 **raw** 收集：`suspended_dates(raw_bars)` 优先读 `extra["tradestatus"]`；Parquet raw 层不存 `extra`，读回的 raw 行没有这个字段时退回到停牌占位行的特征——成交量为 0。（本版不建专门的标记表。）
+
+#### 3.4.5 港股日历（`openbars.calendars.hk`）
 
 设计见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)（issue #69）。
 
@@ -270,7 +280,7 @@ QuotaPolicy
 - 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
 - **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
 - `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`），并按 `baseAsset` / `quoteAsset`（去空白；缺失或空白为 `None`）填充 `base_asset` / `quote_asset`；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。`normalize.crypto_pairs.listing_from_provider_instrument(row, provider=…, venue=None)` 把此类行转成 `CryptoPairListing`（缺 base/quote 抛 `ValueError`，`venue` 缺省取 `row.exchange`），CLI 写路径（`run` / `plan --submit`）会自动调用并入库（见 §3.2.1）；dry-run `plan` 不调用。无公司行动。
-- **编排器接入（#44）**：`markets: [crypto]` 时 `plan` / `run` 生成并执行加密日线任务。规划器按市场分派日历：`Market.US` → XNYS，`Market.CRYPTO` → `CryptoCalendar`（`latest_ready_session(now, market=CRYPTO)` = 已收盘满 30 分钟的最近 UTC 日，周末也出任务）；其它市场仍记 `no_calendar` 并跳过。声明 `crypto`/`1d` 的已启用 provider 参与；yfinance 只是美股回退，不参与。Binance、Coinbase 均为 `PER_SYMBOL`，且**每个 symbol 只发给方言匹配的 provider**：未注入交易对主数据时按启发式——含 `-` 的是 Coinbase product id，`[A-Z0-9]+` 的是 Binance symbol；`DefaultPlanner(instruments=master)` 注入主数据后改为只在 `resolve(symbol, provider=…, market=CRYPTO)` 命中时才规划。宁可跳过一个 symbol，也不产生一个必然失败的任务。两家交易所永不合并为一个任务或一个 instrument。配置只需 `markets: [crypto]`、启用 `providers.binance` / `providers.coinbase`（无 API key）、`universe.crypto.symbols`；`openbars verify` 仍只面向美股。**写路径自动入库交易对（#51）**：`run` / `plan --submit` 先列出并入库交易对再规划，规划器因此改走 `resolve`；master 为空且列表失败时回退启发式。dry-run `plan` 不入库。
+- **编排器接入（#44）**：`markets: [crypto]` 时 `plan` / `run` 生成并执行加密日线任务。规划器按市场分派日历：`Market.US` → XNYS，`Market.CRYPTO` → `CryptoCalendar`（`latest_ready_session(now, market=CRYPTO)` = 已收盘满 30 分钟的最近 UTC 日，周末也出任务）；`Market.CN` 见 §3.5.3（沪深日历）；其它市场仍记 `no_calendar` 并跳过。声明 `crypto`/`1d` 的已启用 provider 参与；yfinance 只是美股回退，不参与。Binance、Coinbase 均为 `PER_SYMBOL`，且**每个 symbol 只发给方言匹配的 provider**：未注入交易对主数据时按启发式——含 `-` 的是 Coinbase product id，`[A-Z0-9]+` 的是 Binance symbol；`DefaultPlanner(instruments=master)` 注入主数据后改为只在 `resolve(symbol, provider=…, market=CRYPTO)` 命中时才规划。宁可跳过一个 symbol，也不产生一个必然失败的任务。两家交易所永不合并为一个任务或一个 instrument。配置只需 `markets: [crypto]`、启用 `providers.binance` / `providers.coinbase`（无 API key）、`universe.crypto.symbols`；`openbars verify` 仍只面向美股。**写路径自动入库交易对（#51）**：`run` / `plan --submit` 先列出并入库交易对再规划，规划器因此改走 `resolve`；master 为空且列表失败时回退启发式。dry-run `plan` 不入库。
 
 #### 3.5.2 Coinbase Exchange 日线（`openbars.providers.crypto.coinbase`）
 
@@ -287,7 +297,7 @@ QuotaPolicy
 
 设计讨论：[#54](https://github.com/Liyuk/openbars/discussions/54)。
 
-- **默认存不复权价**：`query_history_k_data_plus` 固定 `adjustflag="3"`（不复权），永不请求 1/2；来源标识 `baostock/ashare/raw`（常量 `BAOSTOCK_ASHARE_RAW`，不属于美股 `KNOWN_SOURCES`），口径 `raw / none / regular / as_traded`，币种 `CNY`。前/后复权留给查询时派生（#60），本版不做；涨跌停标记（#61）也不在本版。
+- **默认存不复权价**：`query_history_k_data_plus` 固定 `adjustflag="3"`（不复权），永不请求 1/2；来源标识 `baostock/ashare/raw`（常量 `BAOSTOCK_ASHARE_RAW`，不属于美股 `KNOWN_SOURCES`），口径 `raw / none / regular / as_traded`，币种 `CNY`。前/后复权在查询时由落库 `raw` bar + 复权因子派生（#60，见 §3.4）；涨跌停 / 停牌标记见 §3.4.4（#61）。
 - **同时取复权因子与停牌字段**：`fetch_adjust_factors(request)` 调 `query_adjust_factor`，返回 `BaoStockAdjustFactor`（`code`、`divid_operate_date`、`fore/back_adjust_factor`、`adjust_factor` 均为 `Decimal`，`source="baostock"`、`method="pct_return"` 涨跌幅复权法）；窗口内无事件返回 `[]`。官方默认起点是 2015-01-01，窗口起点太晚会漏掉更早的因子，需要完整历史时请由调用方传入上市日或 `1990-01-01`。`preclose`、`tradestatus`、`isST`、`pctChg`、`amount`、`turn` 写入 `RawBar.extra`；**停牌行（`tradestatus=0`）保留在 raw 中**，成交量/成交额可为 0。
 - **可选依赖，不需要 key**：`pip install openbars[baostock]`（匿名登录，`secret_values()` 为空）。模块导入不依赖该包，仅默认客户端在取数时懒加载；未安装抛不可重试的 `baostock_not_installed`。BaoStock 是 login + socket 协议而非 HTTP，适配器通过可注入的小客户端（login / logout / 查询）工作，测试用假客户端，默认无网络。默认客户端登录时设 10 秒 socket 超时，每次取数“登录 → 一次查询 → 登出”，**不做循环重试**，失败映射为 `provider_unavailable`（网络类，可重试标记）/ `provider_rejected_request`（参数类）。
 - **symbol** 用 BaoStock 原生写法 `sh.600000` / `sz.000001`；`600000.SH` 等写法经 `normalize.cn_instruments` 归一，裸 6 位代码拒绝。`PER_SYMBOL`，每次一个 symbol；`ts_start` 为该交易日 `00:00 Asia/Shanghai`，价格与成交量以字符串转 `Decimal`，不经 float。
@@ -295,7 +305,10 @@ QuotaPolicy
 - **条款**：PyPI 包为 BSD，但官网声明未经书面许可不得复制、传播或商用；`personal_only=True`、`redistribution_allowed=False`，openbars 只做本地存储。
 - `list_instruments(Market.CN, day=None)` 包装 `query_all_stock`（一次调用，只留 A 股股票，跳过指数/基金），不生成 `instrument_id`（见 §3.2 CN 规则）。
 - **冒烟**：`tests/test_baostock_public_smoke.py` 仅在 `OPENBARS_BAOSTOCK_SMOKE=1` 时运行，一只股票两个交易日、只尝试一次、无重试；海外网络常连不上，此时 skip。只写 pytest `tmp_path`，不入库。
-- `config.example.yaml` 中 `providers.baostock` 默认 `enabled: false`；编排器接入 CN 市场不在本版范围。
+- `config.example.yaml` 中 `providers.baostock` 默认 `enabled: false`。
+- **编排器接入（#62）**：`markets: [cn]`、启用 `providers.baostock`、`universe.cn.symbols`（如 `sh.600000`）即可 `plan` / `run`（无需 instrument 主数据）。规划器与加密一样：无整市场（Massive）路径、无 yfinance 回退，所有声明 `cn`/`1d` 的已启用 provider 参与（BaoStock 为 `PER_SYMBOL`）；日期取 `Asia/Shanghai`，只规划沪深日历（XSHG）上的交易日，`latest_ready_session` = 15:00 收盘 + 30 分钟。symbol 必须是 `normalize_cn_symbol` 认得的写法（`sh.600000` / `600000.SH` …，同一只股票的多种写法只规划一次）；裸 6 位代码等无法识别的写法跳过并记 `no_symbols` 备注，不规划任务。覆盖判断同时认配置写法与 BaoStock 原生写法（`sh.600000`），换一种写法不会重复拉取。
+- **落库（`CnCanonicalSink`）**：`DispatchingSink(cn=…)` 把 `job.market = CN` 的日线交给它，**不走美股 XNYS 对账器**；没有 `cn=` 的 `DispatchingSink` 对 CN 只保留 raw。流程：用 `bar.instrument_id` / 主数据解析 / 确定性的 `cn_instrument_id(*normalize_cn_symbol(symbol))`（第 1 代 id）得到 `instrument_id`，首次出现时由 `ensure_cn_instruments`（`openbars.normalize.cn_ingest`）写入 `Instrument(market=CN, asset_class=EQUITY, currency=CNY)` 与 `baostock` 原生写法 + 通用 `sh.600000` / `600000.SH` 映射（只做首次 upsert，不复用已退役 id）；**丢弃停牌日**（不写占位，成交量为 0 但未停牌的交易日保留）；按 §3.4.4 附加 `LIMIT_UP` / `LIMIT_DOWN`；写 `adjustment=raw`、`policy_version=cn-daily-v1`、`session=regular`、`selection_reason=primary_source`（单源投影）。`observation_from_raw` 要求有成交量，所以 CN 不走它。`cli.wiring.make_sink` 已接好 `cn=`。
+- **复权因子入库**：`CnCanonicalSink` 带 `factor_store` 时，写完 canonical 后对每个 symbol 调 provider 的 `fetch_adjust_factors`，用 `normalize.cn_adjust.from_baostock` 转成 `AdjustFactor`（`source=baostock`、`method=pct_return`）并 upsert 到 `ref/adjust_factors.parquet`，这样 `run` 之后即可读 `QFQ` / `HFQ`。**窗口默认是作业窗口**（日增量作业常常取不到任何除权事件）；BaoStock 因子是自上市累计的，窗口起点太晚会漏掉更早的除权日，想要完整历史请设 `factor_start`（上市日或 `1990-01-01`，每个 symbol 每个作业多一次请求），或直接用长窗口 backfill / 自行 upsert。因子抓取失败不会让作业失败（bar 已写入），记入 `CnCanonicalSink.factor_errors`。不生成 `CorporateAction`。
 
 ### 3.6 Job / Checkpoint
 
@@ -431,6 +444,7 @@ data/
   raw/provider=…/market=…/interval=5m/year=2024/month=03/part-*.parquet   # 日内粒度多一层 month
   canonical/market=us/interval=1d/year=2024/part-*.parquet
   ref/instruments.parquet, symbol_mappings.parquet, corporate_actions.parquet, calendars/   # instruments 含加密交易对（§3.2.1）
+  ref/adjust_factors.parquet       # A 股复权因子（可选，缺文件 = 空表；§3.4、§10.3）
   raw-archive/provider=…/market=…/interval=…/<window>/<request_digest>-<content_digest>.json
   audit/reconcile/…, known_gaps.parquet     # 预留
   openbars.duckdb                  # 只含视图与 catalog_meta，可随时重建
@@ -453,7 +467,7 @@ data/
 
 - 价格 `decimal128(20,8)`，成交量 `decimal128(28,8)`（Parquet / DuckDB `DECIMAL` / Postgres `NUMERIC` 一致），内存中用 `Decimal`，**不经过二进制 float 往返**。
 - `core.models` 的 `Bar / RawBar / CanonicalBar` 价格与成交量已是 `Decimal`。存储层摄入：`Decimal` / `str` / `int` **不做静默舍入**，小数位或总位数超出列精度直接报错；若仍传入 `float`，则用 `Decimal(str(value))`（最短 repr）再量化到 8 位小数。读取侧 `scan` / `scan_rows` / `scan_table` 均返回精确 `Decimal` 或 Arrow decimal，不经二进制 float 往返。日线字段声明以 `openbars.core.schema` 为准，存储层在其上补充分区键（`market`）、`session`、`flags`、`price_source` 等实现列（见 §10.3、§10.7）。
-- 模型没有的字段不改模型，而是放在存储行映射里：`RawBar.extra` 的键 `instrument_id / session_date / adjustment / price_basis / adjustment_scope / adjustment_as_of / session_semantics / currency / volume_basis / revision / vwap / trade_count`（未知键忽略）；`market` 取自 `RawBatch.request.market`；`session_date` 缺省为 `ts_start` 的 UTC 日期（normalizer 应提供交易所本地交易日）。规范层 `CanonicalBar` 的 `market` 取自 instrument id 前缀（`us:eq:…`）或 instrument master；`policy_version`（默认 `research-daily-v2`）、`selection_reason`（默认 `unspecified`）、`capabilities`、`source_fingerprint`（默认由键与 OHLCV 的 SHA-256 生成）为 `upsert` 的参数，`quality_status` 由 `QualityFlag` 推导（`divergent` > `spike_suspect` > `volume_missing` > `complete`；`stale` / `adjustment_unverified` 只体现在 `flags` 列，不改变状态，flags 是事实来源）。时间戳必须带时区（naive 一律拒绝）。
+- 模型没有的字段不改模型，而是放在存储行映射里：`RawBar.extra` 的键 `instrument_id / session_date / adjustment / price_basis / adjustment_scope / adjustment_as_of / session_semantics / currency / volume_basis / revision / vwap / trade_count`（未知键忽略）；`market` 取自 `RawBatch.request.market`；`session_date` 取 `extra["session_date"]`，否则取 `RawBar.session_date`（A 股 bar 从上海 00:00 开始，UTC 日期是前一天），再否则缺省为 `ts_start` 的 UTC 日期（normalizer 应提供交易所本地交易日）。规范层 `CanonicalBar` 的 `market` 取自 instrument id 前缀（`us:eq:…`）或 instrument master；`policy_version`（默认 `research-daily-v2`）、`selection_reason`（默认 `unspecified`）、`capabilities`、`source_fingerprint`（默认由键与 OHLCV 的 SHA-256 生成）为 `upsert` 的参数，`quality_status` 由 `QualityFlag` 推导（`divergent` > `spike_suspect` > `volume_missing` > `complete`；`stale` / `adjustment_unverified` 只体现在 `flags` 列，不改变状态，flags 是事实来源）。时间戳必须带时区（naive 一律拒绝）。
 - 校验：写入前检查 OHLCV 不变量（价格 > 0、`low ≤ open/close ≤ high`、成交量 ≥ 0），与 upstream 一致；raw 可用 `validate=False` 照原样归档。
 
 ### 10.3 Schema v1
@@ -489,14 +503,14 @@ data/
 
 唯一键：`(instrument_id, interval, policy_version, 时间)`，`1d` 时间为 `session_date`，即 `(instrument_id, session_date, interval, policy_version)`（upstream 是 `(instrument_id, session_date, policy_version)`，这里为将来的日内粒度加入 `interval`；日内以 `ts_start` 取代 `session_date`，否则同一交易日的多根 bar 会互相覆盖）。
 
-**`ref/`**：`instruments`（`instrument_id, market, asset_class, currency, name, exchange, listed_on, delisted_on, external_ids map<string,string>`，键 `instrument_id`）；`symbol_mappings`（`instrument_id, provider, symbol, valid_from, valid_to`，键 `(instrument_id, provider, symbol, valid_from)`，`valid_to` 含当日）；`corporate_actions`（`instrument_id, ex_date, kind, source, ratio decimal(20,8), amount decimal(20,8)`，键 `(instrument_id, ex_date, kind, source)`）。ref 表很小，每次 upsert 合并后整文件原子重写。`resolve(symbol, on, provider, market)`：按 `valid_from ≤ on ≤ valid_to` 与 instrument 的市场过滤；provider 专属映射优先于 `"*"`；同一优先级命中多个不同 instrument 视为歧义返回 `None`。
+**`ref/`**：`instruments`（`instrument_id, market, asset_class, currency, name, exchange, listed_on, delisted_on, external_ids map<string,string>`，键 `instrument_id`）；`symbol_mappings`（`instrument_id, provider, symbol, valid_from, valid_to`，键 `(instrument_id, provider, symbol, valid_from)`，`valid_to` 含当日）；`corporate_actions`（`instrument_id, ex_date, kind, source, ratio decimal(20,8), amount decimal(20,8)`，键 `(instrument_id, ex_date, kind, source)`）。`adjust_factors`（A 股复权因子，仅 Parquet、不进 Postgres；`instrument_id, source, method, effective_from, fore_adjust_factor, back_adjust_factor, adjust_factor decimal(20,8), symbol 可空`，键 `(instrument_id, source, effective_from)`；**新增表，缺文件 = 空表，`SCHEMA_VERSION` 不变**；DuckDB 视图 `adjust_factors`；API：`ParquetInstrumentMaster.upsert_adjust_factors(...)` / `adjust_factors(instrument_ids=None, source=None)`）。ref 表很小，每次 upsert 合并后整文件原子重写。`resolve(symbol, on, provider, market)`：按 `valid_from ≤ on ≤ valid_to` 与 instrument 的市场过滤；provider 专属映射优先于 `"*"`；同一优先级命中多个不同 instrument 视为歧义返回 `None`。
 
 **`state.db`（SQLite）**：`schema_meta`、`jobs`（`job_id` 主键；window 拆为 `window_start/end`，`instruments` 为 JSON 数组）、`checkpoints`（`job_id` 主键）、`fetch_log`（主键 `(provider, fetch_id)`；`market, interval, window_start/end, status(started|ok|empty|partial|error), artifact_ref, row_count, error_code, error_message, started_at, finished_at, job_id`）。
 
 ### 10.4 DuckDB 目录与读取
 
 - `openbars.duckdb` 只含视图（`raw_bars`、`canonical_bars`、`instruments`、`symbol_mappings`、`corporate_actions`）与 `catalog_meta`；视图对 `raw/**/part-*.parquet` 取 glob 并套用 §10.1 的去重规则，因此永远只看到完整文件。`rebuild_catalog()` 删除并重建全部视图；`query()` 在目录缺失、数据目录被移动或某层首次出现文件时自动重建。
-- `DuckDbBarReader.bars(...)` 返回 `pyarrow.Table`（精确 decimal），支持整个市场的一年日线查询（`symbols_or_ids` 为空即全市场）。**复权**：请求口径等于落库口径（`stored_adjustment`，`research-daily-v2` 为 `SPLIT`）且无需撤销时走快路径，直接过滤已存的 `adjustment` 列（落库值原样）；`RAW` / `SPLIT_DIVIDEND` / `ALL`，或 `SPLIT` 且 `as_of` 之后还有拆股时，读取落库 bar + 公司行动并交给 `normalize.adjust` 派生（见 §3.4）；分红口径会越过 `end` 加载后续交易日（算前收盘）再裁剪回查询窗口。`adjustment=None` 不过滤。派生时 instrument 没有任何公司行动行 → 默认抛 `AdjustmentError(missing_corporate_actions)`，`on_missing_actions="flag"` 则返回落库口径并打 `ADJUSTMENT_UNVERIFIED`；`SPLIT` + `as_of` 且无公司行动行时不报错，返回落库价并打 `ADJUSTMENT_UNVERIFIED`（as-of 声称未核实）。instrument 有拆股行时，抓取早于拆股的 bar 另打 `STALE`（见 §3.4）。
+- `DuckDbBarReader.bars(...)` 返回 `pyarrow.Table`（精确 decimal），支持整个市场的一年日线查询（`symbols_or_ids` 为空即全市场）。**复权**：请求口径等于落库口径（`stored_adjustment`，`research-daily-v2` 为 `SPLIT`）且无需撤销时走快路径，直接过滤已存的 `adjustment` 列（落库值原样）；`RAW` / `SPLIT_DIVIDEND` / `ALL`，或 `SPLIT` 且 `as_of` 之后还有拆股时，读取落库 bar + 公司行动并交给 `normalize.adjust` 派生（见 §3.4）；分红口径会越过 `end` 加载后续交易日（算前收盘）再裁剪回查询窗口。`adjustment=None` 不过滤。派生时 instrument 没有任何公司行动行 → 默认抛 `AdjustmentError(missing_corporate_actions)`，`on_missing_actions="flag"` 则返回落库口径并打 `ADJUSTMENT_UNVERIFIED`；`SPLIT` + `as_of` 且无公司行动行时不报错，返回落库价并打 `ADJUSTMENT_UNVERIFIED`（as-of 声称未核实）。instrument 有拆股行时，抓取早于拆股的 bar 另打 `STALE`（见 §3.4）。**A 股（`cn-daily-v1`）**：`market=CN` 或 `cn:` id 自动选 `cn-daily-v1`，落库口径是 `RAW`；默认 `adjustment=SPLIT` 在这些行上表示“读落库序列”（= `RAW`，值原样），显式 `RAW` 同；`QFQ` / `HFQ` 读取落库 bar + `ref/adjust_factors.parquet` 并交给 `normalize.cn_adjust` 派生（`as_of` 既隐藏 `generated_at` 晚于它的行，也是因子的知识日期；`factor_source=` 指定因子来源，缺省取唯一来源）。缺因子：默认 `AdjustmentError(missing_adjust_factors)`，`on_missing_factors="flag"`（缺省沿用 `on_missing_actions`）则返回落库 `RAW` 并打 `ADJUSTMENT_UNVERIFIED`。A 股行绝不套用美股公司行动；`SPLIT_DIVIDEND` / `ALL` 对 A 股报 `unsupported_cn_adjustment`。
 - **`as_of` 有两层含义**：（1）知识日期：`generated_at` 晚于 `as_of` 的行不可见；（2）派生复权时它就是复权的 as-of 日期（`ex_date ≤ as_of` 的行动生效，之后的拆股被撤销）。
 - **代码按日解析，覆盖整个查询窗口**：传入 `instrument_id` 原样查询；传入 ticker 时，对该 symbol 所有与 `[start, end]`（缺省 = 无界）有交集的映射（通用 `"*"` 映射，同市场、`valid_to` 含当日，歧义与唯一历史回退规则同 `resolve`）各展开为 `(instrument_id, 起, 止)` 区间，查询条件为 `(instrument_id = A AND session_date BETWEEN …) OR (instrument_id = B AND …)`。因此 ticker 被回收时，同一窗口内每家公司只返回其持有该 ticker 的那些日子的 bar，两家互不混合，ticker 指向别处（空档）的日子没有 bar。不再用 `end or today` 对整个查询做一次性解析。
 - 原始响应归档（`RawArchive.write`）：内容摘要（SHA-256）、`license_tag`（必填）、脱敏后的请求参数（键名含 `api_key / apikey / secret / token / password / authorization / credential` 的值替换为 `[REDACTED]`，并掩码字符串里的 `key=value` 形式凭据）；文件名由请求摘要与内容摘要决定，相同输入得到相同路径，重复写入是 no-op；同名但内容不同（摘要碰撞/被篡改）抛 `RawArchiveCollisionError`；原子写入（临时文件 + fsync + 独占 `link`）。响应正文原样保存。
@@ -591,7 +605,7 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 | 会话 | 交易所会话日（XNYS），非交易日 bar 拒收；当日会话收盘后等待可配置分钟数才视为完成 |
 | 失效通知 | 每个 policy 一行版本水位 + 按日期的水位表，供下游缓存失效 |
 
-加密日线见 §11.2.1，使用独立的 `policy_version`，美股 profile 不用于加密。
+加密日线见 §11.2.1，使用独立的 `policy_version`，美股 profile 不用于加密。A 股日线使用独立的 `policy_version = "cn-daily-v1"`（§11.2.2），同样不套用美股 profile。
 
 `policy_version` 是口径的版本号：任何改变选数结果的规则修改都必须换新版本号（如 `openbars-daily-v1`），不得静默改写 `research-daily-v2` 的语义。
 
@@ -612,6 +626,14 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 - **编排器接入**：`run` 的落库由 `orchestrator.finalize` 完成。`CryptoReconcilingSink` 对 `job.market = CRYPTO` 的 bar：缺 `instrument_id` 时用 `master.resolve(symbol, on=session_date, provider=bar.provider, market=CRYPTO)` 解析，**解析不到的只保留 raw，不写 canonical**；按 `instrument_id` 分组后调用 `reconcile_crypto`（绝不使用 `research-daily-v2`），Coinbase 观测因 `reject_cross_venue` 不会填补或佐证 Binance instrument。`DispatchingSink(us=…, crypto=…)` 按 `job.market` 选 sink，使调用方仍只传一个 sink；`ReconcilingSink`（XNYS）遇到加密任务只留 raw。canonical 行的 `policy_version = crypto-daily-v1`，CLI `run` 现通过 `cli.wiring.make_sink(backend, providers)` 构造 `DispatchingSink`（美股 `ReconcilingSink`/XNYS + 加密 `CryptoReconcilingSink`），`markets: [crypto]` 即写 raw + canonical；美股任务仍走美股对账口径。`openbars verify` 不使用加密口径。
 - **读路径（#51）**：`policy_version_for_market(market, override=None, *, instrument_ids=())`（`openbars.reconcile.crypto`，并由 `openbars.reconcile` 导出）：`override` 优先；`Market.CRYPTO` 或 `crypto:` id → `crypto-daily-v1`；其余 → `research-daily-v2`。`DuckDbBarReader.bars` 的 `policy_version` 默认为 `"auto"`（`storage.schema.AUTO_POLICY_VERSION`）：`market=CRYPTO` 或所请求 id 为加密 id 时读 `crypto-daily-v1`，其它（含省略参数的美股调用）仍读 `research-daily-v2`；未给 `market` 时按每个 id 各自选口径，可混读；显式传入的字符串永远优先。`scan_table(..., policy_version=None)`（不过滤）的语义不变。加密 canonical 不含复权基础，读路径对其行不做复权推导，也不受 `adjustment` 参数影响。
 - **ticker 解析**：加密映射只有 provider 专属（`binance` / `coinbase`），不写通用 `"*"`。读取时对加密市场，ticker 除通用映射外还会通过其各 provider 专属映射解析，因此 `bars(["TESTUSDT"], market=CRYPTO)`（或不给 `market`，由 master 推断）返回对应交易对的 `crypto-daily-v1` 行；同一文本若出现在两个 venue，则两个 venue 的 instrument 都会返回（不合并）。美股的 ticker 解析不变。Postgres 读取器未改。
+
+#### 11.2.2 A 股日线口径 `cn-daily-v1`
+
+> 编号 §11.2.2 同样是为了不打乱既有引用。`research-daily-v2` 是美股口径，A 股走独立的 `policy_version = "cn-daily-v1"`（常量 `POLICY_VERSION_CN_DAILY_V1`，`openbars.reconcile.crypto`，由 `openbars.reconcile` 导出）。
+
+- **落库口径**：不复权 `RAW`（`baostock/ashare/raw`，`raw / none / regular / as_traded`，币种 CNY）；`session=regular`，会话日取沪深日历。`QFQ` / `HFQ` 永不落库，读取时由复权因子派生（§3.4）。
+- **单源投影**：目前只有 BaoStock，`CnCanonicalSink` 直接把 raw 投影成 canonical 行（`selection_reason=primary_source`），不经过任何对账器；停牌日不写 bar、涨跌停打标记（§3.4.4、§3.5.3）。
+- **读路径**：`policy_version_for_market(market, override=None, *, instrument_ids=())`：`override` 优先；`Market.CRYPTO` 或 `crypto:` id → `crypto-daily-v1`；`Market.CN` 或 `cn:` id → `cn-daily-v1`；其余 → `research-daily-v2`。
 
 ### 11.3 PG 兼容策略
 
@@ -651,7 +673,7 @@ src/openbars/
   quota/         policy.py · gate.py
   providers/     base.py · registry.py · (us/alpaca … · crypto/binance · crypto/coinbase 实现随 issue 加入)
   raw/           store.py · archive.py
-  normalize/     instruments.py · crypto_pairs.py · adjust.py · actions.py · normalizer.py · …
+  normalize/     instruments.py · crypto_pairs.py · cn_instruments.py · cn_ingest.py · cn_adjust.py · cn_quality.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py
   storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py
   api/           reader.py · http.py

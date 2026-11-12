@@ -23,9 +23,12 @@ class BarReader(Protocol):
 
         ``adjustment=SPLIT`` (default) is the stored ``research-daily-v2`` series (split-adjusted as
         delivered, no dividends); other modes, or ``SPLIT`` at an earlier ``as_of``, are derived at
-        query time. ``as_of`` is a knowledge date (rows generated later are hidden) and the
-        adjustment as-of. A ticker resolves point-in-time per day across ``[start, end]``; an
-        ``instrument_id`` is queried as is. The parquet reader also takes ``market`` and
-        ``policy_version`` (default auto: ``crypto-daily-v1`` for crypto, else ``research-daily-v2``).
+        query time. A-share series (``cn-daily-v1``) are stored unadjusted: the default read returns
+        the stored ``RAW`` series and ``QFQ`` / ``HFQ`` are derived from the stored adjust factors
+        (``normalize.cn_adjust``). ``as_of`` is a knowledge date (rows generated later are hidden)
+        and the adjustment as-of. A ticker resolves point-in-time per day across ``[start, end]``;
+        an ``instrument_id`` is queried as is. The parquet reader also takes ``market`` and
+        ``policy_version`` (default auto: ``crypto-daily-v1`` for crypto, ``cn-daily-v1`` for CN,
+        else ``research-daily-v2``).
         """
         ...

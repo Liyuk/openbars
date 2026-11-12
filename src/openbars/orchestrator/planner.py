@@ -17,6 +17,14 @@ fallback routing are US-only; every crypto provider that declares ``crypto``/``1
 but a symbol is only sent to a provider whose symbol dialect it matches (see
 ``crypto_symbol_for_provider``), so Coinbase product ids never reach Binance or vice versa.
 
+A-share (``Market.CN``) uses the XSHG calendar (``openbars.calendars.cn``; XSHE is an alias): only
+exchange sessions are planned (weekends and holidays never are), dates are Asia/Shanghai, and the
+latest ready session is the last one whose 15:00 close is at least 30 minutes past. Routing is like
+crypto: no whole-market and no yfinance path; every enabled provider that declares ``cn``/``1d``
+takes part (BaoStock is ``PER_SYMBOL``). A CN symbol must be a spelling ``normalize_cn_symbol``
+accepts (``sh.600000``, ``600000.SH``, ...); bare 6-digit codes and anything else are skipped with a
+note (never planned), and two spellings of one stock plan once. No instrument master is needed.
+
 Priorities (lower runs first): latest-session daily jobs 0-10, other primary backfill
 20-40, fallback 60-80.
 """
@@ -32,10 +40,12 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from openbars.calendars import cn as cn_calendar
 from openbars.calendars import crypto as crypto_calendar
 from openbars.calendars import xnys
 from openbars.config.schema import Selection
 from openbars.core.models import DateRange, Interval, Market
+from openbars.normalize.cn_instruments import normalize_cn_symbol
 from openbars.normalize.instruments import InstrumentMaster
 from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
@@ -50,6 +60,8 @@ FALLBACK_PROVIDERS = frozenset({"yfinance"})
 MAX_WINDOW_DAYS = 366  # bounded history window per multi-symbol job
 BUDGET_ACCEPT_THRESHOLD = timedelta(hours=1)
 REGULAR_SESSION_MINUTES = 390
+CN_COMPLETION_WAIT_MINUTES = 30  # Asia/Shanghai 15:00 close + 30
+_CN_NATIVE_PREFIX = {"xshg": "sh", "xshe": "sz"}
 
 PRIORITY_DAILY_WHOLE_MARKET = 0
 PRIORITY_DAILY_MULTI = 5
@@ -241,12 +253,15 @@ def latest_ready_session(now: datetime, market: Market = Market.US) -> date | No
     """Latest ready session of ``market``.
 
     US: latest XNYS session strictly before the New York date of ``now``. Crypto: latest UTC
-    day that closed at least ``CRYPTO_COMPLETION_WAIT_MINUTES`` (30) before ``now``.
-    Other markets have no calendar yet: ``None``.
+    day that closed at least ``CRYPTO_COMPLETION_WAIT_MINUTES`` (30) before ``now``. CN: latest
+    XSHG session whose 15:00 Shanghai close is at least ``CN_COMPLETION_WAIT_MINUTES`` (30)
+    before ``now``. Other markets have no calendar yet: ``None``.
     """
     market = Market(market)
     if market is Market.CRYPTO:
         return crypto_calendar.latest_completed_session(now, CRYPTO_COMPLETION_WAIT_MINUTES)
+    if market is Market.CN:
+        return cn_calendar.latest_completed_session(now, CN_COMPLETION_WAIT_MINUTES)
     if market is not Market.US:
         return None
     today = now.astimezone(NEW_YORK).date()
@@ -258,19 +273,39 @@ _latest_ready_session = latest_ready_session
 
 
 def _has_calendar(market: Market) -> bool:
-    return market in (Market.US, Market.CRYPTO)
+    return market in (Market.US, Market.CRYPTO, Market.CN)
 
 
 def _sessions(market: Market, start: date, end: date) -> list[date]:
-    """Sessions of the market's own calendar (XNYS for US, every UTC day for crypto)."""
+    """Sessions of the market's own calendar (XNYS for US, every UTC day for crypto, XSHG for CN)."""
     if Market(market) is Market.CRYPTO:
         return crypto_calendar.sessions(start, end)
+    if Market(market) is Market.CN:
+        return cn_calendar.sessions(start, end)
     return xnys.sessions(start, end)
 
 
 def _today(now: datetime, market: Market) -> date:
-    """Calendar date of ``now`` in the market's clock (UTC for crypto, New York for US)."""
-    return now.astimezone(UTC if market is Market.CRYPTO else NEW_YORK).date()
+    """Calendar date of ``now`` in the market's clock (UTC crypto, New York US, Shanghai CN)."""
+    zone = UTC if market is Market.CRYPTO else cn_calendar.CN_TZ if market is Market.CN else NEW_YORK
+    return now.astimezone(zone).date()
+
+
+def _cn_key(symbol: str) -> tuple[str, str] | None:
+    """``(venue, code)`` of a CN symbol spelling, ``None`` if ``normalize_cn_symbol`` rejects it."""
+    try:
+        return normalize_cn_symbol(symbol)
+    except ValueError:
+        return None
+
+
+def _coverage_spellings(market: Market, symbol: str) -> list[str]:
+    """Spellings under which raw rows of ``symbol`` may be stored (CN providers return their own)."""
+    key = _cn_key(symbol) if market is Market.CN else None
+    if key is None:
+        return [symbol]
+    venue, code = key
+    return list(dict.fromkeys([symbol, f"{_CN_NATIVE_PREFIX[venue]}.{code}"]))
 
 
 _BINANCE_STYLE = re.compile(r"[A-Z0-9]+")
@@ -457,7 +492,9 @@ class DefaultPlanner:
             span = DateRange(eligible[0], eligible[-1])
             groups: dict[tuple[date, date, JobKind], list[str]] = defaultdict(list)
             for sym in self._symbols_for(name, symbols, market, end, label, notes):
-                have = coverage.covered(name, market, interval, span, symbol=sym)
+                have = set().union(
+                    *(coverage.covered(name, market, interval, span, symbol=s) for s in _coverage_spellings(market, sym))
+                )
                 missing = [d for d in eligible if d not in have]
                 primary_covered[sym] |= have | set(missing)  # covered now or by this plan
                 for win, kind in self._windows(missing, latest):
@@ -492,7 +529,27 @@ class DefaultPlanner:
     def _symbols_for(
         self, name: str, symbols: list[str], market: Market, on: date, label: str, notes: list[PlanNote]
     ) -> list[str]:
-        """Symbols ``name`` can serve. US: all. Crypto: only its own symbol dialect."""
+        """Symbols ``name`` can serve. US: all. Crypto: only its own symbol dialect. CN: the
+        spellings ``normalize_cn_symbol`` accepts, one per stock (bare codes are skipped)."""
+        if market is Market.CN:
+            keys: dict[tuple[str, str], str] = {}
+            for s in symbols:
+                key = _cn_key(s)
+                if key is not None:
+                    keys.setdefault(key, s)
+            ok = sorted(keys.values())
+            bad = [s for s in symbols if _cn_key(s) is None]
+            if bad:
+                note = PlanNote(
+                    "no_symbols",
+                    f"{label}: not a valid CN symbol (use sh.600000 / 600000.SH, not a bare code); "
+                    f"skipped: {', '.join(bad)}",
+                )
+                if note not in notes:
+                    notes.append(note)
+            if not ok:
+                notes.append(PlanNote("no_symbols", f"{label}: no configured symbol fits {name}; provider skipped"))
+            return ok
         if market is not Market.CRYPTO:
             return symbols
         if self.instruments is not None:
