@@ -20,6 +20,7 @@ from openbars.config.loader import load_settings
 from openbars.config.schema import Selection
 from openbars.core.errors import ProviderError
 from openbars.core.models import Adjustment, DateRange, Interval, Market, QualityFlag
+from openbars.normalize.cn_ingest import ensure_cn_instruments
 from openbars.normalize.cn_quality import missing_sessions, suspended_dates
 from openbars.orchestrator.finalize import (
     CnCanonicalSink,
@@ -154,8 +155,28 @@ def test_adjust_factors_are_ingested_and_qfq_hfq_read_back(world):
     assert set(qfq.column("adjustment").to_pylist()) == {"qfq"}
 
 
-def test_without_factors_qfq_raises_or_flags(tmp_path, clock):
+def test_provider_without_ex_dates_gets_a_seed_factor_so_qfq_is_the_identity(tmp_path, clock):
     w = World(tmp_path, clock, provider=CnFake())  # the provider knows no ex-dates
+    w.run()
+    (seed,) = w.backend.instruments.adjust_factors()  # one seed (a successful empty full history)
+    assert (seed.instrument_id, seed.effective_from, seed.source, seed.method) == (
+        IID, date(2026, 3, 6), "baostock", "pct_return",
+    )  # watermark = job end, not 1990-01-01
+    assert {seed.fore_adjust_factor, seed.back_adjust_factor, seed.adjust_factor} == {D(1)}
+    assert w.backend.canonical.scan_rows([IID], Interval.D1, YEAR, policy_version=None)  # no CorporateAction needed
+    raw = w.backend.reader.bars([IID])
+    qfq = w.backend.reader.bars([IID], adjustment=Adjustment.QFQ)
+    assert qfq.column("close").to_pylist() == raw.column("close").to_pylist()
+    assert set(qfq.column("adjustment").to_pylist()) == {"qfq"}
+    assert not any("ADJUSTMENT_UNVERIFIED" in f for f in qfq.column("flags").to_pylist())
+
+
+def test_without_factors_qfq_raises_or_flags(tmp_path, clock):
+    class Down(CnFake):  # every factor fetch fails: nothing stored, nothing attested
+        def fetch_adjust_factors(self, request):
+            raise ProviderError("provider_unavailable", "down", retryable=True)
+
+    w = World(tmp_path, clock, provider=Down())
     w.run()
     assert w.backend.instruments.adjust_factors() == []
     from openbars.normalize.adjust import AdjustmentError
@@ -180,16 +201,34 @@ def test_factor_outage_does_not_fail_the_job(tmp_path, clock):
     assert w.sink.cn.factor_errors and {c for _, c in w.sink.cn.factor_errors} == {"provider_unavailable"}
 
 
-def test_factor_start_widens_the_factor_window_only(tmp_path, clock):
+def test_first_run_pulls_full_history_then_factor_runs_are_incremental(tmp_path, clock):
     w = World(tmp_path, clock)
-    w.sink.cn.factor_start = date(1990, 1, 1)
     w.run()
-    assert {r.window.start for r in w.provider.factor_requests} == {date(1990, 1, 1)}
-    assert {r.window.end for r in w.provider.factor_requests} == {r.window.end for r in w.provider.requests}
-    # default: the job window itself
-    w2 = World(tmp_path / "b", clock)
-    w2.run()
-    assert {r.window for r in w2.provider.factor_requests} == {r.window for r in w2.provider.requests}
+    first = {r.window.start for r in w.provider.factor_requests}
+    assert date(1990, 1, 1) in first  # nothing stored yet: from 1990-01-01 (no listing date known)
+    assert {r.window.end for r in w.provider.factor_requests} <= {r.window.end for r in w.provider.requests}
+    assert [f.effective_from for f in w.backend.instruments.adjust_factors([IID])] == [LIMIT_DAY]
+    # a later job: incremental from the last stored effective_from (inclusive), not from 1990
+    w.provider.factor_requests.clear()
+    raw = list(w.backend.raw.scan("baostock", Market.CN, Interval.D1, YEAR))
+    w.sink.cn.after_fetch(_job(), raw)
+    assert [r.window for r in w.provider.factor_requests] == [DateRange(LIMIT_DAY, date(2026, 3, 6))]
+
+
+def test_first_run_starts_at_the_listing_date_when_known(tmp_path, clock):
+    w = World(tmp_path, clock)
+    listed = date(1999, 11, 10)
+    ensure_cn_instruments(w.backend.instruments, ["sh.600000"], as_of=START, listed_on=listed)
+    w.run()
+    assert min(r.window.start for r in w.provider.factor_requests) == listed
+
+
+def test_factor_start_overrides_the_window_start(tmp_path, clock):
+    w = World(tmp_path, clock)
+    w.sink.cn.factor_start = date(2000, 1, 1)
+    w.run()
+    assert {r.window.start for r in w.provider.factor_requests} == {date(2000, 1, 1)}
+    assert {r.window.end for r in w.provider.factor_requests} <= {r.window.end for r in w.provider.requests}
 
 
 def test_us_sink_and_dispatcher_without_cn_leave_cn_jobs_raw_only(world):
