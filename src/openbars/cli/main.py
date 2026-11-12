@@ -1,4 +1,4 @@
-"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run``, ``status``, ``verify``, ``config``, ``shadow``.
+"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run``, ``status``, ``verify``, ``config``, ``shadow``, ``serve``.
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
@@ -37,7 +37,7 @@ from openbars.storage.compat_write import AmbiguousInstrumentError
 from openbars.storage.errors import StorageError
 from openbars.storage.state import SqliteStateStore
 
-COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow")
+COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow", "serve")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
 DEFAULT_CONFIG = "./config.yaml"
@@ -139,6 +139,11 @@ def _build_parser() -> argparse.ArgumentParser:
     shadow.add_argument("--backend-url", default="http://127.0.0.1:8000", help="read-only backend base URL")
     shadow.add_argument("--policy-version", default="research-daily-v2", help="backend policy version")
     shadow.add_argument("--fetch", action="store_true", help="fetch the listed symbols through QuotaGate before comparing")
+
+    # Keep serve registration out of this module so market worktrees can rebase with less conflict.
+    from openbars.cli.serve import register as register_serve
+
+    register_serve(sub, common)
     return parser
 
 
@@ -152,6 +157,14 @@ def main(
     """CLI entry point. ``provider_factory``/``clock``/``env`` are injection points for tests."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        # Reject a non-loopback --host before loading config, so the command fails closed.
+        from openbars.cli.serve import check_bind_host
+
+        message = check_bind_host(getattr(args, "host", "127.0.0.1"))
+        if message:
+            print(f"error: {message}", file=sys.stderr)
+            return EXIT_USAGE
     if args.command is None:
         parser.print_help()
         return EXIT_OK
@@ -179,6 +192,10 @@ def main(
             return _verify(args, settings, out, now)
         if args.command == "plan":
             return _plan(args, settings, out, factory, now)
+        if args.command == "serve":
+            from openbars.cli.serve import run_serve
+
+            return run_serve(args, settings, out)
         return _run(args, settings, out, factory, now)
     except ConfigError as exc:
         out.err(f"error: {exc}")
