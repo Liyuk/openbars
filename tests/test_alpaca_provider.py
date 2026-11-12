@@ -499,6 +499,9 @@ def test_quota_exhausted_mid_pagination_returns_partial():
 def test_capabilities_and_quota_policy():
     p = AlpacaProvider(env={})
     caps = {c.feed: c for c in p.capabilities() if c.interval is Interval.D1}
+    for capability in p.capabilities():
+        assert capability.latency == timedelta(0)
+        assert capability.latency_verified is False
     assert set(caps) == {"alpaca:sip", "alpaca:iex"}
     hourly = {c.feed for c in p.capabilities() if c.interval is Interval.H1}
     assert hourly == {"alpaca:sip", "alpaca:iex"}

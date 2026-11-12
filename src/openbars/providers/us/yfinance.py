@@ -352,7 +352,7 @@ class YFinanceProvider:
             SourceCapability(
                 market=Market.US,
                 terms=_terms(
-                    "Unofficial Yahoo data; default fallback for pre-2016 history and primary gaps."
+                    "待验证：盘后当日可得性未由适配器保证；尽力获取、不承诺 T+0。 Unofficial Yahoo data; default fallback for pre-2016 history and primary gaps."
                 ),
                 adjusted_modes=frozenset({Adjustment.SPLIT}),
                 **shared,
@@ -360,7 +360,7 @@ class YFinanceProvider:
             SourceCapability(
                 market=Market.HK,
                 terms=_terms(
-                    "Unofficial Yahoo .HK data; not a licensed HKEX vendor feed. Personal use only."
+                    "待验证：港股盘后当日可得性未由适配器保证；尽力获取、不承诺 T+0。 Unofficial Yahoo .HK data; not a licensed HKEX vendor feed. Personal use only."
                 ),
                 adjusted_modes=frozenset({Adjustment.RAW}),
                 **shared,
@@ -369,7 +369,7 @@ class YFinanceProvider:
             SourceCapability(
                 market=Market.US,
                 terms=_terms(
-                    "Unofficial Yahoo 1h data (session_open grid, last ~730 days). Personal use only."
+                    "待验证：盘后小时线可得性未由适配器保证；尽力获取、不承诺 T+0。 Unofficial Yahoo 1h data (session_open grid, last ~730 days). Personal use only."
                 ),
                 adjusted_modes=frozenset({Adjustment.SPLIT}),
                 rolling_window=timedelta(days=YFINANCE_HOURLY_WINDOW_DAYS),

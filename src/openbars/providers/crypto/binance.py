@@ -279,7 +279,7 @@ class BinanceProvider(HttpProviderAdapter):
             personal_only=False,
             redistribution_allowed=False,
             url=TERMS_URL,
-            notes="Public market data, no API key. Redistribution is subject to Binance "
+            notes="待验证：日线最新完成周期可得性未由适配器保证；尽力获取、不承诺 T+0。 Public market data, no API key. Redistribution is subject to Binance "
             "terms (not reviewed here, so not assumed allowed); docs: "
             "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints",
         )

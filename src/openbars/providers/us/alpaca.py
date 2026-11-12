@@ -233,7 +233,7 @@ class AlpacaProvider(HttpProviderAdapter):
             personal_only=True,
             redistribution_allowed=False,
             url=TERMS_URL,
-            notes="Market data is licensed to the account holder; see "
+            notes="代码已核实：SIP 请求今天时截到 now-16 分钟，IEX 不做该截断；盘后完整日线/小时线可得性待验证，尽力获取、不承诺 T+0。 Market data is licensed to the account holder; see "
             "https://docs.alpaca.markets/docs/about-market-data-api",
         )
         return tuple(

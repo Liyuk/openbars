@@ -221,6 +221,17 @@ def test_budget_estimates_requests_and_duration():
     assert not p.budget.requires_acceptance()  # daily only
 
 
+def test_planner_does_not_treat_unverified_zero_latency_as_a_t0_promise():
+    provider = yfinance()
+    capability = provider.capabilities()[0]
+    assert capability.latency == timedelta(0)
+    assert capability.latency_verified is False
+    # The plan window remains bounded by the exchange calendar; a default zero estimate
+    # cannot make the current (not-yet-ready) New York session eligible.
+    p = plan(sel(date(2026, 3, 9), date(2026, 3, 10)), [provider])
+    assert all(job.window.end <= LATEST for job in p.jobs)
+
+
 def test_non_daily_budget_requires_acceptance_when_large():
     h1 = FakeProvider("hourly", interval=Interval.H1, max_symbols=200, limit_per_minute=2)
     p = plan(

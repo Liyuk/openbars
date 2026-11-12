@@ -112,6 +112,8 @@ def test_capabilities_and_policy():
     assert cap.batch is BatchShape.WHOLE_MARKET_PER_DAY
     assert cap.history_start is None and cap.rolling_window == timedelta(days=730)
     assert cap.latency == timedelta(hours=8) and cap.feed == "massive:eod"
+    assert cap.latency_verified is True
+    assert hourly.latency == timedelta(hours=8) and hourly.latency_verified is False
     assert cap.terms.personal_only and not cap.terms.redistribution_allowed
     assert cap.terms.url.startswith("https://")
     assert provider(Server()).quota_policy() is MASSIVE_POLICY

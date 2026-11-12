@@ -271,7 +271,7 @@ class AKShareHKProvider:
                     redistribution_allowed=False,
                     url=TERMS_URL,
                     notes=(
-                        "AKShare is MIT; quotes come from Eastmoney and similar sites and "
+                        "待验证：盘后当日可得性未由适配器保证；尽力获取、不承诺 T+0。 AKShare is MIT; quotes come from Eastmoney and similar sites and "
                         "are not relicensed. Official use is academic research. Do not "
                         "redistribute exchange quotes. Local private storage only; low-rate "
                         "per-symbol fallback, not a bulk crawl. See also "

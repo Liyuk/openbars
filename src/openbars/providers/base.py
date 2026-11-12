@@ -51,6 +51,8 @@ class SourceCapability:
     adjusted_modes: frozenset[Adjustment] = frozenset({Adjustment.RAW})
     feed: str | None = None
     terms: ProviderTerms = field(default_factory=lambda: ProviderTerms(True, False))
+    # False means latency=0 is only an unset estimate, never a T+0 promise.
+    latency_verified: bool = False
 
 
 @dataclass(frozen=True)

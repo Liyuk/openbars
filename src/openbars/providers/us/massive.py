@@ -256,7 +256,7 @@ class MassiveProvider(HttpProviderAdapter):
             personal_only=True,
             redistribution_allowed=False,
             url=TERMS_URL,
-            notes="Public Basic free tier: 5 calls/min, ~2 year rolling window; grouped "
+            notes="代码已核实：grouped daily 次日美东 00:00 才就绪；小时线盘后当日可得性待验证，尽力获取、不承诺 T+0。 Public Basic free tier: 5 calls/min, ~2 year rolling window; grouped "
             "daily is available after 00:00 America/New_York on the calendar day after "
             "the session. Data is licensed for personal use; see https://massive.com/pricing",
         )
@@ -269,6 +269,7 @@ class MassiveProvider(HttpProviderAdapter):
                 history_start=None,  # since listing
                 rolling_window=timedelta(days=ROLLING_WINDOW_DAYS),
                 latency=TYPICAL_LATENCY,
+                latency_verified=True,
                 batch=BatchShape.WHOLE_MARKET_PER_DAY,
                 max_symbols_per_request=WHOLE_MARKET_SYMBOLS,
                 max_bars_per_request=TICKER_RANGE_LIMIT,
@@ -285,6 +286,7 @@ class MassiveProvider(HttpProviderAdapter):
                 history_start=None,
                 rolling_window=timedelta(days=MASSIVE_HOURLY_WINDOW_DAYS),
                 latency=TYPICAL_LATENCY,
+                latency_verified=False,
                 batch=BatchShape.PER_SYMBOL,
                 max_symbols_per_request=1,
                 max_bars_per_request=TICKER_RANGE_LIMIT,

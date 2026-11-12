@@ -135,7 +135,7 @@ class TwelveDataProvider(HttpProviderAdapter):
                     personal_only=True,
                     redistribution_allowed=False,
                     url=TERMS_URL,
-                    notes="Free tier: 8 requests/min, 800/UTC day, regular session only; "
+                    notes="待验证：盘后小时线可得性未由适配器保证；尽力获取、不承诺 T+0。 Free tier: 8 requests/min, 800/UTC day, regular session only; "
                     "see https://twelvedata.com/pricing",
                 ),
             ),
