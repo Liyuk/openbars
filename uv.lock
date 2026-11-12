@@ -874,8 +874,11 @@ name = "openbars"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "duckdb" },
     { name = "exchange-calendars" },
     { name = "httpx" },
+    { name = "pyarrow" },
+    { name = "pytz" },
     { name = "pyyaml" },
 ]
 
@@ -887,16 +890,13 @@ baostock = [
     { name = "baostock" },
 ]
 dev = [
-    { name = "pyarrow" },
+    { name = "fastapi" },
     { name = "pytest" },
+    { name = "uvicorn" },
 ]
 http = [
     { name = "fastapi" },
     { name = "uvicorn" },
-]
-parquet = [
-    { name = "duckdb" },
-    { name = "pyarrow" },
 ]
 postgres = [
     { name = "psycopg", extra = ["binary"] },
@@ -909,15 +909,17 @@ yfinance = [
 requires-dist = [
     { name = "akshare", marker = "extra == 'akshare'", specifier = ">=1.12" },
     { name = "baostock", marker = "extra == 'baostock'", specifier = ">=0.8" },
-    { name = "duckdb", marker = "extra == 'parquet'", specifier = ">=1.0" },
+    { name = "duckdb", specifier = ">=1.0" },
     { name = "exchange-calendars", specifier = ">=4.9,<5" },
+    { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
-    { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=15" },
-    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=15" },
+    { name = "pyarrow", specifier = ">=15" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytz" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.29" },
     { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.29" },
     { name = "yfinance", marker = "extra == 'yfinance'", specifier = ">=0.2" },
 ]

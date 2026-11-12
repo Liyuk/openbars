@@ -111,7 +111,7 @@ def _build(fields: tuple[FieldSpec, ...], kind: str) -> Any:
         import pyarrow as pa
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(
-            "pyarrow is required to build Arrow schemas; install openbars[parquet]"
+            "pyarrow is required to build Arrow schemas; reinstall openbars"
         ) from exc
     return pa.schema(
         [pa.field(f.name, _arrow_type(pa, f.type), nullable=f.nullable) for f in fields],

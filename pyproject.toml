@@ -17,18 +17,23 @@ classifiers = [
 dependencies = [
     "exchange-calendars>=4.9,<5",
     "httpx>=0.28.1",
+    "pyarrow>=15",
+    "duckdb>=1.0",
+    "pytz",
     "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
-parquet = ["pyarrow>=15", "duckdb>=1.0"]
+# Kept as a compatibility extra; Parquet and DuckDB are core dependencies.
+parquet = []
 postgres = ["psycopg[binary]>=3.1"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
 yfinance = ["yfinance>=0.2"]
 baostock = ["baostock>=0.8"]
 akshare = ["akshare>=1.12"]
 dev = [
-    "pyarrow>=15",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
     "pytest>=8",
 ]
 
