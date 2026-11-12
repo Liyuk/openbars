@@ -243,10 +243,13 @@ RAW_BARS_SCHEMA = _schema("raw_bars", RAW_BARS_FIELDS)
 
 # The Parquet raw layer's schema: ``RAW_BARS_SCHEMA`` plus one nullable string column ``extra``
 # (#94), a JSON object holding the ``RawBar.extra`` keys that have no column of their own
-# (BaoStock ``tradestatus`` / ``isST`` / ``preclose`` ...). Parquet only: Postgres keeps
-# ``RAW_BARS_SCHEMA`` (and ``TABLE_SCHEMAS``) unchanged. It is an additive optional column, so
-# ``SCHEMA_VERSION`` stays 1: files written before it simply lack the column and read back with
-# ``extra`` null (``_conform`` / DuckDB ``union_by_name``).
+# (BaoStock ``tradestatus`` / ``isST`` / ``preclose`` ...). ``RAW_BARS_SCHEMA`` and
+# ``TABLE_SCHEMAS`` stay unchanged. Postgres native stores the same leftovers in a nullable
+# JSONB column ``raw_bars.extra`` (#122), added with ``ADD COLUMN IF NOT EXISTS``; it is not
+# part of ``RAW_BARS_SCHEMA``. ``SCHEMA_VERSION`` stays 1: this is an additive optional
+# column. Parquet files written before #94 simply lack the column and read back with
+# ``extra`` null (``_conform`` / DuckDB ``union_by_name``). Pre-#122 Postgres databases
+# lack the JSONB column until opened with ``write=True``; a read-only open treats it as NULL.
 RAW_BARS_PARQUET_FIELDS = [*RAW_BARS_FIELDS, _f("extra", pa.string(), True)]
 RAW_BARS_PARQUET_SCHEMA = _schema("raw_bars", RAW_BARS_PARQUET_FIELDS)
 CANONICAL_BARS_SCHEMA = _schema("canonical_bars", CANONICAL_BARS_FIELDS)

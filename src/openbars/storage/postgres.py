@@ -6,7 +6,11 @@ Two schema modes (docs/architecture.md section 11.3):
     openbars owns the DDL, which is generated from the same schema definitions as the
     Parquet layout (``schema.py``) - one table per Parquet table, same column names,
     ``NUMERIC(20,8)`` / ``NUMERIC(28,8)`` for prices / volumes, ``TEXT[]`` for list
-    columns, ``JSONB`` for ``external_ids``. That includes the identity side tables
+    columns, ``JSONB`` for ``external_ids``. ``raw_bars.extra`` is a nullable JSONB
+    column added additively (#122): it is not in ``RAW_BARS_SCHEMA`` / ``TABLE_SCHEMAS``
+    (those stay shared with Parquet). Existing databases get
+    ``ALTER TABLE raw_bars ADD COLUMN IF NOT EXISTS extra JSONB`` on ``write=True``;
+    a read-only open of a pre-migration catalog treats a missing column as NULL. That includes the identity side tables
     ``unresolved`` / ``symbol_observations`` / ``upstream_ids`` (``PgInstrumentMaster`` is a
     full ``InstrumentStore``). Quota tables are not part of this schema. Tables are created (``CREATE ... IF NOT
     EXISTS``) only when ``write=True``; a read-only connection merely verifies them.
@@ -69,6 +73,7 @@ from openbars.storage.errors import (
 from openbars.storage.rows import (
     CanonicalBarRow,
     RawBarRow,
+    encode_extra,
     raw_rows_from_batch,
     records_to_rows,
     row_values,
@@ -289,6 +294,11 @@ def check_upstream_compat(catalog: Catalog) -> None:
 
 def check_native(catalog: Catalog) -> None:
     problems = check_schema(catalog, NATIVE_REQUIRED)
+    # ``raw_bars.extra`` is optional (pre-#122 databases). If present it must be JSON/JSONB.
+    raw = catalog.get("raw_bars") or {}
+    if "extra" in raw and raw["extra"].data_type not in _FAMILY_TYPES["json"]:
+        info = raw["extra"]
+        problems.append(SchemaProblem("raw_bars", "extra", "type_mismatch", "jsonb", info.data_type))
     if problems:
         raise SchemaMismatchError(problems)
 
@@ -348,6 +358,8 @@ def native_ddl() -> list[str]:
     """DDL for every native table (idempotent). Same columns as the Parquet schemas."""
     stmts = [
         _table_ddl("raw_bars", RAW_BARS_SCHEMA),
+        # Additive, nullable; CREATE stays 1:1 with RAW_BARS_SCHEMA so existing DDL tests hold.
+        'ALTER TABLE "raw_bars" ADD COLUMN IF NOT EXISTS extra JSONB',
         _unique_index("ux_raw_bars_daily", "raw_bars", _RAW_KEY_COLS, [_RAW_ENTITY], "session_date", True),
         _unique_index("ux_raw_bars_intraday", "raw_bars", _RAW_KEY_COLS, [_RAW_ENTITY], "ts_start", False),
         'CREATE INDEX IF NOT EXISTS "ix_raw_bars_scan" ON "raw_bars" ("provider", "market", "interval", "session_date")',
@@ -457,16 +469,50 @@ def _upsert_sql(table: str, schema: pa.Schema, key_target: str, predicate: str, 
     )
 
 
-_RAW_DAILY_SQL = _upsert_sql(
-    "raw_bars", RAW_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _RAW_KEY_COLS), _RAW_ENTITY, "session_date"]),
-    "\"interval\" = '1d'", (*_RAW_KEY_COLS, "session_date"),
-)
-_RAW_INTRADAY_SQL = _upsert_sql(
-    "raw_bars", RAW_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _RAW_KEY_COLS), _RAW_ENTITY, "ts_start"]),
-    "\"interval\" <> '1d'", (*_RAW_KEY_COLS, "ts_start"),
-)
+def _raw_upsert_sql(time_col: str, daily: bool) -> str:
+    """Like ``_upsert_sql`` for ``raw_bars``, plus the additive JSONB ``extra`` column."""
+    cols = [f.name for f in RAW_BARS_SCHEMA] + ["extra"]
+    key_target = ", ".join([*(qident(c) for c in _RAW_KEY_COLS), _RAW_ENTITY, time_col])
+    predicate = ("\"interval\" = '1d'" if daily else "\"interval\" <> '1d'")
+    key_cols = (*_RAW_KEY_COLS, time_col)
+    updates = [c for c in cols if c not in key_cols]
+    return (
+        f"INSERT INTO {qident('raw_bars')} ({', '.join(qident(c) for c in cols)}) "
+        f"VALUES ({', '.join('?' for _ in cols)}) "
+        f"ON CONFLICT ({key_target}) WHERE {predicate} DO UPDATE SET "
+        + ", ".join(f"{qident(c)} = EXCLUDED.{qident(c)}" for c in updates)
+    )
+
+
+def _extra_param(row: RawBarRow) -> Any:
+    """``encode_extra`` JSON object for a JSONB parameter; ``None`` when there is no leftover."""
+    text = encode_extra(row.extra)
+    if text is None:
+        return None
+    from psycopg.types.json import Jsonb
+
+    return Jsonb(json.loads(text))
+
+
+def _write_raw_rows(conn: "_Conn", rows: Sequence[RawBarRow]) -> int:
+    latest: dict[tuple, RawBarRow] = {}
+    for row in rows:  # last occurrence in the batch wins (same rule as Parquet)
+        latest[row.key()] = row
+
+    def values(row: RawBarRow) -> list[Any]:
+        return [*row_values(row, RAW_BARS_SCHEMA), _extra_param(row)]
+
+    daily = [values(r) for r in latest.values() if r.interval is Interval.D1]
+    intraday = [values(r) for r in latest.values() if r.interval is not Interval.D1]
+    if daily:
+        conn.executemany(_RAW_DAILY_SQL, daily)
+    if intraday:
+        conn.executemany(_RAW_INTRADAY_SQL, intraday)
+    return len(daily) + len(intraday)
+
+
+_RAW_DAILY_SQL = _raw_upsert_sql("session_date", True)
+_RAW_INTRADAY_SQL = _raw_upsert_sql("ts_start", False)
 _CANON_DAILY_SQL = _upsert_sql(
     "canonical_bars", CANONICAL_BARS_SCHEMA,
     ", ".join([*(qident(c) for c in _CANON_KEY_COLS), "session_date"]),
@@ -516,7 +562,7 @@ class PgRawStore(_Guard):
         if not rows:
             return 0
         with self._session() as conn:
-            return _write_rows(conn, rows, RAW_BARS_SCHEMA, _RAW_DAILY_SQL, _RAW_INTRADAY_SQL)
+            return _write_raw_rows(conn, rows)
 
     def scan_rows(
         self,
@@ -1135,7 +1181,11 @@ def _finish_skipped_ambiguous(skipped: list[AmbiguousInstrumentError], written: 
 
 
 class PgCompatRawStore(_Guard):
-    """View of upstream ``daily_bar`` (US daily bars). Writes require ``write=True``."""
+    """View of upstream ``daily_bar`` (US daily bars). Writes require ``write=True``.
+
+    Leftover ``RawBar.extra`` is not stored: upstream owns this schema and this mode never
+    runs migrations (#122). Native mode keeps extras in ``raw_bars.extra`` JSONB.
+    """
 
     def __init__(self, session: _Session, write: bool, identity: CompatIdentity) -> None:
         super().__init__(write)
