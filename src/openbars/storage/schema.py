@@ -217,7 +217,8 @@ CORPORATE_ACTIONS_FIELDS = [
     _f("currency", pa.string(), True),
 ]
 
-# A-share adjust factors (``ref/adjust_factors.parquet``, Parquet only; additive: a missing file
+# A-share adjust factors (``ref/adjust_factors.parquet``; Postgres native table ``adjust_factors``
+# since #124, outside ``TABLE_SCHEMAS``; additive: a missing file / table
 # is an empty table, so ``SCHEMA_VERSION`` does not change). One row per
 # ``(instrument_id, source, effective_from)``; ``source`` / ``method`` say who computed the
 # factors and how (never mixed for one instrument, see ``normalize.cn_adjust``).
@@ -281,7 +282,8 @@ REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
     "upstream_ids": UPSTREAM_IDS_SCHEMA,
 }
 
-# Parquet-only ref tables (not part of the Postgres native schema).
+# Ref tables outside ``TABLE_SCHEMAS`` / ``REF_IDENTITY_SCHEMAS``. ``adjust_factors`` also has a
+# Postgres native table (#124), created and checked separately (``postgres.ADJUST_FACTORS_REQUIRED``).
 REF_PARQUET_SCHEMAS: Mapping[str, pa.Schema] = {"adjust_factors": ADJUST_FACTORS_SCHEMA}
 
 # --- identity / dedup keys ---------------------------------------------------------------

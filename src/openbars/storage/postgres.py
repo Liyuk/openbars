@@ -81,6 +81,7 @@ from openbars.storage.rows import (
     to_decimal,
 )
 from openbars.storage.schema import (
+    ADJUST_FACTORS_SCHEMA,
     CANONICAL_BARS_SCHEMA,
     CORPORATE_ACTIONS_SCHEMA,
     DEFAULT_POLICY_VERSION,
@@ -296,11 +297,22 @@ def check_upstream_compat(catalog: Catalog) -> None:
 _OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at")})  # #154
 
 
+# #124: A-share adjust factors. Additive table: a database without it reads as empty and gets
+# it on ``write=True``; when present its columns must match. Not in ``NATIVE_REQUIRED`` /
+# ``TABLE_SCHEMAS`` (the shared raw / canonical mapping stays as it is).
+ADJUST_FACTORS_REQUIRED: Requirements = {
+    "adjust_factors": {f.name: _arrow_family(f.type) for f in ADJUST_FACTORS_SCHEMA}
+}
+_ADJUST_FACTORS_KEY = ("instrument_id", "source", "effective_from")
+
+
 def check_native(catalog: Catalog) -> None:
     problems = [
         p for p in check_schema(catalog, NATIVE_REQUIRED)
         if not (p.kind == "missing_column" and (p.table, p.column) in _OPTIONAL_NATIVE_COLUMNS)
     ]
+    if catalog.get("adjust_factors"):
+        problems += check_schema(catalog, ADJUST_FACTORS_REQUIRED)
     # ``raw_bars.extra`` is optional (pre-#122 databases). If present it must be JSON/JSONB.
     raw = catalog.get("raw_bars") or {}
     if "extra" in raw and raw["extra"].data_type not in _FAMILY_TYPES["json"]:
@@ -385,6 +397,8 @@ def native_ddl() -> list[str]:
         _table_ddl("symbol_observations", REF_IDENTITY_SCHEMAS["symbol_observations"], _REF_KEYS["symbol_observations"]),
         _table_ddl("upstream_ids", REF_IDENTITY_SCHEMAS["upstream_ids"], _REF_KEYS["upstream_ids"]),
         'CREATE UNIQUE INDEX IF NOT EXISTS "ux_upstream_ids_upstream_id" ON "upstream_ids" ("upstream_id")',
+        # #124: additive table (CREATE TABLE IF NOT EXISTS doubles as the migration)
+        _table_ddl("adjust_factors", ADJUST_FACTORS_SCHEMA, _ADJUST_FACTORS_KEY),
         *state_ddl("postgres"),
     ]
     return stmts
@@ -786,6 +800,66 @@ class PgInstrumentMaster(_ResolveMixin, _Guard):
             CorporateAction(
                 r["instrument_id"], r["ex_date"], CorporateActionKind(r["kind"]), r["source"],
                 r["ratio"], r["amount"], currency=r.get("currency"),
+            )
+            for r in records
+        ]
+
+    # -- A-share adjust factors (#124; a database without the table reads as empty) --
+
+    def upsert_adjust_factors(self, factors: Iterable[Any]) -> int:
+        """Upsert by ``(instrument_id, source, effective_from)`` (new wins), like the Parquet master.
+
+        Returns the number of incoming rows. Factors are ``NUMERIC(20,8)``; more fractional
+        digits are rounded half-even to 8 (the Parquet rule). Other sources' rows for the same
+        instrument stay side by side.
+        """
+        self.require_write()
+        latest: dict[tuple, list[Any]] = {}
+        count = 0
+        for f in factors:
+            count += 1
+            latest[(f.instrument_id, f.source, f.effective_from)] = [
+                f.instrument_id, f.source, f.method, f.effective_from,
+                *(to_decimal(_round_action_value(Decimal(getattr(f, name))), precision=20, name=name)
+                  for name in ("fore_adjust_factor", "back_adjust_factor", "adjust_factor")),
+                f.symbol,
+            ]
+        if not latest:
+            return 0
+        with self._session() as conn:
+            conn.executemany(
+                "INSERT INTO adjust_factors (instrument_id, source, method, effective_from, "
+                "fore_adjust_factor, back_adjust_factor, adjust_factor, symbol) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT (instrument_id, source, effective_from) DO UPDATE SET method=EXCLUDED.method, "
+                "fore_adjust_factor=EXCLUDED.fore_adjust_factor, back_adjust_factor=EXCLUDED.back_adjust_factor, "
+                "adjust_factor=EXCLUDED.adjust_factor, symbol=EXCLUDED.symbol",
+                list(latest.values()),
+            )
+        return count
+
+    def adjust_factors(
+        self, instrument_ids: Sequence[str] | None = None, source: str | None = None
+    ) -> list[Any]:
+        """``AdjustFactor`` rows (exact ``Decimal``), ordered by the key; [] without the table."""
+        from openbars.normalize.cn_adjust import AdjustFactor
+
+        sql, params = "SELECT * FROM adjust_factors WHERE TRUE", []
+        if instrument_ids is not None:
+            sql += " AND instrument_id = ANY(?)"
+            params.append(list(instrument_ids))
+        if source is not None:
+            sql += " AND source = ?"
+            params.append(source)
+        with self._session() as conn:
+            if conn.execute("SELECT to_regclass('adjust_factors') AS t").fetchone()["t"] is None:
+                return []  # pre-#124 database opened read-only
+            records = conn.execute(sql + ' ORDER BY instrument_id COLLATE "C", source COLLATE "C", effective_from', params).fetchall()
+        return [
+            AdjustFactor(
+                instrument_id=r["instrument_id"], effective_from=r["effective_from"], source=r["source"],
+                method=r["method"], fore_adjust_factor=r["fore_adjust_factor"],
+                back_adjust_factor=r["back_adjust_factor"], adjust_factor=r["adjust_factor"],
+                symbol=r["symbol"],
             )
             for r in records
         ]
