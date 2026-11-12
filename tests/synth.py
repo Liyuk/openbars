@@ -39,14 +39,14 @@ def raw_batch(
     provider="prov_a",
     fetch_id="fetch-1",
     market=Market.US,
-    base=11.25,
-    volume=1000000.5,
+    base=Decimal("11.25"),
+    volume=Decimal("1000000.5"),
     feed="feed1",
 ):
     bars = []
     for si, sym in enumerate(symbols):
         for di, day in enumerate(days):
-            px = base + si + (di % 5) * 0.25
+            px = Decimal(base) + si + (di % 5) * Decimal("0.25")
             bars.append(
                 RawBar(
                     provider=provider,
@@ -55,9 +55,9 @@ def raw_batch(
                     interval=Interval.D1,
                     ts_start=utc(day),
                     open=px,
-                    high=px + 1.0,
-                    low=px - 1.0,
-                    close=px + 0.5,
+                    high=px + Decimal("1"),
+                    low=px - Decimal("1"),
+                    close=px + Decimal("0.5"),
                     volume=volume + di,
                     feed=feed,
                     extra={"session_date": day, "currency": "USD"},
@@ -67,11 +67,11 @@ def raw_batch(
     return RawBatch(provider, fetch_id, req, tuple(bars))
 
 
-def canonical_bars(instrument_ids, days, *, source="prov_a", base=11.25, flags=QualityFlag.NONE):
+def canonical_bars(instrument_ids, days, *, source="prov_a", base=Decimal("11.25"), flags=QualityFlag.NONE):
     out = []
     for si, iid in enumerate(instrument_ids):
         for di, day in enumerate(days):
-            px = base + si + (di % 5) * 0.25
+            px = Decimal(base) + si + (di % 5) * Decimal("0.25")
             bar = Bar(
                 instrument_id=iid,
                 interval=Interval.D1,
@@ -79,10 +79,10 @@ def canonical_bars(instrument_ids, days, *, source="prov_a", base=11.25, flags=Q
                 session_date=day,
                 session=Session.REGULAR,
                 open=px,
-                high=px + 1.0,
-                low=px - 1.0,
-                close=px + 0.5,
-                volume=1000000.5 + di,
+                high=px + Decimal("1"),
+                low=px - Decimal("1"),
+                close=px + Decimal("0.5"),
+                volume=Decimal("1000000.5") + di,
                 source=source,
                 feed="feed1",
                 adjustment=Adjustment.SPLIT,

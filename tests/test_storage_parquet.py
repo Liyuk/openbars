@@ -85,7 +85,7 @@ def test_raw_roundtrip_is_exact_decimal(backend):
 def test_raw_protocol_scan_returns_legacy_models_with_exact_extras(backend):
     backend.raw.append(raw_batch(["TEST1"], DAYS))
     bars = list(backend.raw.scan("prov_a", Market.US, Interval.D1, WINDOW))
-    assert [b.open for b in bars][:2] == [11.25, 11.5]
+    assert [b.open for b in bars][:2] == [Decimal("11.25"), Decimal("11.50")]
     assert bars[0].extra["open_exact"] == Decimal("11.25")
     assert bars[0].feed == "feed1"
 
@@ -93,8 +93,8 @@ def test_raw_protocol_scan_returns_legacy_models_with_exact_extras(backend):
 def test_floats_are_never_expanded_in_binary():
     row = RawBarRow(
         provider="p", market=Market.US, symbol_as_returned="TEST1", interval=Interval.D1,
-        ts_start=utc(DAYS[0]), session_date=DAYS[0], open=0.1, high=0.30000000000000004,
-        low=0.1, close=0.2, fetch_id="f",
+        ts_start=utc(DAYS[0]), session_date=DAYS[0], open=Decimal("0.1"), high=Decimal("0.3"),
+        low=Decimal("0.1"), close=Decimal("0.2"), fetch_id="f",
     )
     assert row.open == Decimal("0.10000000")
     assert row.high == Decimal("0.30000000")  # shortest repr then 8dp, not 0.3000000000000000444
@@ -115,12 +115,26 @@ def test_exact_decimal_inputs_are_not_silently_rounded():
 
 def test_invalid_bar_rejected_and_naive_ts_rejected(backend):
     batch = raw_batch(["TEST1"], DAYS[:1])
-    bad = dataclasses.replace(batch.bars[0], high=5.0, low=9.0, open=7.0, close=7.0)
-    with pytest.raises(InvalidBarError, match="high < low"):
-        backend.raw.append(dataclasses.replace(batch, bars=(bad,)))
-    naive = dataclasses.replace(batch.bars[0], ts_start=datetime(2024, 1, 2))
+    # Model constructors validate OHLCV and timezone themselves.
+    with pytest.raises(ValueError, match="high"):
+        dataclasses.replace(
+            batch.bars[0], high=Decimal("5"), low=Decimal("9"), open=Decimal("7"), close=Decimal("7")
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        dataclasses.replace(batch.bars[0], ts_start=datetime(2024, 1, 2))
+    # Storage rows collect OHLCV errors; naive timestamps are rejected immediately.
+    row = RawBarRow(
+        provider="prov_a", market=Market.US, symbol_as_returned="TEST1", interval=Interval.D1,
+        ts_start=utc(DAYS[0]), session_date=DAYS[0], fetch_id="f",
+        open=Decimal("7"), high=Decimal("5"), low=Decimal("9"), close=Decimal("7"),
+    )
+    assert "high < low" in row.validation_errors()
     with pytest.raises(InvalidBarError, match="naive"):
-        backend.raw.append(dataclasses.replace(batch, bars=(naive,)))
+        RawBarRow(
+            provider="prov_a", market=Market.US, symbol_as_returned="TEST1", interval=Interval.D1,
+            ts_start=datetime(2024, 1, 2), session_date=DAYS[0], fetch_id="f",
+            open=Decimal("7"), high=Decimal("8"), low=Decimal("6"), close=Decimal("7"),
+        )
     assert raw_parts(backend) == []
 
 
@@ -138,8 +152,8 @@ def test_duplicate_append_does_not_duplicate_or_write(backend):
 
 
 def test_same_key_last_write_wins_and_new_revision_is_new_row(backend):
-    backend.raw.append(raw_batch(["TEST1"], DAYS, base=11.25))
-    backend.raw.append(raw_batch(["TEST1"], DAYS, base=20.0, fetch_id="fetch-2"))
+    backend.raw.append(raw_batch(["TEST1"], DAYS, base=Decimal("11.25")))
+    backend.raw.append(raw_batch(["TEST1"], DAYS, base=Decimal("20"), fetch_id="fetch-2"))
     rows = backend.raw.scan_rows("prov_a", Market.US, Interval.D1, WINDOW)
     assert len(rows) == 5 and rows[0].open == Decimal("20") and rows[0].fetch_id == "fetch-2"
     assert len(raw_parts(backend)) == 2
@@ -256,7 +270,7 @@ def test_atomic_write_cleans_up_on_writer_error(tmp_path):
 
 def test_compaction_preserves_rows_and_keys(backend):
     for i in range(4):  # 4 parts, overlapping keys: later parts overwrite day 0..i
-        backend.raw.append(raw_batch(["TEST1", "TEST2"], DAYS, base=11.25 + i, fetch_id=f"f{i}"))
+        backend.raw.append(raw_batch(["TEST1", "TEST2"], DAYS, base=Decimal("11.25") + i, fetch_id=f"f{i}"))
     assert len(raw_parts(backend)) == 4
     before = backend.raw.scan_table("prov_a", Market.US, Interval.D1, WINDOW)
     results = backend.compact("raw")
@@ -276,7 +290,7 @@ def test_compaction_preserves_rows_and_keys(backend):
 
 def test_crash_between_compact_write_and_delete_is_consistent(backend):
     for i in range(3):
-        backend.raw.append(raw_batch(["TEST1"], DAYS, base=11.25 + i, fetch_id=f"f{i}"))
+        backend.raw.append(raw_batch(["TEST1"], DAYS, base=Decimal("11.25") + i, fetch_id=f"f{i}"))
     files = raw_parts(backend)
     expected = backend.raw.scan_table("prov_a", Market.US, Interval.D1, WINDOW)
     # emulate "compacted part written, inputs not yet deleted"
@@ -363,7 +377,7 @@ def test_canonical_roundtrip_flags_and_decimals(backend):
     assert len(r.source_fingerprint) == 64
     legacy = list(backend.canonical.scan(["us:eq:T1"], Interval.D1, WINDOW))
     assert legacy[0].bar.flags == QualityFlag.DIVERGENT | QualityFlag.SINGLE_SOURCE
-    assert legacy[0].bar.open == 11.25 and legacy[0].revision == 1
+    assert legacy[0].bar.open == Decimal("11.25") and legacy[0].revision == 1
     assert legacy[0].sources_seen == ("prov_a", "prov_b")
 
 

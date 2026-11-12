@@ -1,6 +1,6 @@
 """Storage row types: exact-``Decimal`` views of the Arrow schemas in ``schema.py``.
 
-The current ``openbars.core.models`` bar dataclasses still declare ``float`` prices. To
+The current ``openbars.core.models`` bar dataclasses use ``Decimal`` prices. To
 avoid a lossy round trip the storage layer works on these row types instead:
 
 * ingesting a model object converts floats with ``Decimal(str(value))`` (shortest repr)
@@ -8,7 +8,7 @@ avoid a lossy round trip the storage layer works on these row types instead:
 * ``Decimal`` / ``str`` / ``int`` inputs are never altered: more than 8 fractional digits
   (or too many integer digits) is an error, not a silent rounding;
 * scanning back yields ``Decimal`` rows (``scan_rows`` / ``scan_table``). The protocol
-  methods ``scan`` return the legacy float models for compatibility and are lossy.
+  methods ``scan`` return ``RawBar`` / ``CanonicalBar`` with ``Decimal`` prices and volumes.
 
 Fields the legacy models do not carry (``market``, ``session_date``, price-basis
 metadata, ``policy_version`` ...) are taken from ``RawBar.extra`` / explicit arguments
@@ -256,7 +256,7 @@ class RawBarRow:
         )
 
     def to_raw_bar(self) -> RawBar:
-        """Legacy float model. Lossy; the exact values travel in ``extra``."""
+        """In-memory ``RawBar``. Exact ``Decimal`` values; extra fields travel in ``extra``."""
         extra: dict[str, object] = {
             "market": self.market.value,
             "instrument_id": self.instrument_id,
@@ -285,11 +285,11 @@ class RawBarRow:
             fetch_id=self.fetch_id,
             interval=self.interval,
             ts_start=self.ts_start,
-            open=float(self.open),
-            high=float(self.high),
-            low=float(self.low),
-            close=float(self.close),
-            volume=None if self.volume is None else float(self.volume),
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
             feed=self.feed or None,
             extra=extra,
         )
@@ -485,22 +485,22 @@ class CanonicalBarRow:
         )
 
     def to_canonical_bar(self) -> CanonicalBar:
-        """Legacy float model (lossy). ``policy_version`` and friends are not on the model."""
+        """In-memory ``CanonicalBar``. ``policy_version`` and friends are not on the model."""
         bar = Bar(
             instrument_id=self.instrument_id,
             interval=self.interval,
             ts_start=self.ts_start,
             session_date=self.session_date,
             session=self.session,
-            open=float(self.open),
-            high=float(self.high),
-            low=float(self.low),
-            close=float(self.close),
-            volume=None if self.volume is None else float(self.volume),
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
             source=self.provider,
             feed=self.feed or None,
             adjustment=Adjustment(self.adjustment),
-            vwap=None if self.vwap is None else float(self.vwap),
+            vwap=self.vwap,
             trade_count=self.trade_count,
             flags=names_to_flags(self.flags),
         )

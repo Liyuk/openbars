@@ -334,7 +334,7 @@ data/
 ### 10.2 数值与模型对应
 
 - 价格 `decimal128(20,8)`，成交量 `decimal128(28,8)`（Parquet / DuckDB `DECIMAL` / Postgres `NUMERIC` 一致），内存中用 `Decimal`，**不经过二进制 float 往返**。
-- 当前 `core.models` 的 `Bar / RawBar / CanonicalBar` 仍声明 `float`。存储层对这些对象的摄入规则：`float` → `Decimal(str(value))`（最短 repr），再以 round-half-even 取 8 位小数；传入 `Decimal` / `str` / `int` 时**不做静默舍入**，小数位或总位数超出列精度直接报错。读取侧提供 `scan_rows` / `scan_table`（精确 `Decimal` / Arrow decimal），协议方法 `scan` 返回旧的 float 模型（有损，精确值放在 `RawBar.extra["*_exact"]`）。待交易日历 / bar 模型 schema 的 PR（#7）合入后，本分支会 rebase 并让模型字段与 schema 对齐。
+- `core.models` 的 `Bar / RawBar / CanonicalBar` 价格与成交量已是 `Decimal`。存储层摄入：`Decimal` / `str` / `int` **不做静默舍入**，小数位或总位数超出列精度直接报错；若仍传入 `float`，则用 `Decimal(str(value))`（最短 repr）再量化到 8 位小数。读取侧 `scan` / `scan_rows` / `scan_table` 均返回精确 `Decimal` 或 Arrow decimal，不经二进制 float 往返。日线字段声明以 `openbars.core.schema` 为准，存储层在其上补充分区键（`market`）、`session`、`flags`、`price_source` 等实现列（见 §10.3、§10.7）。
 - 模型没有的字段不改模型，而是放在存储行映射里：`RawBar.extra` 的键 `instrument_id / session_date / adjustment / price_basis / adjustment_scope / adjustment_as_of / session_semantics / currency / volume_basis / revision / vwap / trade_count`（未知键忽略）；`market` 取自 `RawBatch.request.market`；`session_date` 缺省为 `ts_start` 的 UTC 日期（normalizer 应提供交易所本地交易日）。规范层 `CanonicalBar` 的 `market` 取自 instrument id 前缀（`us:eq:…`）或 instrument master；`policy_version`（默认 `research-daily-v2`）、`selection_reason`（默认 `unspecified`）、`capabilities`、`source_fingerprint`（默认由键与 OHLCV 的 SHA-256 生成）为 `upsert` 的参数，`quality_status` 由 `QualityFlag` 推导（`divergent` > `spike_suspect` > `volume_missing` > `complete`）。时间戳必须带时区（naive 一律拒绝）。
 - 校验：写入前检查 OHLCV 不变量（价格 > 0、`low ≤ open/close ≤ high`、成交量 ≥ 0），与 upstream 一致；raw 可用 `validate=False` 照原样归档。
 
@@ -393,9 +393,9 @@ data/
 
 v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；计划让读取方遇到更高版本的文件时拒绝而不是猜测（v1 尚未实现该检查）。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
 
-### 10.1 Arrow / Parquet schema 声明（`openbars.core.schema`）
+### 10.7 Arrow / Parquet schema 声明（`openbars.core.schema`）
 
-当前只声明 schema（存储实现——Parquet 写入、DuckDB 视图、compaction、Postgres 映射——随后续 issue 加入）。`SCHEMA_VERSION = 1`；schema 的 metadata 带 `openbars.schema_version`。模块不强依赖 pyarrow：字段声明是纯数据（`RAW_DAILY_BAR_FIELDS`、`CANONICAL_DAILY_FIELDS`），`raw_daily_bar_schema()` / `canonical_daily_schema()` 在调用时才惰性构造 `pyarrow.Schema`（需要 `openbars[parquet]`）。
+日线字段的权威声明在 `openbars.core.schema`；本层的 Parquet 写入、DuckDB 视图、compaction 与 Postgres 映射见上文 §10.1–10.6，并在实现中复用这些字段（另补分区与元数据列）。`SCHEMA_VERSION = 1`；schema 的 metadata 带 `openbars.schema_version`。模块不强依赖 pyarrow：字段声明是纯数据（`RAW_DAILY_BAR_FIELDS`、`CANONICAL_DAILY_FIELDS`），`raw_daily_bar_schema()` / `canonical_daily_schema()` 在调用时才惰性构造 `pyarrow.Schema`（需要 `openbars[parquet]`）。
 
 类型映射：价格 `decimal128(20,8)`；成交量 `decimal128(28,8)`；`session_date` / `adjustment_as_of` 为 `date32`；时间戳为 `timestamp[us, tz=UTC]`；`revision` 为 `int64`；`capabilities` 为 `list<item: string>`；其余为 `string`。
 

@@ -54,6 +54,7 @@ MODULES = [
     "openbars.storage.schema",
     "openbars.storage.rows",
     "openbars.storage.state",
+    "openbars.storage.state_schema",
     "openbars.storage.errors",
     "openbars.raw.archive",
     "openbars.core.atomic",

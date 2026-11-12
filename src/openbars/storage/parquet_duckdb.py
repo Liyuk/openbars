@@ -418,7 +418,7 @@ class ParquetRawStore:
         return table_to_rows(self.scan_table(provider, market, interval, window, **kw), RawBarRow)
 
     def scan(self, provider: str, market: Market, interval: Interval, window: DateRange) -> Iterator[RawBar]:
-        """Protocol scan: legacy ``RawBar`` (float, lossy; exact values are in ``extra``)."""
+        """Protocol scan: ``RawBar`` with ``Decimal`` prices and volumes."""
         for row in self.scan_rows(provider, market, interval, window):
             yield row.to_raw_bar()
 
@@ -443,7 +443,7 @@ class ParquetCanonicalStore:
         capabilities: Sequence[str] = (),
         market: Market | None = None,
     ) -> int:
-        """Upsert legacy ``CanonicalBar`` models.
+        """Upsert ``CanonicalBar`` models.
 
         Fields the model lacks come from the keyword arguments (see architecture.md section
         10). ``market`` defaults to the instrument's market (id prefix or instrument master).
@@ -495,7 +495,7 @@ class ParquetCanonicalStore:
         return table_to_rows(self.scan_table(instrument_ids, interval, window, **kw), CanonicalBarRow)
 
     def scan(self, instrument_ids: Sequence[str], interval: Interval, window: DateRange) -> Iterator[CanonicalBar]:
-        """Protocol scan: legacy ``CanonicalBar`` (float, lossy) for the default policy."""
+        """Protocol scan: ``CanonicalBar`` with ``Decimal`` prices and volumes, for the default policy."""
         for row in self.scan_rows(instrument_ids, interval, window):
             yield row.to_canonical_bar()
 
