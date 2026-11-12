@@ -81,6 +81,7 @@ from openbars.storage.rows import (
     row_values,
     check_rows,
     to_decimal,
+    available_by_utc,
 )
 from openbars.storage.schema import (
     ADJUST_FACTORS_SCHEMA,
@@ -297,7 +298,7 @@ def check_upstream_compat(catalog: Catalog) -> None:
 
 
 # Additive nullable columns a pre-migration database may lack (``write=True`` adds them).
-_OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at")})  # #154
+_OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at"), ("canonical_bars", "freshness")})
 
 
 # #124: A-share adjust factors. Additive table: a database without it reads as empty and gets
@@ -370,6 +371,17 @@ def _table_ddl(name: str, schema: pa.Schema, primary_key: Sequence[str] = ()) ->
     return f"CREATE TABLE IF NOT EXISTS {qident(name)} (\n  " + ",\n  ".join(cols) + "\n)"
 
 
+def _canonical_history_ddl() -> str:
+    columns = [
+        f"{qident(f.name)} {postgres_type(f.type)}{'' if f.nullable else ' NOT NULL'}"
+        for f in CANONICAL_BARS_SCHEMA
+    ]
+    return (
+        'CREATE TABLE IF NOT EXISTS "canonical_bars_history" '
+        '(history_id BIGSERIAL PRIMARY KEY, ' + ", ".join(columns) + ")"
+    )
+
+
 def _unique_index(name: str, table: str, cols: Sequence[str], extra: Sequence[str], time_col: str, daily: bool) -> str:
     key = ", ".join([*(qident(c) for c in cols), *extra, qident(time_col)])
     pred = "= '1d'" if daily else "<> '1d'"
@@ -386,10 +398,12 @@ def native_ddl() -> list[str]:
         _unique_index("ux_raw_bars_intraday", "raw_bars", _RAW_KEY_COLS, [_RAW_ENTITY], "ts_start", False),
         'CREATE INDEX IF NOT EXISTS "ix_raw_bars_scan" ON "raw_bars" ("provider", "market", "interval", "session_date")',
         _table_ddl("canonical_bars", CANONICAL_BARS_SCHEMA),
+        _canonical_history_ddl(),
         _unique_index("ux_canonical_bars_daily", "canonical_bars", _CANON_KEY_COLS, [], "session_date", True),
         _unique_index("ux_canonical_bars_intraday", "canonical_bars", _CANON_KEY_COLS, [], "ts_start", False),
         # #154: additive, nullable; databases created before it get the column on write=True.
         'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ',
+        'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS freshness TEXT',
         'CREATE INDEX IF NOT EXISTS "ix_canonical_bars_scan" ON "canonical_bars" ("market", "interval", "policy_version", "session_date")',
         _table_ddl("instruments", INSTRUMENTS_SCHEMA, _REF_KEYS["instruments"]),
         _table_ddl("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, _REF_KEYS["symbol_mappings"]),
@@ -581,6 +595,26 @@ def _write_rows(conn: _Conn, rows: Sequence[Any], schema: pa.Schema, daily_sql: 
     return len(daily) + len(intraday)
 
 
+def _archive_canonical_versions(conn: _Conn, rows: Sequence[CanonicalBarRow]) -> None:
+    """Copy a replaced canonical row to native PIT history before the current-row upsert."""
+    cols = [f.name for f in CANONICAL_BARS_SCHEMA]
+    insert = (
+        'INSERT INTO "canonical_bars_history" (' + ", ".join(qident(c) for c in cols)
+        + ") VALUES (" + ", ".join("?" for _ in cols) + ")"
+    )
+    material = [c for c in cols if c not in {"generated_at", "available_at"}]
+    for row in rows:
+        time_col = "session_date" if row.interval is Interval.D1 else "ts_start"
+        existing = conn.execute(
+            f'SELECT * FROM "canonical_bars" WHERE instrument_id = ? AND "interval" = ? '
+            f'AND policy_version = ? AND {qident(time_col)} = ?',
+            [row.instrument_id, row.interval.value, row.policy_version,
+             row.session_date if time_col == "session_date" else row.ts_start],
+        ).fetchone()
+        if existing is not None and any(existing.get(c) != value for c, value in zip(cols, row_values(row, CANONICAL_BARS_SCHEMA)) if c in material):
+            conn.execute(insert, [existing.get(c) for c in cols])
+
+
 class PgRawStore(_Guard):
     def __init__(self, session: _Session, write: bool) -> None:
         super().__init__(write)
@@ -701,6 +735,7 @@ class PgCanonicalStore(_Guard):
         if not rows:
             return 0
         with self._session() as conn:
+            _archive_canonical_versions(conn, rows)
             return _write_rows(conn, rows, CANONICAL_BARS_SCHEMA, _CANON_DAILY_SQL, _CANON_INTRADAY_SQL)
 
     def scan_rows(
@@ -711,9 +746,31 @@ class PgCanonicalStore(_Guard):
         *,
         market: Market | None = None,
         policy_version: str | None = DEFAULT_POLICY_VERSION,
+        available_by: datetime | None = None,
     ) -> list[CanonicalBarRow]:
-        sql = 'SELECT * FROM canonical_bars WHERE "interval" = ? AND session_date BETWEEN ? AND ?'
-        params: list[Any] = [Interval(interval).value, window.start, window.end]
+        table = 'canonical_bars'
+        if available_by is not None:
+            available_by = available_by_utc(available_by)
+            with self._session() as conn:
+                history_exists = conn.execute(
+                    "SELECT to_regclass('canonical_bars_history') AS name"
+                ).fetchone()["name"] is not None
+            if history_exists:
+                cols = ", ".join(qident(f.name) for f in CANONICAL_BARS_SCHEMA)
+                table = (
+                    f'(SELECT {cols} FROM (SELECT {cols}, row_number() OVER (PARTITION BY instrument_id, '
+                    '"interval", policy_version, CASE WHEN "interval" = \'1d\' THEN session_date END, '
+                    'CASE WHEN "interval" <> \'1d\' THEN ts_start END ORDER BY is_current DESC, '
+                    'history_id DESC NULLS LAST) AS _rn FROM (SELECT ' + cols + ', history_id, false AS is_current FROM canonical_bars_history '
+                    'UNION ALL SELECT ' + cols + ', NULL AS history_id, true AS is_current FROM canonical_bars) h WHERE available_at <= ?) ranked '
+                    'WHERE _rn = 1) AS visible'
+                )
+        sql = f'SELECT * FROM {table} WHERE "interval" = ? AND session_date BETWEEN ? AND ?'
+        params: list[Any] = ([available_by] if available_by is not None and history_exists else []) + [Interval(interval).value, window.start, window.end]
+        if available_by is not None and not history_exists:
+            # Legacy native schemas can only filter the current row, not replay revisions.
+            sql += " AND available_at <= ?"
+            params.append(available_by)
         if market is not None:
             sql += " AND market = ?"
             params.append(Market(market).value)

@@ -28,8 +28,9 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from typing import Any, Protocol
 
 from openbars.core.models import DateRange, Interval, Market, QualityFlag, RawBar, Session
@@ -72,6 +73,42 @@ def stamp_available_at(rows: Sequence[Any], now: datetime | None = None) -> list
     return [r if getattr(r, "available_at", None) is not None else replace(r, available_at=stamp) for r in rows]
 
 
+def _freshness_for_raw(bar: RawBar) -> str:
+    explicit = bar.extra.get("freshness")
+    if explicit in {"provisional", "final"}:
+        return explicit
+    market_value = bar.extra.get("market") or (bar.instrument_id or "").split(":", 1)[0]
+    market = str(getattr(market_value, "value", market_value))
+    timezones = {
+        "us": "America/New_York", "cn": "Asia/Shanghai", "hk": "Asia/Hong_Kong",
+        "crypto": "UTC",
+    }
+    timezone = ZoneInfo(timezones.get(market, "UTC"))
+    session_day = _session_date(bar)
+    if market == "cn":
+        from openbars.calendars.cn import trading_session
+
+        session = trading_session(session_day)
+        ready_at = session.closes_at + timedelta(minutes=30) if session else datetime.combine(
+            session_day, datetime.min.time(), tzinfo=timezone
+        )
+    elif market == "hk":
+        from openbars.calendars.hk import HKCalendar
+
+        bounds = HKCalendar().session_bounds(session_day)
+        ready_at = bounds[-1][1] + timedelta(minutes=30) if bounds else datetime.combine(
+            session_day, datetime.min.time(), tzinfo=timezone
+        )
+    elif market == "crypto":
+        from openbars.calendars.crypto import CryptoCalendar
+
+        ready_at = CryptoCalendar().trading_session(session_day).closes_at + timedelta(minutes=30)
+    else:
+        ready_at = datetime.combine(session_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone)
+    seen_at = raw_ingested_at(bar) or datetime.now(UTC)
+    return "final" if seen_at >= ready_at.astimezone(UTC) else "provisional"
+
+
 def observation_from_raw(bar: RawBar) -> SourceObservation | None:
     """Map a raw daily bar to a reconciler observation (None when it has no volume)."""
     if bar.volume is None:
@@ -81,6 +118,7 @@ def observation_from_raw(bar: RawBar) -> SourceObservation | None:
     else:
         feed = (bar.feed or "default").split(":")[-1]
     adjustment = hourly_adjustment(bar)
+    freshness = _freshness_for_raw(bar)
     symbol = bar.symbol_as_returned
     return SourceObservation(
         instrument_id=bar.instrument_id or None,
@@ -96,6 +134,7 @@ def observation_from_raw(bar: RawBar) -> SourceObservation | None:
         adjustment=adjustment,
         series=bar.series,
         available_at=raw_ingested_at(bar),
+        freshness=freshness,
     )
 
 
@@ -370,6 +409,7 @@ class CnCanonicalSink:
             volume_source=source,
             sources_seen=(bar.provider,),
             available_at=raw_ingested_at(bar),
+            freshness=_freshness_for_raw(bar),
         )
 
     def _ingest_factors(self, job: Job, by_id: Mapping[str, Sequence[RawBar]]) -> None:
@@ -547,6 +587,7 @@ def parquet_canonical_writer(canonical_store: object) -> CanonicalWriter:
                 generated_at=r.generated_at,
                 currency=r.currency,
                 available_at=r.available_at,
+                freshness=r.freshness,
             )
             for r in rows
         ]

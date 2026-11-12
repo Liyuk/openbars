@@ -159,6 +159,8 @@ CANONICAL_BARS_FIELDS = [
     # source's raw ``ingested_at``, or the upstream source row's ``received_at``). Older files
     # and pre-#154 Postgres tables lack it and read back as null; ``SCHEMA_VERSION`` stays 1.
     _f("available_at", TS, True),
+    # Additive freshness tier. Missing/null rows predate tiering and are treated as final.
+    _f("freshness", pa.string(), True),
 ]
 
 INSTRUMENTS_FIELDS = [

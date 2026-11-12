@@ -501,8 +501,9 @@ def test_canonical_h1_multiple_bars_same_session_date_and_compaction(backend):
     # compaction keeps every hourly row and key
     keys = {r.key() for r in after}
     results = [r for r in backend.compact("canonical") if "interval=1h" in r.partition]
-    assert len(results) == 1 and results[0].parts_before == 2 and results[0].rows_after == 7
+    assert len(results) == 1 and results[0].parts_before == 2 and results[0].rows_after == 8
     compacted = backend.canonical.scan_rows([iid], Interval.H1, window)
+    assert len(compacted) == 7 and compacted[3].close == Decimal("77")
     assert {r.key() for r in compacted} == keys and compacted == after
 
 

@@ -337,6 +337,7 @@ class CanonicalDailyRow:
     # #154: earliest moment the bar may be used for research (the selected source's raw
     # ``ingested_at``); None when the producer does not know it.
     available_at: datetime | None = None
+    freshness: str = "final"
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "policy_version", "provider", "feed", "adjustment"):
@@ -345,6 +346,8 @@ class CanonicalDailyRow:
                 raise ValueError(f"{name} must be a non-empty string")
         if type(self.session_date) is not date:
             raise TypeError("session_date must be a date (not datetime)")
+        if self.freshness not in {"provisional", "final"}:
+            raise ValueError("freshness must be 'provisional' or 'final'")
         if isinstance(self.revision, bool) or not isinstance(self.revision, int):
             raise TypeError("revision must be int")
         if self.revision < 0:

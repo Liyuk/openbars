@@ -93,11 +93,10 @@ class StoreBarReader:
         else:
             pv = policy_version
 
-        rows = list(
-            self.backend.canonical.scan_rows(
-                ids, interval, window, market=market, policy_version=pv
-            )
-        )
+        scan_args = {"market": market, "policy_version": pv}
+        if available_by is not None and getattr(getattr(self.backend, "mode", None), "value", None) == "native":
+            scan_args["available_by"] = available_by
+        rows = list(self.backend.canonical.scan_rows(ids, interval, window, **scan_args))
         if available_by is not None:
             rows = [r for r in rows if is_available(r, available_by)]
         if not rows:

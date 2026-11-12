@@ -227,12 +227,19 @@ CANONICAL_LAYER = LayerSpec(
 LAYERS: Mapping[str, LayerSpec] = {"raw": RAW_LAYER, "canonical": CANONICAL_LAYER}
 
 
-def _dedup_sql(spec: LayerSpec, source: str) -> str:
+def _dedup_sql(spec: LayerSpec, source: str, *, has_write_rank: bool = False, has_available_at: bool = True) -> str:
     """Rows of ``source`` (must expose ``filename``) minus older duplicates (last part wins)."""
     partition = ", ".join(key_exprs(spec.key_sql))
+    if spec.name == "canonical":
+        order = (
+            "coalesce(__write_rank, try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT)) DESC, _basename DESC"
+            if has_write_rank else "_basename DESC"
+        ) + (", available_at DESC NULLS FIRST" if has_available_at else "") + ", revision DESC, generated_at DESC"
+    else:
+        order = "_basename DESC"
     return (
         "SELECT * EXCLUDE (filename, _basename, _rn) FROM ("
-        f"SELECT *, row_number() OVER (PARTITION BY {partition} ORDER BY _basename DESC) AS _rn FROM ("
+        f"SELECT *, row_number() OVER (PARTITION BY {partition} ORDER BY {order}) AS _rn FROM ("
         f"SELECT *, regexp_extract(filename, '{_BASENAME_RE}') AS _basename FROM {source}"
         ")) WHERE _rn = 1"
     )
@@ -289,6 +296,10 @@ class _PartitionedTable:
             out.append(path)
         return sorted(out)
 
+    @staticmethod
+    def _has_write_rank(files: Sequence[Path]) -> bool:
+        return any("__write_rank" in pq.read_schema(path).names for path in files)
+
     # -- partitioning --
 
     def partition_dir(self, row: Any) -> Path:
@@ -309,7 +320,7 @@ class _PartitionedTable:
             return spec.schema.empty_table()
         self.backend.check_versions(files)
         sql = (
-            f"SELECT * FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')}) "
+            f"SELECT * FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(files), has_available_at=any("available_at" in pq.read_schema(p).names for p in files))}) "
             f"WHERE {where} ORDER BY {spec.order_sql}"
         )
         con = _mem_connection()
@@ -328,7 +339,35 @@ class _PartitionedTable:
             else table.column(f.name).cast(f.type)
             for f in schema
         ]
-        return pa.Table.from_arrays(columns, schema=schema)
+        result = pa.Table.from_arrays(columns, schema=schema)
+        if self.spec.name == "canonical" and "freshness" in schema.names:
+            values = [value or "final" for value in result.column("freshness").to_pylist()]
+            pos = result.column_names.index("freshness")
+            result = result.set_column(pos, schema.field("freshness"), pa.array(values, type=pa.string()))
+        return result
+
+    def query_all(self, files: Sequence[Path]) -> pa.Table:
+        """Read every physical row, preserving canonical revisions for PIT compaction."""
+        if not files:
+            return self.spec.schema.empty_table()
+        self.backend.check_versions(files)
+        rank_expr = (
+            "coalesce(__write_rank, try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT))"
+            if self._has_write_rank(files)
+            else "try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT)"
+        )
+        exclude = "filename, __write_rank" if self._has_write_rank(files) else "filename"
+        sql = (
+            f"SELECT DISTINCT * EXCLUDE ({exclude}), " + rank_expr
+            + " AS __write_rank FROM read_parquet(?, filename=true, union_by_name=true)"
+        )
+        con = _mem_connection()
+        try:
+            table = _run_arrow(con, sql, [[str(p) for p in files]])
+        finally:
+            con.close()
+        rank = table.column("__write_rank")
+        return self._conform(table).append_column("__write_rank", rank.cast(pa.int64()))
 
     # -- writes --
 
@@ -368,7 +407,14 @@ class _PartitionedTable:
     def write_part(self, directory: Path, table: pa.Table, *, floor_ts: int = 0, suffix: str = "") -> Path:
         stamp = max(time.time_ns(), floor_ts + 1)
         path = directory / f"part-{stamp:019d}-{suffix}{uuid.uuid4().hex[:8]}.parquet"
-        table = table.cast(self.spec.schema)  # also stamps the schema-version metadata
+        rank = (
+            table.column("__write_rank")
+            if self.spec.name == "canonical" and "__write_rank" in table.column_names
+            else pa.array([stamp] * table.num_rows, type=pa.int64()) if self.spec.name == "canonical" else None
+        )
+        table = table.select(self.spec.schema.names).cast(self.spec.schema)
+        if rank is not None:
+            table = table.append_column("__write_rank", rank.cast(pa.int64()))
         atomic_write(
             path,
             lambda fh: pq.write_table(table, fh, compression="zstd", write_statistics=True),
@@ -395,7 +441,7 @@ class _PartitionedTable:
             for a, b in zip(key_exprs(spec.key_sql, "i"), key_exprs(spec.key_sql, "e"))
         )
         sql = (
-            f"WITH e AS ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')}) "
+            f"WITH e AS ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(existing_files))}) "
             f"SELECT i._idx, e.available_at FROM incoming i JOIN e ON {on} "
             + "".join(f" AND i.{c} IS NOT DISTINCT FROM e.{c}" for c in SAME_SOURCE_BAR_COLUMNS)
             + " WHERE e.available_at IS NOT NULL"
@@ -436,7 +482,7 @@ class _PartitionedTable:
             f"i.{qident(c)} IS DISTINCT FROM {'e.' + qident(c) if c in present else 'NULL'}" for c in content
         )
         sql = (
-            f"WITH e AS (SELECT *, TRUE AS _hit FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')})) "
+            f"WITH e AS (SELECT *, TRUE AS _hit FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(existing_files), has_available_at="available_at" in present)})) "
             f"SELECT i._idx FROM incoming i LEFT JOIN e ON {on} WHERE e._hit IS NULL OR ({differs})"
         )
         con = _mem_connection()
@@ -462,7 +508,7 @@ class _PartitionedTable:
                     continue
                 self.backend.check_versions(files)
                 rows_before = sum(pq.ParquetFile(p).metadata.num_rows for p in files)
-                table = self.query(files)
+                table = self.query_all(files) if self.spec.name == "canonical" else self.query(files)
                 table = table.sort_by(self._sort_columns(table))
                 self.write_part(
                     directory,
@@ -1036,6 +1082,18 @@ def _with_available_at(table: pa.Table) -> pa.Table:
     return table.append_column(field, pa.nulls(table.num_rows, field.type))
 
 
+def _with_freshness(table: pa.Table) -> pa.Table:
+    """Treat absent/null pre-tier canonical rows as final."""
+    if "freshness" not in table.column_names:
+        return table.append_column("freshness", pa.array(["final"] * table.num_rows, pa.string()))
+    col = table.column("freshness")
+    return table.set_column(
+        table.column_names.index("freshness"),
+        CANONICAL_BARS_SCHEMA.field("freshness"),
+        pc.if_else(pc.is_null(col), pa.scalar("final"), col),
+    )
+
+
 class DuckDbBarReader:
     """``BarReader`` over the DuckDB catalog views; returns ``pyarrow.Table`` (exact decimals).
 
@@ -1216,14 +1274,12 @@ class DuckDbBarReader:
             f"SELECT * FROM {CANONICAL_LAYER.view} WHERE {' AND '.join(where)} "
             "ORDER BY session_date, instrument_id, ts_start"
         )
-        table = _with_available_at(self.backend.query(sql, params))
-        if available_by is not None:
-            # point in time (#154): the stored (newest) row of each key, hidden when it was not
-            # available yet; never an older superseded part. Applied before any derivation.
-            col = table.column("available_at")
-            table = table.filter(
-                pc.fill_null(pc.less_equal(col, pa.scalar(available_by, type=col.type)), False)
-            )
+        if available_by is None:
+            table = self.backend.query(sql, params)
+        else:
+            # PIT selects the latest eligible physical revision before derivation.
+            table = self.backend.query_canonical_history(where, params, available_by)
+        table = _with_freshness(_with_available_at(table))
         if table.num_rows == 0:
             return table
         # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they
@@ -1428,6 +1484,39 @@ class ParquetDuckDbBackend:
         if self.read_only:
             raise ReadOnlyError("backend is read-only; storage writes are disabled")
 
+    def query_canonical_history(self, where: Sequence[str], params: Sequence[Any], available_by: datetime) -> pa.Table:
+        """Point-in-time selection across every canonical revision, including compacted parts."""
+        files = _PartitionedTable(self, CANONICAL_LAYER).parts()
+        if not files:
+            return CANONICAL_BARS_SCHEMA.empty_table()
+        self.check_versions(files)
+        if not any("available_at" in pq.read_schema(path).names for path in files):
+            return CANONICAL_BARS_SCHEMA.empty_table()
+        key = (
+            'instrument_id, "interval", policy_version, '
+            "CASE WHEN \"interval\" = '1d' THEN session_date END, "
+            "CASE WHEN \"interval\" <> '1d' THEN ts_start END"
+        )
+        rank_order = (
+            "coalesce(__write_rank, try_cast(regexp_extract(filename, 'part-([0-9]+)', 1) AS BIGINT)) DESC, filename DESC"
+            if _PartitionedTable._has_write_rank(files) else "filename DESC"
+        )
+        filters = [*where, "available_at <= ?"]
+        sql = (
+            "WITH eligible AS (SELECT * FROM read_parquet(?, filename=true, union_by_name=true) WHERE "
+            + " AND ".join(filters)
+            + f"), ranked AS (SELECT *, row_number() OVER (PARTITION BY {key} "
+              f"ORDER BY {rank_order}, revision DESC, generated_at DESC) AS _rn FROM eligible) "
+              "SELECT * EXCLUDE (filename, _rn) FROM ranked WHERE _rn = 1 "
+              "ORDER BY session_date, ts_start, instrument_id"
+        )
+        con = _mem_connection()
+        try:
+            table = _run_arrow(con, sql, [[str(path) for path in files], *params, available_by])
+        finally:
+            con.close()
+        return self.canonical._table._conform(table)
+
     # -- schema version guard (docs/architecture.md section 10.6) --
 
     def check_versions(self, paths: Iterable[Path]) -> None:
@@ -1517,7 +1606,11 @@ class ParquetDuckDbBackend:
                         path = spec.base + "/**/" + PART_GLOB
                         source_path = "__OPENBARS_PATH__" if self.read_only else _sql_str(glob)
                         source = f"read_parquet({source_path}, filename=true, union_by_name=true)"
-                        sql = _dedup_sql(spec, source)
+                        files = _PartitionedTable(self, spec).parts()
+                        sql = _dedup_sql(
+                            spec, source, has_write_rank=_PartitionedTable._has_write_rank(files),
+                            has_available_at=any("available_at" in pq.read_schema(p).names for p in files),
+                        )
                     else:
                         path = None
                         sql = _empty_select(spec.schema)
