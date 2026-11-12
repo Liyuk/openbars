@@ -237,7 +237,7 @@ QuotaPolicy
 - 每次请求 1 个产品（Coinbase product id，如 `TEST-USDT`）；单次请求最多 300 根。窗口更长时按每页最多 300 天分段翻页，下一页从本页末根之后开始（游标必须前进，否则报 `pagination_loop`；跨页不升序按 `invalid_payload`）；后续页失败时返回已得部分并带 `next_cursor`（Unix 秒）。无数据返回空批次而非错误。
 - **额度**：公开 REST 每 IP 每秒 10 次（`key_scope="per_ip"`，`safety_margin=0.9`），每页权重 1，经 `QuotaGate.acquire` 获取；429 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`，其余 4xx 为 `provider_rejected_request`。官方文档见 `QuotaPolicy.official_docs_url`。
 - `list_instruments(Market.CRYPTO)` 读 `GET /products`（`exchange="COINBASE"`，`active` = `status == "online"` 且（若有该字段）未 `trading_disabled`），按 `base_currency` / `quote_currency` 填充 `base_asset` / `quote_asset`；不生成 `instrument_id`。无公司行动。
-- 目前**尚未接入编排器**，也**不在 `KNOWN_SOURCES`** 中（加密对账口径由后续 issue 决定）。
+- 目前**尚未接入编排器**，也**不在 `KNOWN_SOURCES`** 中；加密对账口径见 §11.2.1 `crypto-daily-v1`。
 
 ### 3.6 Job / Checkpoint
 
@@ -532,7 +532,24 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 | 会话 | 交易所会话日（XNYS），非交易日 bar 拒收；当日会话收盘后等待可配置分钟数才视为完成 |
 | 失效通知 | 每个 policy 一行版本水位 + 按日期的水位表，供下游缓存失效 |
 
+加密日线见 §11.2.1，使用独立的 `policy_version`，美股 profile 不用于加密。
+
 `policy_version` 是口径的版本号：任何改变选数结果的规则修改都必须换新版本号（如 `openbars-daily-v1`），不得静默改写 `research-daily-v2` 的语义。
+
+#### 11.2.1 加密日线口径 `crypto-daily-v1`（`openbars.reconcile.crypto`）
+
+> 为避免打乱既有 §11.3–§11.5 的引用，本节编号为 §11.2.1（对应“加密日线口径”）。`research-daily-v2` 是美股口径，**不用于加密**；加密走独立的 `policy_version = "crypto-daily-v1"`，不替代、不修改美股默认口径（`DEFAULT_POLICY`）。
+
+- **按 `instrument_id` 对账**：id 形如 `crypto:spot:<venue>:<BASE>-<QUOTE>`（§3.2.1），归属唯一 venue。不同交易所的同 base/quote 是**两个 instrument**，**不能**拿来对价格、**不能**互相填缺口、**不能**当作独立佐证。
+- **只有同一 instrument 的同 venue 多源才进入仲裁**：
+  - Binance instrument：主源 `binance/spot/raw`（现货 klines）；备源预留 `binance/archive/raw`（同所批量归档，目前无 provider，不在 `KNOWN_SOURCES`，仅在目录中登记同样的 `utc_day / raw / none / as_traded` 口径）。
+  - Coinbase instrument：主源 `coinbase/exchange/raw`（Exchange candles），只服务 Coinbase 的 instrument，暂无备源。
+  - 无兜底源（`fill_sources` 为空）：绝不以 Coinbase 填 Binance instrument，反之亦然。
+- **venue 过滤**（`reject_cross_venue(observations, instrument_id)`）：先于选数执行。`instrument_id` 不是目标的 bar 丢弃；目标 instrument 上但来源 venue 不属于该 instrument 的 bar（如 Coinbase bar 误挂在 `crypto:spot:binance:…`）以 `cross_venue` 丢弃；来源 provider 未知同样不可挂接。被丢弃的 bar 不进入 `project_canonical_bars`，不做次源、填充或佐证，由 `reconcile_crypto` 作为拒收记录返回。
+- **容差**（`Decimal` 百分比）：价格 **1%**、成交量 **10%**（美股为 0.5% / 5%）。同一交易对的不同加密源（实时 klines 与再发布的归档）差异可能大于美股 SIP 与官方收盘价之间的差异，所以放宽；但超出仍然只标记，不平滑。`corroboration_quorum` 保持 2，且跨 venue 的 bar 不计入独立佐证。
+- **分歧处理**：同一 instrument 的主源与同所备源超出容差，`quality_status = divergent`（并去掉成交量能力，沿用既有质量标记与 `selection_reason`），**选中的仍是主源整根 bar，绝不取平均**、不拼接不同源的价量。
+- **切日与完成时间**：`CryptoCalendar`，UTC 00:00 切日、`session_semantics = utc_day`（§3.4.2）；周末、节假日都是会话；会话收盘（次日 00:00 UTC）后等待 `completion_wait_minutes = 30` 才视为完成。
+- **入口**：`policy_for_instrument(instrument_id)`（非加密 id 或无注册源的 venue 抛 `ValueError`，只有主备源随 venue 变化）、`reconcile_crypto(instrument_id, start, end, observations, *, generated_at=None)`；`CRYPTO_DAILY_V1` 是 Binance venue 策略的别名。当前未接入编排器。
 
 ### 11.3 PG 兼容策略
 
