@@ -44,6 +44,9 @@ uv run openbars plan                 # 预览任务与请求预算（不写入�
 uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
 uv run openbars status               # 任务状态、失败/死信、断点
 uv run openbars verify               # 覆盖率与多源一致性报告（只读）
+# 可选：与外部 research-daily-v2 只读 API 做影子对账（符号列表与报告都放在仓库外）
+# uv run openbars shadow --symbols-file /path/to/symbols.txt \
+#   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
 ```
 
 - `init [目录]` 把 `config.example.yaml`、`.env.example` 复制为 `config.yaml`、`.env`；任一目标已存在就报错退出（退出码 2），什么都不写。
@@ -55,6 +58,7 @@ uv run openbars verify               # 覆盖率与多源一致性报告（只�
 - 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
 - `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。内容：预期交易日（XNYS）× 标的的覆盖率、各来源（provider / feed / 复权）汇总、两源可比较时的 OHLC 与成交量一致率（默认容差价格 0.5%、成交量 5%，可由 `reconcile.tolerances` 调整；IEX 与 SIP 等不可比的序列记为 `not_comparable`，不计入分歧）、质量标记一致率（仅当有多个 projection 时，否则 `n/a`），并附“最近 N 个交易日”分段（`--recent N`）。`--start/--end` 限定窗口，`--json reports/verify.json` 把报告写到数据目录下。
 - 默认规划器把每个交易日分给最便宜的来源，所以多源重叠需要你显式抓取一部分（例如给第二个来源排审计任务）后，`verify` 才有可比较的样本。
+- `shadow` 只对外部 research-daily-v2 HTTP API 发 GET：用 `--symbols-file` 提供标的（仓库不带默认股票池），可选 `--fetch` 经 QuotaGate 按**显式标的列表**抓取（不会走整市场 grouped 接口）。报告写到 `--output`；请把符号列表和结果放在仓库外。密钥与 bearer token 不会写入报告。
 - 本仓库的端到端测试使用约 100 个合成标的（含 ETF）与离线假 provider 验证整条链路；**没有**对真实标的做抽样，也不与任何外部生产库做对比——测试不访问网络，仓库不含任何行情数据。
 
 ### 数据条款声明（重要）
@@ -92,6 +96,10 @@ uv run openbars plan                 # preview jobs and request budget (writes n
 uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
 uv run openbars status               # job states, dead jobs, checkpoints
 uv run openbars verify               # coverage and cross-source agreement report (read-only)
+# Optional: shadow-compare against an external research-daily-v2 HTTP API (read-only).
+# Keep the symbol list and the report outside this repository.
+# uv run openbars shadow --symbols-file /path/to/symbols.txt \
+#   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
 ```
 
 - `init [directory]` copies `config.example.yaml` and `.env.example` to `config.yaml` and `.env`. If either target already exists it prints an error, writes nothing and exits 2.

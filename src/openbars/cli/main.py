@@ -1,4 +1,4 @@
-"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run`` (plan + submit + execute), ``status``, ``verify``, ``config``.
+"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run``, ``status``, ``verify``, ``config``, ``shadow``.
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
@@ -33,7 +33,7 @@ from openbars.orchestrator.planner import Budget, DefaultPlanner, Plan, RawStore
 from openbars.orchestrator.runner import DEFAULT_LEASE_TTL, LocalOrchestrator
 from openbars.storage.state import SqliteStateStore
 
-COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config")
+COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
 DEFAULT_CONFIG = "./config.yaml"
@@ -122,6 +122,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
     common(show)
+
+    shadow = sub.add_parser(
+        "shadow",
+        help="read-only compare of local canonical bars to a research-daily-v2 HTTP API",
+    )
+    common(shadow)
+    shadow.add_argument("--symbols-file", required=True, help="text file of symbols, one per line (required; no default universe)")
+    shadow.add_argument("--start", type=_iso_date, required=True, help="first session (inclusive)")
+    shadow.add_argument("--end", type=_iso_date, required=True, help="last session (inclusive)")
+    shadow.add_argument("--output", required=True, help="directory for the redacted report (json + txt); not a repo path")
+    shadow.add_argument("--backend-url", default="http://127.0.0.1:8000", help="read-only backend base URL")
+    shadow.add_argument("--policy-version", default="research-daily-v2", help="backend policy version")
+    shadow.add_argument("--fetch", action="store_true", help="fetch the listed symbols through QuotaGate before comparing")
     return parser
 
 
@@ -154,6 +167,8 @@ def main(
         now = clock or (lambda: datetime.now(UTC))
         if args.command == "config":
             return _show_config(args, settings, out)
+        if args.command == "shadow":
+            return _shadow(args, settings, out, factory, now)
         if args.command == "status":
             return _status(args, settings, out)
         if args.command == "verify":
@@ -360,6 +375,38 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
 def _show_config(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
     out.line(format_settings(settings, config_path=args.config).rstrip())
     return EXIT_OK
+
+
+def _shadow(args: argparse.Namespace, settings: Settings, out: _Out, factory: ProviderFactory,
+            clock) -> int:  # fmt: skip
+    from openbars.cli.shadow import read_symbols_file, run_shadow
+    from openbars.core.models import DateRange
+
+    if args.end < args.start:
+        out.err("error: --end is before --start")
+        return EXIT_USAGE
+    try:
+        symbols = read_symbols_file(args.symbols_file)
+        code, _report, lines = run_shadow(
+            settings=settings,
+            symbols=symbols,
+            window=DateRange(args.start, args.end),
+            output=Path(args.output),
+            backend_url=args.backend_url,
+            policy_version=args.policy_version,
+            fetch=bool(args.fetch),
+            data=args.data,
+            factory=factory,
+            clock=clock,
+        )
+    except ConfigError as exc:
+        out.err(f"error: {exc}")
+        return EXIT_USAGE
+    for line in lines:
+        out.line(line)
+    return code
+
+
 
 
 # --- verify -------------------------------------------------------------------------------
