@@ -1,4 +1,4 @@
-"""Unified provider error model (ported in spirit from the equity backend)."""
+"""Unified provider error model (ported from the upstream internal implementation)."""
 
 from __future__ import annotations
 
