@@ -89,6 +89,7 @@ from openbars.storage.schema import (
     qident,
     state_ddl,
 )
+from openbars.storage.bar_reader import StoreBarReader
 from openbars.storage.state import SqliteStateStore, SqlStateStore
 from openbars.storage.compat_side import CompatSideStore
 from openbars.storage.compat_write import (
@@ -1740,6 +1741,7 @@ class PostgresBackend:
             self.raw = PgRawStore(self._session, write)
             self.canonical = PgCanonicalStore(self._session, write, self.market_of)
             self.state = PgStateStore(self._session, write)
+        self.reader = StoreBarReader(self)
 
     def market_of(self, instrument_id: str) -> Market:
         prefix = instrument_id.split(":", 1)[0]
