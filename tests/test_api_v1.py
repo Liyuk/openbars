@@ -431,3 +431,48 @@ def test_raw_default_window_uses_selected_source(client, backend):
     body = client.get('/api/v1/bars', params={'id': T1, 'source': 'prov_c'}).json()
     assert body['start'] == body['end'] == str(day)
     assert [bar['session_date'] for bar in body['bars']] == [str(day)]
+
+
+def test_hourly_historical_sources_and_source_defaults(client, backend):
+    other_day = date(2020, 2, 3)
+    for provider, day in [('prov_a', DAYS[0]), ('prov_b', other_day)]:
+        batch = raw_batch([SYM], [day], provider=provider, fetch_id='hourly-' + provider)
+        rows = [replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+                for row in raw_rows_from_batch(batch)]
+        backend.raw.append_rows(rows)
+    params = {'id': T1, 'interval': '1h'}
+    initial = client.get('/api/v1/bars', params=params).json()
+    assert initial['available_sources'] == ['prov_a', 'prov_b']
+    for provider, day in [('prov_a', DAYS[0]), ('prov_b', other_day)]:
+        body = client.get('/api/v1/bars', params={**params, 'source': provider}).json()
+        assert body['available_sources'] == ['prov_a', 'prov_b']
+        assert body['start'] == body['end'] == str(day)
+        assert [bar['session_date'] for bar in body['bars']] == [str(day)]
+    canonical = replace(_canon(T1, DAYS[1], '10'), interval=Interval.H1)
+    backend.canonical.upsert_rows([canonical])
+    body = client.get('/api/v1/bars', params=params).json()
+    assert body['source'] == 'canonical'
+    assert body['start'] == body['end'] == str(DAYS[1])
+    assert len(body['bars']) == 1
+    assert body['available_sources'] == ['canonical', 'prov_a', 'prov_b']
+    daily = client.get('/api/v1/bars', params={'id': T1}).json()
+    assert daily['start'] == str(START) and daily['end'] == str(END)
+    assert daily['available_sources'] == ['canonical', 'prov_a', 'prov_b']
+    daily_narrow = client.get('/api/v1/bars', params={
+        'id': T1, 'start': str(DAYS[4]), 'end': str(DAYS[4]),
+    }).json()
+    assert daily_narrow['available_sources'] == ['canonical', 'prov_a']
+
+
+def test_hourly_raw_default_window_is_bounded_for_long_history(client, backend):
+    days = [date(2020, 1, 2), date(2025, 1, 2)]
+    batch = raw_batch([SYM], days, provider='prov_long', fetch_id='hourly-long')
+    backend.raw.append_rows([
+        replace(row, instrument_id=T1, market=Market.US, interval=Interval.H1)
+        for row in raw_rows_from_batch(batch)
+    ])
+    response = client.get('/api/v1/bars', params={'id': T1, 'interval': '1h', 'source': 'prov_long'})
+    assert response.status_code == 200
+    body = response.json()
+    assert days[0].isoformat() <= body['start'] <= body['end'] == days[-1].isoformat()
+    assert body['bars'][-1]['session_date'] == days[-1].isoformat()

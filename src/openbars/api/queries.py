@@ -550,6 +550,7 @@ def list_bars(
         except ValueError as exc:
             raise QueryError("market is required when the instrument is unknown") from exc
 
+    default_raw_hourly = interval == Interval.H1 and source_name != SOURCE_CANONICAL and start is None and end is None
     # Bound the default window to stored data so we do not emit decades of gaps.
     if start is None or end is None:
         if source_name == SOURCE_CANONICAL:
@@ -572,6 +573,10 @@ def list_bars(
 
     calendar = calendar_for(market)
     n_sessions = _count_sessions(calendar, start, end)
+    if default_raw_hourly and n_sessions * 7 > MAX_BARS:
+        # A long history cannot fit in one hourly response. Show its latest day.
+        start = end
+        n_sessions = _count_sessions(calendar, start, end)
     if interval == Interval.H1 and n_sessions * 7 > MAX_BARS:
         raise QueryError(f"window has too many hourly slots (max {MAX_BARS}); pass a smaller start/end")
     if n_sessions > MAX_BARS:
@@ -579,8 +584,12 @@ def list_bars(
             f"window has {n_sessions} sessions (max {MAX_BARS}); pass a smaller start/end"
         )
 
+    # Hourly sources may have disjoint historical coverage, including when the
+    # default canonical window is empty. Limit the scan to this instrument.
     sources = available_sources(
-        backend, iid, market=market, interval=interval, start=start, end=end
+        backend, iid, market=market, interval=interval,
+        start=None if interval == Interval.H1 else start,
+        end=None if interval == Interval.H1 else end,
     )
     session_list = _session_dates(calendar, start, end)
     present: set[date] = set()

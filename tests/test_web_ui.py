@@ -118,3 +118,15 @@ def test_hourly_controls_and_new_york_labels(client):
     assert 'chart.hourly_bars' in js
     for key in ("interval.label", "chart.hours", "chart.no_hourly", "chart.hourly_bars"):
         assert len(re.findall(rf'"{re.escape(key)}"\s*:', js)) == 2
+
+
+def test_chart_source_and_interval_changes_reset_dates(client):
+    js = client.get('/assets/app.js').text
+    assert 'sourceSel.addEventListener("change", resetChartWindow)' in js
+    assert 'document.getElementById("interval").addEventListener("change", resetChartWindow)' in js
+    reset = js.split('function resetChartWindow()', 1)[1].split('function fillSources(', 1)[0]
+    assert 'document.getElementById("chart-start").value = ""' in reset
+    assert 'document.getElementById("chart-end").value = ""' in reset
+    assert 'loadChart()' in reset
+    assert 'document.getElementById("chart-start").value = body.start' in js
+    assert 'document.getElementById("chart-end").value = body.end' in js

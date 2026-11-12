@@ -357,11 +357,16 @@
       ev.preventDefault();
       loadChart();
     });
-    sourceSel.addEventListener("change", function () {
-      if (document.getElementById("chart-q").value.trim()) loadChart();
-    });
+    sourceSel.addEventListener("change", resetChartWindow);
+    document.getElementById("interval").addEventListener("change", resetChartWindow);
 
     if (initial) loadChart();
+  }
+
+  function resetChartWindow() {
+    document.getElementById("chart-start").value = "";
+    document.getElementById("chart-end").value = "";
+    if (document.getElementById("chart-q").value.trim()) loadChart();
   }
 
   function fillSources(available, selected) {
