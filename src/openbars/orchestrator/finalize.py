@@ -100,8 +100,25 @@ class ReconcilingSink:
     other_providers: Sequence[str] = ()
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
+        if Interval(job.interval) is Interval.H1 and Market(job.market) is Market.US:
+            from openbars.reconcile.hourly import reconcile_hourly
+
+            if not bars:
+                return
+            days = [_session_date(b) for b in bars]
+            window = DateRange(min(days), max(days))
+            extra = []
+            if self.raw is not None:
+                for provider in self.other_providers:
+                    extra.extend(self.raw.scan(provider, Market.US, Interval.H1, window))
+            touched = {(b.instrument_id or b.symbol_as_returned, b.ts_start) for b in bars}
+            rows = reconcile_hourly(b for b in (*bars, *extra)
+                                    if (b.instrument_id or b.symbol_as_returned, b.ts_start) in touched)
+            if rows:
+                self.writer(rows, Market.US)
+            return
         if Interval(job.interval) is not Interval.D1:
-            return  # the reconciler is daily-only for now
+            return
         if Market(job.market) in (Market.CRYPTO, Market.CN, Market.HK):
             return  # XNYS reconciler: other markets stay raw-only unless their own sink handles them
         mine = [o for o in (observation_from_raw(b) for b in bars) if o is not None]
@@ -462,7 +479,7 @@ def parquet_canonical_writer(canonical_store: object) -> CanonicalWriter:
         from openbars.storage.rows import CanonicalBarRow
 
         mapped = [
-            CanonicalBarRow(
+            r if isinstance(r, CanonicalBarRow) else CanonicalBarRow(
                 instrument_id=r.instrument_id,
                 market=market,
                 interval=Interval.D1,

@@ -1,0 +1,62 @@
+from datetime import UTC, date, datetime
+from decimal import Decimal as D
+
+from openbars.core.models import Interval, Market, RawBar
+from openbars.orchestrator.finalize import ReconcilingSink, parquet_canonical_writer
+from openbars.orchestrator.jobs import Job
+from openbars.reconcile.reconciler import MemoryReconciler
+
+
+def bar(hour, provider='massive', feed='aggs', close='10', session='regular'):
+    return RawBar(provider=provider, feed=feed, symbol_as_returned='TEST1', fetch_id='x',
+                  instrument_id='us:TEST1', interval=Interval.H1,
+                  ts_start=datetime(2025, 1, 2, hour, tzinfo=UTC), session_date=date(2025, 1, 2),
+                  open=D('10'), high=D('20'), low=D('5'), close=D(close), volume=D('100'),
+                  extra={'session': session})
+
+
+def test_hourly_selection_and_daily_comparison():
+    from openbars.reconcile.hourly import reconcile_hourly, compare_hourly_to_daily
+    rows = reconcile_hourly([bar(15), bar(16), bar(15, 'alpaca', 'sip', '15')])
+    assert len(rows) == 2
+    assert rows[0].provider == 'massive'
+    assert rows[0].quality_status == 'divergent'
+    daily = rows[0]
+    from dataclasses import replace
+    daily = replace(daily, interval=Interval.D1, volume=D('200'))
+    report = compare_hourly_to_daily(rows + (replace(rows[0], session='pre'),), daily)
+    assert report.differences == ()
+    assert report.aggregate.volume == D('200')
+    assert compare_hourly_to_daily(rows, replace(daily, close=D('15'))).differences == ('close',)
+
+
+def test_hourly_sink_round_trip_and_priority(tmp_path):
+    from openbars.core.models import DateRange
+    from openbars.orchestrator.jobs import JobKind
+    from openbars.storage.parquet_duckdb import open_backend
+    backend = open_backend(tmp_path)
+    sink = ReconcilingSink(MemoryReconciler(), parquet_canonical_writer(backend.canonical))
+    day = date(2025, 1, 2)
+    job = Job('job', JobKind.BACKFILL, 'massive', Market.US, Interval.H1,
+              ('us:TEST1',), DateRange(day, day))
+    sink.after_fetch(job, [bar(15), bar(16, session='post')])
+    rows = backend.canonical.scan_rows(['us:TEST1'], Interval.H1, DateRange(day, day))
+    assert {r.ts_start.hour for r in rows} == {15, 16}
+    assert {r.session.value for r in rows} == {'regular', 'post'}
+    assert backend.canonical.scan_rows(['us:TEST1'], Interval.D1, DateRange(day, day)) == []
+
+
+def test_secondary_fill_and_quality_rules():
+    from dataclasses import replace
+    from openbars.reconcile.hourly import reconcile_hourly
+    from openbars.reconcile.overrides import SelectionOverride
+    from openbars.reconcile.projection import ACTION_MARK_SUSPECT
+    sip = bar(15, 'alpaca', 'sip')
+    assert reconcile_hourly([sip])[0].provider == 'alpaca'
+    assert reconcile_hourly([bar(15, 'yfinance', 'yahoo')])[0].provider == 'yfinance'
+    assert reconcile_hourly([bar(15, 'twelve_data', 'intraday')])[0].provider == 'twelve_data'
+    assert reconcile_hourly([bar(15, 'alpaca', 'iex')]) == ()
+    missing = replace(bar(15), volume=D('0'))
+    assert reconcile_hourly([missing])[0].quality_status == 'volume_missing'
+    marked = reconcile_hourly([bar(15)], overrides={('us:TEST1', bar(15).ts_start): SelectionOverride(ACTION_MARK_SUSPECT)})
+    assert marked[0].quality_status == 'spike_suspect'
