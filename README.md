@@ -125,6 +125,13 @@ uv run openbars plan && uv run openbars run
 - 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `"00700"` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
 - `verify`（港股）：按 XHKG 日历、`hk-daily-v1`，评分落库的 RAW 序列，不评分读取时派生的调整结果。
 
+### 存储维护（Parquet 后端）
+
+- `openbars usage [--json]`：按 layer / market / interval / year（raw 另按 provider）汇总文件数与字节数，日线与小时线分开列；只打印相对数据目录的路径。
+- `openbars compact [--layer raw|canonical|all] [--min-parts N]`：默认只列出会合并的分区与预计腾出的空间，加 `--apply` 才执行；去重语义不变。part 文件变多时（尤其是小时线回填之后）跑一次即可，执行时持有写锁，可与 `run` 并存。
+- 保留策略默认关闭：只有在 `storage.retention` 写了规则（例如 `- {layer: raw, keep_years: 2, market: us, interval: 1h}`）时，`openbars retention` 才会列出早于保留窗口的整年 raw 分区，加 `--apply` 才删除。canonical 与 ref 永远保留，配置成其它 layer 会报错。若 `history.start` 早于保留窗口，之后的 `plan` / `run` 可能重新拉取被删的区间。
+- `openbars backup <目标目录> [--market M] [--interval I]`：在写锁下把数据目录复制到一个新的（或空的）目录，`state.db` / `quota.db` 用 SQLite 在线备份；跳过 `.lock`、临时文件、点文件与可重建的 `openbars.duckdb`，写入 `backup-manifest.json`。备份不包含配置文件、dotenv 或任何密钥 / DSN（它们本就不在数据目录里）。恢复：停掉 `run`，把 `storage.path` 指向备份目录（或把它复制回原位置）即可。
+
 ### 数据条款声明（重要）
 
 - **openbars 不分发、不托管任何行情数据。** 仓库里只有代码、规则与文档。
@@ -240,6 +247,13 @@ uv run openbars plan && uv run openbars run
 
 - Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `"00700"` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
 - `verify` (Hong Kong): XHKG calendar, `hk-daily-v1`, scores the stored RAW series, not the read-time adjusted view.
+
+### Storage maintenance (Parquet backend)
+
+- `openbars usage [--json]`: file count and bytes per layer / market / interval / year (raw also per provider), daily and hourly listed apart; prints paths relative to the data directory only.
+- `openbars compact [--layer raw|canonical|all] [--min-parts N]`: lists the partitions it would merge and the estimated space freed; only `--apply` changes files. Deduplication semantics are unchanged. Run it when parts pile up (for example after an hourly backfill); it holds the writer lock, so it is safe next to `run`.
+- Retention is off by default. Only when `storage.retention` has rules (for example `- {layer: raw, keep_years: 2, market: us, interval: 1h}`) does `openbars retention` list whole raw `year=` partitions older than the window, and only `--apply` deletes them. Canonical and ref are always kept; any other layer is a config error. If `history.start` reaches before the window, later `plan` / `run` may fetch the pruned range again.
+- `openbars backup <dest> [--market M] [--interval I]`: copies the data directory to a new (or empty) directory under the writer lock, `state.db` / `quota.db` via the SQLite online backup; skips `.lock`, temp files, dotfiles and the rebuildable `openbars.duckdb`, and writes `backup-manifest.json`. Backups never contain the config file, dotenv files, keys or DSNs (none of them live in the data directory). To restore, stop `run` and point `storage.path` at the backup (or copy it back).
 
 ### Data terms disclaimer
 

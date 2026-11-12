@@ -1,4 +1,5 @@
-"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run``, ``status``, ``verify``, ``config``, ``shadow``, ``serve``.
+"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run``, ``status``, ``verify``, ``config``, ``shadow``, ``serve``,
+and storage maintenance (``usage``, ``compact``, ``retention``, ``backup``; see ``cli/storage.py``).
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
@@ -39,7 +40,8 @@ from openbars.storage.compat_write import AmbiguousInstrumentError
 from openbars.storage.errors import StorageError
 from openbars.storage.state import SqliteStateStore
 
-COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow", "serve")
+COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow", "serve",
+            "usage", "compact", "retention", "backup")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
 DEFAULT_CONFIG = "./config.yaml"
@@ -147,6 +149,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from openbars.cli.serve import register as register_serve
 
     register_serve(sub, common)
+    from openbars.cli.storage import register as register_storage
+
+    register_storage(sub, common)
     return parser
 
 
@@ -199,6 +204,10 @@ def main(
             from openbars.cli.serve import run_serve
 
             return run_serve(args, settings, out)
+        if args.command in ("usage", "compact", "retention", "backup"):
+            from openbars.cli.storage import run_storage
+
+            return run_storage(args, settings, out, now)
         return _run(args, settings, out, factory, now)
     except ConfigError as exc:
         out.err(f"error: {exc}")
@@ -265,7 +274,7 @@ def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, n
     )
     return planner.plan(
         settings.selection,
-        RawStoreCoverage(backend.raw),
+        RawStoreCoverage(backend.raw, state=backend.state),
         now=now,
         universe=settings.universe,
         providers=providers,
