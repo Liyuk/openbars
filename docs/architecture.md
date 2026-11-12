@@ -261,6 +261,20 @@ QuotaPolicy
 - `list_instruments(Market.CRYPTO)` 读 `GET /products`（`exchange="COINBASE"`，`active` = `status == "online"` 且（若有该字段）未 `trading_disabled`），按 `base_currency` / `quote_currency` 填充 `base_asset` / `quote_asset`；不生成 `instrument_id`。无公司行动。
 - 已接入编排器（见 §3.5.1 的“编排器接入”：用 `BASE-QUOTE` product id 作 symbol，只发往 Coinbase；`run` / `plan --submit` 会自动列出并入库 Coinbase 交易对），但**不在 `KNOWN_SOURCES`** 中；公开端点冒烟见 `tests/test_crypto_public_smoke.py`（仅在 `OPENBARS_CRYPTO_SMOKE=1` 时运行，默认跳过，只用 `tmp_path`，不入库交易对）；加密对账口径见 §11.2.1 `crypto-daily-v1`。
 
+#### 3.5.3 BaoStock A 股日线（`openbars.providers.cn.baostock`）
+
+设计讨论：[#54](https://github.com/Liyuk/openbars/discussions/54)。
+
+- **默认存不复权价**：`query_history_k_data_plus` 固定 `adjustflag="3"`（不复权），永不请求 1/2；来源标识 `baostock/ashare/raw`（常量 `BAOSTOCK_ASHARE_RAW`，不属于美股 `KNOWN_SOURCES`），口径 `raw / none / regular / as_traded`，币种 `CNY`。前/后复权留给查询时派生（#60），本版不做；涨跌停标记（#61）也不在本版。
+- **同时取复权因子与停牌字段**：`fetch_adjust_factors(request)` 调 `query_adjust_factor`，返回 `BaoStockAdjustFactor`（`code`、`divid_operate_date`、`fore/back_adjust_factor`、`adjust_factor` 均为 `Decimal`，`source="baostock"`、`method="pct_return"` 涨跌幅复权法）；窗口内无事件返回 `[]`。官方默认起点是 2015-01-01，窗口起点太晚会漏掉更早的因子，需要完整历史时请由调用方传入上市日或 `1990-01-01`。`preclose`、`tradestatus`、`isST`、`pctChg`、`amount`、`turn` 写入 `RawBar.extra`；**停牌行（`tradestatus=0`）保留在 raw 中**，成交量/成交额可为 0。
+- **可选依赖，不需要 key**：`pip install openbars[baostock]`（匿名登录，`secret_values()` 为空）。模块导入不依赖该包，仅默认客户端在取数时懒加载；未安装抛不可重试的 `baostock_not_installed`。BaoStock 是 login + socket 协议而非 HTTP，适配器通过可注入的小客户端（login / logout / 查询）工作，测试用假客户端，默认无网络。默认客户端登录时设 10 秒 socket 超时，每次取数“登录 → 一次查询 → 登出”，**不做循环重试**，失败映射为 `provider_unavailable`（网络类，可重试标记）/ `provider_rejected_request`（参数类）。
+- **symbol** 用 BaoStock 原生写法 `sh.600000` / `sz.000001`；`600000.SH` 等写法经 `normalize.cn_instruments` 归一，裸 6 位代码拒绝。`PER_SYMBOL`，每次一个 symbol；`ts_start` 为该交易日 `00:00 Asia/Shanghai`，价格与成交量以字符串转 `Decimal`，不经 float。
+- **额度**：BaoStock 没有公开的限速数字，`QuotaGate` 用保守策略（每秒 2 次、`safety_margin=0.9`、`key_scope="per_process"`），每次登录+查询取 1 个令牌，用户只能进一步收紧。
+- **条款**：PyPI 包为 BSD，但官网声明未经书面许可不得复制、传播或商用；`personal_only=True`、`redistribution_allowed=False`，openbars 只做本地存储。
+- `list_instruments(Market.CN, day=None)` 包装 `query_all_stock`（一次调用，只留 A 股股票，跳过指数/基金），不生成 `instrument_id`（见 §3.2 CN 规则）。
+- **冒烟**：`tests/test_baostock_public_smoke.py` 仅在 `OPENBARS_BAOSTOCK_SMOKE=1` 时运行，一只股票两个交易日、只尝试一次、无重试；海外网络常连不上，此时 skip。只写 pytest `tmp_path`，不入库。
+- `config.example.yaml` 中 `providers.baostock` 默认 `enabled: false`；编排器接入 CN 市场不在本版范围。
+
 ### 3.6 Job / Checkpoint
 
 ```text
@@ -511,6 +525,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `yfinance/yahoo/split` | `provider_defined` | `unknown` | `provider_aligned` | `provider_defined`（可检视，不视为已证明兼容） |
 | `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `coinbase/exchange/raw` | `raw` | `none` | `utc_day` | `as_traded` |
+| `baostock/ashare/raw` | `raw` | `none` | `regular` | `as_traded` |
 | 其他 | `unknown` | `unknown` | `unknown` | `unknown`（`currency` 仍按入参设置） |
 
 ## 11. 上游搬运来源与 backend 兼容与切换

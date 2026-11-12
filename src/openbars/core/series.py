@@ -59,6 +59,8 @@ BINANCE_SPOT_RAW = SourceIdentity("binance", "spot", "raw")
 BINANCE_ARCHIVE_RAW = SourceIdentity("binance", "archive", "raw")
 # Coinbase Exchange (not Advanced Trade) public candles, also UTC-day and not US.
 COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
+# BaoStock A-share daily, unadjusted (adjustflag=3), CN regular session. Not US, not in KNOWN_SOURCES.
+BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -167,6 +169,13 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.UTC_DAY,
+        volume_basis=VolumeBasis.AS_TRADED,
+    ),
+    # Unadjusted A-share daily bars (``Asia/Shanghai`` regular session), volume as traded.
+    (BAOSTOCK_ASHARE_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
         volume_basis=VolumeBasis.AS_TRADED,
     ),
     # Volume handling is provider-dependent, so it stays unknown.

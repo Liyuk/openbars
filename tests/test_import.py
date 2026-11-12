@@ -49,6 +49,8 @@ MODULES = [
     "openbars.providers.crypto",
     "openbars.providers.crypto.binance",
     "openbars.providers.crypto.coinbase",
+    "openbars.providers.cn",
+    "openbars.providers.cn.baostock",
     "openbars.raw.store",
     "openbars.normalize.instruments",
     "openbars.normalize.crypto_pairs",
