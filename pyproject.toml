@@ -50,6 +50,7 @@ binance = "openbars.providers.crypto.binance:BinanceProvider"
 coinbase = "openbars.providers.crypto.coinbase:CoinbaseProvider"
 baostock = "openbars.providers.cn.baostock:BaoStockProvider"
 akshare = "openbars.providers.hk.akshare:AKShareHKProvider"
+futu = "openbars.providers.hk.futu:FutuOpenDProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]
