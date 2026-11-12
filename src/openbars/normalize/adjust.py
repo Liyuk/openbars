@@ -50,13 +50,17 @@ other than the stored one (``RAW``, ``SPLIT_DIVIDEND`` / ``ALL`` from stored ``S
 at all never relabels the stored prices:
 
 * ``on_missing_actions="raise"`` (default): ``AdjustmentError`` with reason code
-  ``missing_corporate_actions``.
+  ``missing_corporate_actions`` when the request would *relabel* the stored basis
+  (e.g. ``RAW`` from stored ``SPLIT``).
 * ``on_missing_actions="flag"``: those bars are returned on the *stored* basis (their
   ``adjustment`` is unchanged) with ``QualityFlag.ADJUSTMENT_UNVERIFIED``, and the
   instruments are listed in ``AdjustResult.unverified``. Other instruments are derived.
 
-An instrument that *has* rows but none after a given bar is attested ("we looked"): the
-split scale is 1 and ``RAW`` is exact. Requests that need no derivation are unaffected.
+A ``SPLIT`` read at an ``as_of`` with no corporate-action rows does not relabel prices
+(the stored basis already is ``SPLIT``), but the as-of claim cannot be attested, so the
+bars are flagged ``ADJUSTMENT_UNVERIFIED`` and never raise. An instrument that *has* rows
+but none after a given bar is attested ("we looked"): the split scale is 1 and ``RAW`` is
+exact. A plain ``SPLIT`` read with no ``as_of`` is unaffected.
 
 ``adjustment_as_of`` consistency: a call whose rows carry differing ``adjustment_as_of``
 values (``RawBarRow``) is an ``adjustment_cutoff_mismatch`` and raises ``AdjustmentError``.
@@ -284,16 +288,22 @@ def adjust_rows(
     for m in merged:
         acts[m.action.instrument_id].append(m.action)
 
+    def _asks_other_basis(rs: list[Any]) -> bool:
+        # stored dividend-adjusted series are rejected below, not flagged here
+        return any(
+            Adjustment(r.adjustment) not in (mode, Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) for r in rs
+        )
+
     unverified: set[str] = set()
     for iid, rs in by_instrument.items():
         if iid in acts:
             continue
-        if any(
-            Adjustment(r.adjustment) not in (mode, Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) for r in rs
-        ):  # (stored dividend-adjusted series are rejected below)
+        # no rows at all: cannot attest a different basis, nor a SPLIT-at-as_of claim
+        if _asks_other_basis(rs) or as_of is not None:
             unverified.add(iid)
-    if unverified and on_missing_actions == "raise":
-        shown = ", ".join(sorted(unverified)[:5]) + (" ..." if len(unverified) > 5 else "")
+    raisable = {iid for iid in unverified if _asks_other_basis(by_instrument[iid])}
+    if raisable and on_missing_actions == "raise":
+        shown = ", ".join(sorted(raisable)[:5]) + (" ..." if len(raisable) > 5 else "")
         raise AdjustmentError(
             f"cannot derive {mode.value} bars: no corporate-action rows for {shown} "
             "(no rows is not the same as no splits; ingest actions or pass on_missing_actions='flag')",
@@ -336,7 +346,7 @@ def adjust_rows(
                 out.append(r)
                 continue
             raise AdjustmentError(f"cannot derive {mode.value} from stored {stored.value} bars")
-        if r.instrument_id in unverified and stored is not mode:
+        if r.instrument_id in unverified and (stored is not mode or as_of is not None):
             out.append(with_flags(r, QualityFlag.ADJUSTMENT_UNVERIFIED))  # stored basis, never relabelled
             continue
         scale, invert = _split_scale(stored, mode, r.session_date, as_of, insts[r.instrument_id])

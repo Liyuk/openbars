@@ -246,6 +246,22 @@ def test_requests_that_need_no_derivation_do_not_need_actions():
     assert adjust_rows(raw, [], Adjustment.RAW).rows == raw
 
 
+def test_split_as_of_without_actions_is_flagged_not_raised():
+    """An as-of SPLIT read keeps stored prices but cannot attest there were no later splits."""
+    bars = series1()
+    res = adjust_rows(bars, [], Adjustment.SPLIT, as_of=date(2020, 8, 30))  # default is raise
+    assert res.unverified == ("TEST1",)
+    assert [b.close for b in res.rows] == [b.close for b in bars]
+    assert all(b.adjustment is Adjustment.SPLIT for b in res.rows)
+    assert all(b.flags & QualityFlag.ADJUSTMENT_UNVERIFIED for b in res.rows)
+    # a later as_of is the same: still no action rows, still unattested
+    later = adjust_rows(bars, [], Adjustment.SPLIT, as_of=date(2020, 9, 15), on_missing_actions="raise")
+    assert later.unverified == ("TEST1",)
+    # attested once the instrument has any corporate-action row
+    ok = adjust_rows(bars, [cash(date(2020, 1, 2), "1")], Adjustment.SPLIT, as_of=date(2020, 8, 30))
+    assert ok.unverified == () and all(a is b for a, b in zip(ok.rows, bars))
+
+
 def test_flag_mode_keeps_stored_basis_and_flags_only_unattested_instruments():
     bars = series1() + [bar(PRE1, "20", iid="TEST2")]
     res = adjust_rows(bars, [split(EX1, 4, iid="TEST2")], Adjustment.RAW, on_missing_actions="flag")
