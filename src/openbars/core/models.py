@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from enum import Enum, Flag, auto
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
+
+from openbars.core.ohlcv import validate_ohlcv
+
+if TYPE_CHECKING:  # series imports Interval from here; avoid a runtime cycle
+    from openbars.core.series import BarSeriesIdentity
 
 
 class Market(str, Enum):
@@ -106,50 +112,113 @@ class SymbolMapping:
     provider: str = "*"
 
 
+def _set(obj: object, name: str, value: object) -> None:
+    object.__setattr__(obj, name, value)
+
+
+def _require_aware(value: datetime | None, name: str) -> None:
+    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+        raise ValueError(f"{name} must be timezone-aware")
+
+
 @dataclass(frozen=True)
 class Bar:
+    """One OHLCV bar. Prices/volume are ``Decimal`` (never float); see ``core.ohlcv``."""
+
     instrument_id: str
     interval: Interval
     ts_start: datetime  # UTC bar start
     session_date: date  # exchange-local trading day
     session: Session
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float | None
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
     source: str
     feed: str | None = None  # e.g. "alpaca:sip"; volumes never mixed across feeds
     adjustment: Adjustment = Adjustment.RAW
-    vwap: float | None = None
+    vwap: Decimal | None = None
     trade_count: int | None = None
     flags: QualityFlag = QualityFlag.NONE
+    ingested_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _require_aware(self.ts_start, "ts_start")
+        _require_aware(self.ingested_at, "ingested_at")
+        o, h, low, c, v, w = validate_ohlcv(
+            self.open, self.high, self.low, self.close, self.volume, self.vwap
+        )
+        for name, value in (
+            ("open", o), ("high", h), ("low", low), ("close", c), ("volume", v), ("vwap", w)
+        ):
+            _set(self, name, value)
 
 
 @dataclass(frozen=True)
 class RawBar:
+    """A bar exactly as one source delivered it (revision >= 1)."""
+
     provider: str
     symbol_as_returned: str
     fetch_id: str
     interval: Interval
     ts_start: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float | None
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
     feed: str | None = None
     extra: Mapping[str, object] = field(default_factory=dict)
+    vwap: Decimal | None = None
+    payload_hash: str | None = None
+    revision: int = 1
+    instrument_id: str | None = None  # set once the symbol is resolved
+    session_date: date | None = None
+    series: BarSeriesIdentity | None = None  # series semantics (see core.series)
+
+    def __post_init__(self) -> None:
+        _require_aware(self.ts_start, "ts_start")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be int")
+        if self.revision < 1:
+            raise ValueError(f"revision must be >= 1, got {self.revision}")
+        o, h, low, c, v, w = validate_ohlcv(
+            self.open, self.high, self.low, self.close, self.volume, self.vwap
+        )
+        for name, value in (
+            ("open", o), ("high", h), ("low", low), ("close", c), ("volume", v), ("vwap", w)
+        ):
+            _set(self, name, value)
+        if self.series is not None:
+            if self.series.provider != self.provider:
+                raise ValueError("series.provider does not match provider")
+            if self.feed is not None and self.series.feed != self.feed:
+                raise ValueError("series.feed does not match feed")
+            if self.series.interval != self.interval:
+                raise ValueError("series.interval does not match interval")
 
 
 @dataclass(frozen=True)
 class CanonicalBar:
+    """A reconciled bar. The wrapped ``Bar`` is already validated on construction."""
+
     bar: Bar
     price_source: str
     volume_source: str | None
     sources_seen: tuple[str, ...]
     reconcile_rule: str
     revision: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bar, Bar):
+            raise TypeError("bar must be a Bar")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be int")
+        if self.revision < 0:
+            raise ValueError(f"revision must be >= 0, got {self.revision}")
+        _set(self, "sources_seen", tuple(self.sources_seen))
 
 
 class CorporateActionKind(str, Enum):

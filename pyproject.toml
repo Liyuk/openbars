@@ -14,16 +14,24 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Office/Business :: Financial :: Investment",
 ]
-dependencies = []
+dependencies = [
+    "exchange-calendars>=4.9,<5",
+]
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=15", "duckdb>=1.0"]
 postgres = ["psycopg[binary]>=3.1"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8"]
+dev = [
+    "pyarrow>=15",
+    "pytest>=8",
+]
 
 [project.scripts]
 openbars = "openbars.cli.main:main"
+
+[project.entry-points."openbars.calendars"]
+xnys = "openbars.calendars.xnys:XNYSCalendar"
 
 # Third-party providers register here, e.g.:
 # [project.entry-points."openbars.providers"]
@@ -39,3 +47,5 @@ packages = ["src/openbars"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# third-party deprecation emitted by exchange-calendars on newer pandas
+filterwarnings = ["ignore:Series.values returning an ndarray:Warning"]
