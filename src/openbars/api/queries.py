@@ -17,6 +17,8 @@ from openbars.reconcile import policy_version_for_market
 from openbars.storage.schema import AUTO_POLICY_VERSION
 
 MAX_BARS = 8000
+HOURLY_SLOTS_REGULAR = 7
+HOURLY_SLOTS_EXTENDED = 17
 DEFAULT_INSTRUMENT_LIMIT = 50
 MAX_INSTRUMENT_LIMIT = 200
 DEFAULT_FLAG_LIMIT = 100
@@ -424,26 +426,9 @@ def available_sources(
         backend, [instrument_id], interval=interval, start=start, end=end, market=market
     ):
         names.append(SOURCE_CANONICAL)
-    window = _wide_window(start, end)
-    try:
-        raw_rows = list(
-            backend.raw.scan_rows(
-                None,
-                market,
-                interval,
-                window,
-                instrument_ids=[instrument_id],
-            )
-        )
-    except TypeError:
-        raw_rows = []
-    if not raw_rows:
-        # Fall back to current symbols so rows written before instrument_id was filled still count.
-        symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
-        if symbols:
-            raw_rows = list(
-                backend.raw.scan_rows(None, market, interval, window, symbols=symbols)
-            )
+    raw_rows = _raw_rows(
+        backend, instrument_id, None, market=market, interval=interval, start=start, end=end
+    )
     providers = sorted({r.provider for r in raw_rows if getattr(r, "provider", None)})
     for name in providers:
         if name not in names:
@@ -454,7 +439,7 @@ def available_sources(
 def _raw_rows(
     backend: Any,
     instrument_id: str,
-    provider: str,
+    provider: str | None,
     *,
     market: Market,
     interval: Interval,
@@ -462,17 +447,30 @@ def _raw_rows(
     end: date | None,
 ) -> list[Any]:
     window = _wide_window(start, end)
-    rows = list(
-        backend.raw.scan_rows(
+    try:
+        rows = list(backend.raw.scan_rows(
             provider, market, interval, window, instrument_ids=[instrument_id]
-        )
-    )
-    if rows:
-        return rows
+        ))
+    except TypeError:
+        rows = []
     symbols = [m.symbol for m in _mappings(backend) if m.instrument_id == instrument_id]
-    if not symbols:
-        return []
-    return list(backend.raw.scan_rows(provider, market, interval, window, symbols=symbols))
+    if interval != Interval.H1:
+        # Daily and other intervals keep the pre-#147 rule: rows written before
+        # instrument_id was filled are used only when no mapped row exists.
+        if rows or not symbols:
+            return rows
+        return list(backend.raw.scan_rows(provider, market, interval, window, symbols=symbols))
+    if symbols:
+        # Normalize only the instrument portion of the storage key: legacy rows
+        # reached through these mappings represent the requested instrument.
+        mapped_keys = {row.key()[:6] + row.key()[7:] for row in rows}
+        legacy = backend.raw.scan_rows(provider, market, interval, window, symbols=symbols)
+        rows.extend(
+            row for row in legacy
+            if not getattr(row, "instrument_id", None)
+            and row.key()[:6] + row.key()[7:] not in mapped_keys
+        )
+    return rows
 
 
 def _from_raw_row(row: Any, instrument_id: str) -> dict[str, Any]:
@@ -550,7 +548,9 @@ def list_bars(
         except ValueError as exc:
             raise QueryError("market is required when the instrument is unknown") from exc
 
+    default_raw_hourly = interval == Interval.H1 and source_name != SOURCE_CANONICAL and start is None and end is None
     # Bound the default window to stored data so we do not emit decades of gaps.
+    stored_extended = False
     if start is None or end is None:
         if source_name == SOURCE_CANONICAL:
             stored = _scan_canonical(backend, [iid], interval=interval, market=market)
@@ -560,6 +560,10 @@ def list_bars(
             start = start or end or date.today()
             end = end or start
         if stored:
+            stored_extended = any(
+                ((getattr(r, "extra", None) or {}).get("session") or "regular") != "regular"
+                for r in stored
+            )
             days = [r.session_date for r in stored if getattr(r, "session_date", None) is not None]
             if start is None and days:
                 start = min(days)
@@ -572,6 +576,16 @@ def list_bars(
 
     calendar = calendar_for(market)
     n_sessions = _count_sessions(calendar, start, end)
+    # Upper bound of hourly slots per session: 7 regular hours, up to 16 with
+    # pre/post-market (calendar.hourly_slots gives 17 with extended hours).
+    slots_per_session = HOURLY_SLOTS_EXTENDED if stored_extended else HOURLY_SLOTS_REGULAR
+    if default_raw_hourly and n_sessions * slots_per_session > MAX_BARS:
+        # A long history cannot fit in one hourly response: show the latest
+        # sessions that fit, so the default window never exceeds the slot cap.
+        keep = max(1, MAX_BARS // slots_per_session)
+        recent = _session_dates(calendar, start, end)[-keep:]
+        start = recent[0] if recent else end
+        n_sessions = _count_sessions(calendar, start, end)
     if interval == Interval.H1 and n_sessions * 7 > MAX_BARS:
         raise QueryError(f"window has too many hourly slots (max {MAX_BARS}); pass a smaller start/end")
     if n_sessions > MAX_BARS:
@@ -579,8 +593,12 @@ def list_bars(
             f"window has {n_sessions} sessions (max {MAX_BARS}); pass a smaller start/end"
         )
 
+    # Hourly sources may have disjoint historical coverage, including when the
+    # default canonical window is empty. Limit the scan to this instrument.
     sources = available_sources(
-        backend, iid, market=market, interval=interval, start=start, end=end
+        backend, iid, market=market, interval=interval,
+        start=None if interval == Interval.H1 else start,
+        end=None if interval == Interval.H1 else end,
     )
     session_list = _session_dates(calendar, start, end)
     present: set[date] = set()
