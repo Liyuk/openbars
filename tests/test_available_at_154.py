@@ -343,6 +343,93 @@ def test_us_daily_sink_uses_stored_ingested_at_or_the_write_time(tmp_path):
     assert raw_massive.ingested_at <= canon.available_at and before <= canon.available_at <= datetime.now(UTC)
 
 
+def test_sink_final_replaces_provisional_and_later_provisional_cannot_replace_final(tmp_path):
+    backend = open_backend(tmp_path)
+    sink = ReconcilingSink(MemoryReconciler(), parquet_canonical_writer(backend.canonical),
+                           backend.raw, ("massive", "alpaca"), canonical=backend.canonical)
+    window = DateRange(D1, D1)
+    job = Job("j", JobKind.DAILY, "massive", Market.US, Interval.D1, ("TEST1",), window)
+    provisional = replace(_raw_bar(), instrument_id=IID,
+                          extra={"market": "us", "freshness": "provisional", "ingested_at": at(1)})
+    final = replace(_raw_bar(), instrument_id=IID, close=Decimal("11"),
+                    extra={"market": "us", "freshness": "final", "ingested_at": at(8)})
+    sink.after_fetch(job, [provisional])
+    (first,) = backend.canonical.scan_rows([IID], Interval.D1, window)
+    assert (first.freshness, first.revision) == ("provisional", 1)
+    sink.after_fetch(job, [final])
+    (second,) = backend.canonical.scan_rows([IID], Interval.D1, window)
+    assert (second.freshness, second.close, second.revision) == ("final", Decimal("11"), 2)
+    assert sink.audit_records[-1] == {
+        "key": (IID, D1, "research-daily-v2"), "reason": "provisional_to_final",
+        "revision": 2, "ohlcv_differs": True,
+    }
+    later_provisional = replace(provisional, close=Decimal("9"), extra={
+        "market": "us", "freshness": "provisional", "ingested_at": at(9),
+    })
+    sink.after_fetch(job, [later_provisional])
+    (visible,) = backend.canonical.scan_rows([IID], Interval.D1, window)
+    assert (visible.freshness, visible.close, visible.revision) == ("final", Decimal("11"), 2)
+    assert sink.audit_records[-1]["reason"] == "rejected_provisional_over_final"
+    assert sink.audit_records[-1]["ohlcv_differs"] is True
+    (pit_early,) = backend.reader.bars([IID], start=D1, end=D1, available_by=at(2)).to_pylist()
+    (pit_final,) = backend.reader.bars([IID], start=D1, end=D1, available_by=at(10)).to_pylist()
+    assert pit_early["freshness"] == "provisional"
+    assert (pit_final["freshness"], pit_final["close"]) == ("final", Decimal("11"))
+
+
+def test_same_run_final_secondary_beats_provisional_primary(tmp_path):
+    backend = open_backend(tmp_path)
+    sink = ReconcilingSink(MemoryReconciler(), parquet_canonical_writer(backend.canonical),
+                           backend.raw, ("massive", "alpaca"), canonical=backend.canonical)
+    window = DateRange(D1, D1)
+    job = Job("j", JobKind.DAILY, "massive", Market.US, Interval.D1, ("TEST1",), window)
+    provisional_primary = replace(_raw_bar("massive", "eod"), instrument_id=IID,
+                                  extra={"market": "us", "freshness": "provisional"})
+    final_secondary = replace(_raw_bar("alpaca", "sip"), instrument_id=IID, close=Decimal("11"),
+                              extra={"market": "us", "freshness": "final"})
+    sink.after_fetch(job, [provisional_primary, final_secondary])
+    (visible,) = backend.canonical.scan_rows([IID], Interval.D1, window)
+    assert (visible.provider, visible.freshness, visible.close) == ("alpaca", "final", Decimal("11"))
+
+
+def test_hourly_sink_preserves_final_and_advances_revision(tmp_path):
+    backend = open_backend(tmp_path)
+    sink = ReconcilingSink(MemoryReconciler(), parquet_canonical_writer(backend.canonical),
+                           canonical=backend.canonical)
+    window = DateRange(D1, D1)
+    job = Job("h", JobKind.BACKFILL, "massive", Market.US, Interval.H1, ("TEST1",), window)
+    base = replace(_raw_bar(interval=Interval.H1, hour=15, instrument_id="TEST1", feed="aggs"),
+                   extra={"market": "us", "freshness": "provisional"})
+    sink.after_fetch(job, [base])
+    final = replace(base, close=Decimal("11"), extra={"market": "us", "freshness": "final"})
+    sink.after_fetch(job, [final])
+    (stored,) = backend.canonical.scan_rows(["TEST1"], Interval.H1, window, policy_version="research-daily-v2")
+    assert (stored.freshness, stored.close, stored.revision) == ("final", Decimal("11"), 2)
+    sink.after_fetch(job, [base])
+    (stored,) = backend.canonical.scan_rows(["TEST1"], Interval.H1, window, policy_version="research-daily-v2")
+    assert (stored.freshness, stored.close, stored.revision) == ("final", Decimal("11"), 2)
+
+
+def test_cn_sink_keeps_final_over_later_provisional(tmp_path):
+    backend = open_backend(tmp_path)
+    window = DateRange(D1, D1)
+    symbol = "600000.SH"
+    job = Job("cn", JobKind.DAILY, "baostock", Market.CN, Interval.D1, (symbol,), window)
+    sink = CnCanonicalSink(backend.instruments, backend.canonical.upsert_rows,
+                           canonical=backend.canonical)
+    bar = replace(_raw_bar("baostock", "ashare", instrument_id="cn:eq:600000.SH"),
+                  symbol_as_returned=symbol,
+                  extra={"market": "cn", "tradestatus": 1, "freshness": "final"})
+    sink.after_fetch(job, [bar])
+    provisional = replace(bar, close=Decimal("9"), extra={
+        "market": "cn", "tradestatus": 1, "freshness": "provisional",
+    })
+    sink.after_fetch(job, [provisional])
+    (stored,) = backend.canonical.scan_rows(["cn:eq:600000.SH"], Interval.D1, window,
+                                            market=Market.CN, policy_version="cn-daily-v1")
+    assert (stored.freshness, stored.close, stored.revision) == ("final", Decimal("10"), 0)
+
+
 def test_cn_and_hourly_producers_set_available_at(tmp_path):
     backend = open_backend(tmp_path)
     window = DateRange(D1, D1)
@@ -526,3 +613,51 @@ def test_live_postgres_changed_source_with_the_same_fingerprint(pg_dsn):
             store.upsert_rows([corrected(first, available_at=when, **changes)])
             assert store.scan_rows([IID], Interval.D1, WINDOW)[0].available_at == when
             store.upsert_rows([first])  # back to the original bar for the next case
+
+
+def test_production_sink_persists_freshness_decisions_across_backend_reopen(tmp_path):
+    from openbars.cli.wiring import make_sink
+
+    backend = open_backend(tmp_path)
+    sink = make_sink(backend, {})
+    window = DateRange(D1, D1)
+    job = Job("audit", JobKind.DAILY, "massive", Market.US, Interval.D1, ("TEST1",), window)
+    provisional = replace(_raw_bar(), instrument_id=IID,
+                          extra={"market": "us", "freshness": "provisional", "ingested_at": at(1)})
+    final = replace(provisional, close=Decimal("11"), extra={
+        "market": "us", "freshness": "final", "ingested_at": at(8),
+    })
+    sink.after_fetch(job, [provisional])
+    sink.after_fetch(job, [final])
+    sink.after_fetch(job, [replace(final, close=Decimal("12"))])
+    sink.after_fetch(job, [provisional])
+
+    reopened = open_backend(tmp_path)
+    events = reopened.state.list_canonical_audit(instrument_id=IID)
+    assert [(e["reason"], e["revision"], e["ohlcv_differs"]) for e in events] == [
+        ("provisional_to_final", 2, True),
+        ("same_tier_rewrite", 3, True),
+        ("rejected_provisional_over_final", 3, True),
+    ]
+    assert all(e["key"] == (IID, D1, "research-daily-v2") for e in events)
+    (visible,) = reopened.canonical.scan_rows([IID], Interval.D1, window)
+    assert (visible.freshness, visible.close, visible.revision) == ("final", Decimal("12"), 3)
+
+
+def test_production_hourly_audit_retains_timestamp_on_reopen(tmp_path):
+    from openbars.cli.wiring import make_sink
+
+    backend = open_backend(tmp_path)
+    sink = make_sink(backend, {})
+    window = DateRange(D1, D1)
+    job = Job("hourly-audit", JobKind.BACKFILL, "massive", Market.US, Interval.H1, ("TEST1",), window)
+    provisional = replace(_raw_bar(interval=Interval.H1, hour=15, instrument_id=IID, feed="aggs"),
+                          extra={"market": "us", "freshness": "provisional"})
+    final = replace(provisional, close=Decimal("11"), extra={"market": "us", "freshness": "final"})
+    sink.after_fetch(job, [provisional])
+    sink.after_fetch(job, [final])
+    sink.after_fetch(job, [provisional])
+    events = open_backend(tmp_path).state.list_canonical_audit(instrument_id=IID)
+    assert [e["reason"] for e in events] == ["provisional_to_final", "rejected_provisional_over_final"]
+    assert all(e["key"] == (IID, provisional.ts_start, "research-daily-v2") for e in events)
+    assert all(e["interval"] == "1h" and e["ohlcv_differs"] for e in events)

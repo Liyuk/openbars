@@ -314,6 +314,7 @@ def check_native(catalog: Catalog) -> None:
     problems = [
         p for p in check_schema(catalog, NATIVE_REQUIRED)
         if not (p.kind == "missing_column" and (p.table, p.column) in _OPTIONAL_NATIVE_COLUMNS)
+        and not (p.kind == "missing_table" and p.table == "canonical_audit")
     ]
     if catalog.get("adjust_factors"):
         problems += check_schema(catalog, ADJUST_FACTORS_REQUIRED)
@@ -1120,6 +1121,10 @@ class PgStateStore(SqlStateStore, _Guard):
 
     def _connect(self) -> Any:
         return self._session()
+
+    def append_canonical_audit(self, events: Any, *, market: Any, interval: Any) -> None:
+        self.require_write()
+        super().append_canonical_audit(events, market=market, interval=interval)
 
     def save_job(self, job: Any) -> None:
         self.require_write()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from uuid import uuid4
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -80,6 +81,32 @@ class SqlStateStore:
     @staticmethod
     def _enc_date(value: date) -> str:
         return value.isoformat()
+
+    def append_canonical_audit(self, events: Sequence[dict[str, Any]], *, market: Market, interval: Interval) -> None:
+        """Persist freshness arbitration decisions in the existing state database."""
+        with self._connect() as con:
+            for event in events:
+                instrument_id, moment, policy = event["key"]
+                con.execute(
+                    "INSERT INTO canonical_audit VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (uuid4().hex, self._enc_ts(_now()), market.value, interval.value,
+                     instrument_id, moment.isoformat(), policy, event["reason"],
+                     event["revision"], int(event["ohlcv_differs"])),
+                )
+
+    def list_canonical_audit(self, *, instrument_id: str) -> list[dict[str, Any]]:
+        """Read persisted decisions for an instrument, in recording order."""
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM canonical_audit WHERE instrument_id = ? ORDER BY recorded_at, event_id",
+                (instrument_id,),
+            ).fetchall()
+        return [{
+            "key": (r["instrument_id"], datetime.fromisoformat(r["moment"]) if r["interval"] == Interval.H1.value
+                    else date.fromisoformat(r["moment"]), r["policy_version"]),
+            "market": r["market"], "interval": r["interval"], "recorded_at": _parse_ts(r["recorded_at"]),
+            "reason": r["reason"], "revision": r["revision"], "ohlcv_differs": bool(r["ohlcv_differs"]),
+        } for r in rows]
 
     # --- jobs ---
 

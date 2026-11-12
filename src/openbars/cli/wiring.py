@@ -94,21 +94,24 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
     others = tuple(providers)
     return DispatchingSink(
         us=ReconcilingSink(MemoryReconciler(), writer, raw=raw, other_providers=others,
-                           canonical=backend.canonical),
+                           canonical=backend.canonical, audit_store=backend.state),
         crypto=CryptoReconcilingSink(
-            backend.instruments, writer, raw=raw, other_providers=others  # type: ignore[attr-defined]
+            backend.instruments, writer, raw=raw, other_providers=others,
+            canonical=backend.canonical, audit_store=backend.state,  # type: ignore[attr-defined]
         ),
         cn=CnCanonicalSink(
             backend.instruments,  # type: ignore[attr-defined]
             backend.canonical.upsert_rows,  # type: ignore[attr-defined]
             providers=providers,
             factor_store=backend.instruments,  # type: ignore[attr-defined]
+            canonical=backend.canonical, audit_store=backend.state,  # type: ignore[attr-defined]
         ),
         hk=HkCanonicalSink(
             backend.instruments,  # type: ignore[attr-defined]
             writer,
             raw=raw,
             other_providers=others,
+            canonical=backend.canonical, audit_store=backend.state,
         ),
     )
 

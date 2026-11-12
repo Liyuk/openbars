@@ -546,3 +546,9 @@ def test_live_upstream_compat_reads_and_introspects(pg_dsn, tmp_path):
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+def test_native_catalog_allows_pre_audit_database():
+    catalog = fake_catalog(NATIVE_REQUIRED)
+    del catalog["canonical_audit"]
+    check_native(catalog)

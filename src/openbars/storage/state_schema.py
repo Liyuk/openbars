@@ -73,6 +73,16 @@ STATE_TABLES: tuple[StateTable, ...] = (
         ("job_id",),
     ),
     StateTable(
+        "canonical_audit",
+        (
+            _c("event_id"), _c("recorded_at", "timestamp"), _c("market"),
+            _c("interval"), _c("instrument_id"), _c("moment"), _c("policy_version"),
+            _c("reason"), _c("revision", "int"), _c("ohlcv_differs", "int"),
+        ),
+        ("event_id",),
+        (("instrument_id", "moment"),),
+    ),
+    StateTable(
         "fetch_log",
         (
             _c("provider"),
