@@ -95,6 +95,8 @@ conventions:
 - [Alpaca](https://docs.alpaca.markets/docs/about-market-data-api)：小时线最早从 2016-01-01 开始；默认每分钟 200 次，示例配置收紧为 190 次。
 - [Twelve Data](https://twelvedata.com/pricing)：默认每分钟 8 次、每 UTC 日 800 次；实现将历史起点设为 2016-01-01，实际可用范围取决于服务商。
 
+操作、计时与容量估算见[本地实测手册](docs/measuring-hourly.md)。
+
 小时规范层仍待 #116；小时线与日线的一致性校验仍待 #116。
 看板 1h 支持仍待 #119。
 
@@ -202,6 +204,8 @@ Free tiers and history windows can change; check the official references. These 
 - [yfinance](https://ranaroussi.github.io/yfinance/): unofficial Yahoo data for approximately the last 730 days (the implementation leaves a one-day margin); the default 30 requests per minute is conservative pacing, not an official quota.
 - [Alpaca](https://docs.alpaca.markets/docs/about-market-data-api): hourly history starts no earlier than 2016-01-01; default 200 requests per minute, tightened to 190 in the example config.
 - [Twelve Data](https://twelvedata.com/pricing): defaults are 8 requests per minute and 800 per UTC day; the implementation sets a 2016-01-01 history floor, while actual availability depends on the provider.
+
+See the [local measurement guide](docs/measuring-hourly.md#english) for timing and storage estimates.
 
 Hourly canonical reconciliation and the hourly-versus-daily consistency check are pending #116.
 Dashboard 1h support is pending #119.
