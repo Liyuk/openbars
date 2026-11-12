@@ -34,6 +34,8 @@ MODULES = [
     "openbars.providers.us",
     "openbars.providers.us.alpaca",
     "openbars.providers.us.alpaca_time",
+    "openbars.providers.us.massive",
+    "openbars.providers.us.massive_window",
     "openbars.providers.us.yfinance",
     "openbars.raw.store",
     "openbars.normalize.instruments",
