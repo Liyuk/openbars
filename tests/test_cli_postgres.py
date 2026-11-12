@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures("no_network")
 _DDL = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
 
 
-def _config(tmp_path: Path, schema: str, *, write: bool = True, symbols: str = "[TEST1, ZZZA]") -> str:
+def _config(tmp_path: Path, schema: str, *, write: bool = True, symbols: str = "[TEST1, ZZZA]", quota: str = "sqlite") -> str:
     path = tmp_path / "config.yaml"
     path.write_text(
         f"""
@@ -37,6 +37,7 @@ storage:
     mode: upstream_compat
     write: {"true" if write else "false"}
     schema: {schema}
+    quota: {quota}
 providers:
   massive:
     enabled: true
@@ -46,9 +47,9 @@ providers:
     return str(path)
 
 
-def _cli(argv, tmp_path, schema, *, dsn: str, provider_factory=None, write: bool = True, symbols: str = "[TEST1, ZZZA]"):
+def _cli(argv, tmp_path, schema, *, dsn: str, provider_factory=None, write: bool = True, symbols: str = "[TEST1, ZZZA]", quota: str = "sqlite"):
     return main(
-        ["--config", _config(tmp_path, schema, write=write, symbols=symbols), *argv],
+        ["--config", _config(tmp_path, schema, write=write, symbols=symbols, quota=quota), *argv],
         provider_factory=provider_factory or factory(),
         clock=lambda: NOW,
         env={"TEST_API_KEY": SECRET, "OPENBARS_PG_DSN": dsn},
@@ -141,3 +142,21 @@ def test_live_cli_run_prints_symbol_ambiguity_report(pg_dsn, tmp_path, capsys):
         assert "instrument_id=10" in text and "instrument_id=11" in text
         assert "pass a numeric instrument_id" in text
         assert "TEST1" in text
+
+
+@pytest.mark.postgres_live
+def test_live_cli_run_uses_postgres_quota_gate(pg_dsn, tmp_path, capsys):
+    import psycopg
+
+    with _compat_schema(pg_dsn, "openbars_cli_quota") as schema:
+        assert _cli(["run"], tmp_path, schema, dsn=pg_dsn, quota="postgres") == 0
+        out = capsys.readouterr().out
+        assert "done 6" in out and "dead 0" in out
+        with psycopg.connect(pg_dsn, options=f"-c search_path={schema}") as conn:
+            usage = conn.execute("SELECT count(*) FROM provider_request_usage").fetchone()[0]
+            gates = conn.execute("SELECT provider FROM provider_request_gate").fetchall()
+        assert int(usage) >= 6
+        assert "massive" in {row[0] for row in gates}
+        # default sqlite file should not be required when the postgres gate is selected
+        # (it may still exist if something else created data/, but quota.db should be unused)
+        assert not (tmp_path / "data" / "quota.db").exists()

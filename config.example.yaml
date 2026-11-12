@@ -45,6 +45,7 @@ storage:
     dsn: ${OPENBARS_PG_DSN}
     mode: native           # native | upstream_compat（compat 永不做迁移，只做列级校验）
     write: false           # 默认只读；写入需显式 true。upstream_compat 在 write: true 时写入已有表（含公司行动）
+    quota: sqlite          # sqlite | postgres。compat 下选 postgres 则与 upstream 共用 provider_request_gate / usage（永不迁移）
     # dsn 只在运行时解析（环境变量 / env 文件），不要把真实 DSN 写进仓库
 
 conventions:

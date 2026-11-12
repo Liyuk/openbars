@@ -93,6 +93,7 @@ from openbars.storage.compat_write import (
     action_details,
     action_event_key,
     action_type_for,
+    actions_from_revision,
     advisory_lock_key,
     capabilities_json,
     fingerprint_or_raise,
@@ -1443,6 +1444,51 @@ class PgCompatInstrumentMaster(_Guard):
             ).fetchall()
         ids = {str(r["instrument_id"]) for r in records}
         return next(iter(ids)) if len(ids) == 1 else None
+
+    def mappings(self) -> list[SymbolMapping]:
+        """Every covering ``symbol_alias`` as a provider-agnostic ``SymbolMapping`` (``provider="*"``)."""
+        with self._session() as conn:
+            records = conn.execute(
+                "SELECT instrument_id, symbol, valid_from, valid_to FROM symbol_alias "
+                "ORDER BY symbol, valid_from, instrument_id"
+            ).fetchall()
+        return [
+            SymbolMapping(
+                instrument_id=str(r["instrument_id"]),
+                symbol=str(r["symbol"]),
+                valid_from=r["valid_from"],
+                valid_to=r["valid_to"],
+                provider="*",
+            )
+            for r in records
+        ]
+
+    def corporate_actions(self, instrument_ids: Sequence[str] | None = None) -> list[CorporateAction]:
+        """Latest revision of each upstream event, mapped back to openbars ``CorporateAction``."""
+        wanted = None if instrument_ids is None else {str(i) for i in instrument_ids}
+        with self._session() as conn:
+            records = conn.execute(
+                "SELECT DISTINCT ON (r.event_id) "
+                "r.action_type, r.ex_date, r.instrument_ids, r.details, "
+                "o.provider AS source "
+                "FROM corporate_action_revision r "
+                "LEFT JOIN corporate_action_observation_link l ON l.revision_id = r.id "
+                "LEFT JOIN corporate_action_observation o ON o.id = l.observation_id "
+                "ORDER BY r.event_id, r.revision DESC, o.id"
+            ).fetchall()
+        out: list[CorporateAction] = []
+        for r in records:
+            for action in actions_from_revision(
+                action_type=r["action_type"],
+                ex_date=r["ex_date"],
+                instrument_ids=r["instrument_ids"],
+                details=r["details"],
+                source=r["source"],
+            ):
+                if wanted is None or action.instrument_id in wanted:
+                    out.append(action)
+        out.sort(key=lambda a: (a.instrument_id, a.ex_date, a.kind.value, a.source))
+        return out
 
 # --- backend -----------------------------------------------------------------------------
 

@@ -20,9 +20,11 @@ and config checklist outside this repository.
   commit it. `openbars config` redacts it.
 - `state_path` (SQLite) is required: jobs, checkpoints and the fetch log are
   not stored in the upstream database.
-- Share QuotaGate with the upstream writer (`provider_request_gate` /
+- Share QuotaGate with the upstream writer by setting
+  `storage.postgres.quota: postgres` (`provider_request_gate` /
   `provider_request_usage`) if both processes use the same provider key;
-  otherwise give openbars its own key.
+  otherwise leave the default `sqlite` gate or give openbars its own key.
+  This never migrates those tables.
 - `upstream_compat` writes US daily bars only.
 
 ## CLI
@@ -36,7 +38,9 @@ but will not write jobs or bars. `plan --submit` and `run` use the
 configured `write` flag and can upsert `daily_bar`, `research_daily_bar`,
 and the corporate-action tables in `upstream_compat`. Jobs, checkpoints and
 the fetch log stay in `{storage.path}/state.db` for compat mode (they are
-not stored in the upstream database).
+not stored in the upstream database). Set `storage.postgres.quota: postgres`
+to share `provider_request_gate` / `provider_request_usage` with the upstream
+writer; the default remains a local SQLite gate.
 
 If symbol bootstrap hits a reused ticker, `run` marks the job dead and
 prints an actionable report listing each candidate's numeric
@@ -97,14 +101,14 @@ matching `daily_bar` is reused when present; otherwise a row is materialized
 from the canonical OHLCV under the same unique key (existing raw values are
 not overwritten). It is missing only if identity resolution fails, in which
 case the whole upsert errors. Volume is required (null volume is refused,
-not stored as zero). Corporate actions are written to the upstream
+not stored as zero). Corporate actions are written to, and can be read back from, the upstream
 observation / event / revision tables (`event_key` =
 `openbars:{action_type}:{instrument_id}:{ex_date}`).
 
 ## 中文摘要
 
 `upstream_compat` 在 `write: true` 时写入既有表，永不做迁移；启动时做列级校验。
-字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表。
+字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表，并可通过 `corporate_actions()` 读回最新修订。`storage.postgres.quota: postgres` 时 CLI 与 upstream 共用 `provider_request_gate` / `usage`（默认仍是本地 sqlite）。
 `openbars plan` / `run` 已支持 `storage.backend: postgres`：DSN 只在运行时解析且不会打印；dry-run `plan` 只读，`plan --submit` 与 `run` 按 `write` 写入。compat 模式下 jobs 仍在本地 SQLite。
 切换前先影子对账，再在临时库验证外部读取 SQL；切到共用表时与 upstream 投影器共用
 `research-daily:{policy}:{date}` 的 advisory lock，并依赖水位表让缓存失效。

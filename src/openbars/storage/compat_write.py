@@ -17,12 +17,13 @@ import hashlib
 import json
 import re
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from dataclasses import dataclass
 from fractions import Fraction
 
-from openbars.core.models import AssetClass, CorporateActionKind
+from openbars.core.models import AssetClass, CorporateAction, CorporateActionKind
 from openbars.storage.errors import StorageError
 from openbars.storage.rows import quality_status_for
 
@@ -249,6 +250,73 @@ def action_details(kind: CorporateActionKind | str, *, ratio: Any = None, amount
 def action_event_key(kind: str, instrument_id: int, ex_date: date) -> str:
     """Stable event key so repeated upserts land on the same upstream event."""
     return f"openbars:{kind}:{instrument_id}:{ex_date.isoformat()}"
+
+
+def _as_json(value: Any) -> Any:
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def kind_from_action_type(action_type: str) -> CorporateActionKind | None:
+    typ = (action_type or "").strip()
+    if typ == "split":
+        return CorporateActionKind.SPLIT
+    if typ in {"cash_dividend", "stock_dividend", "dividend"}:
+        return CorporateActionKind.DIVIDEND
+    if typ in {"spin_off", "spinoff"}:
+        return CorporateActionKind.SPINOFF
+    if typ == "symbol_change":
+        return CorporateActionKind.SYMBOL_CHANGE
+    return None
+
+
+def ratio_amount_from_details(action_type: str, details: Any) -> tuple[Decimal | None, Decimal | None]:
+    rec = _as_json(details) or {}
+    if not isinstance(rec, dict):
+        rec = {}
+    typ = (action_type or "").strip()
+    ratio = amount = None
+    num, den = rec.get("new_shares_numerator"), rec.get("old_shares_denominator")
+    if typ in {"split", "stock_dividend"} and num is not None and den not in (None, 0, "0"):
+        ratio = Decimal(str(num)) / Decimal(str(den))
+    if typ == "cash_dividend" and rec.get("cash_amount") is not None:
+        amount = Decimal(str(rec["cash_amount"]))
+    if typ in {"spin_off", "spinoff"} and rec.get("ratio") is not None:
+        ratio = Decimal(str(rec["ratio"]))
+    if ratio is None and rec.get("ratio") is not None:
+        ratio = Decimal(str(rec["ratio"]))
+    if amount is None and rec.get("amount") is not None:
+        amount = Decimal(str(rec["amount"]))
+    return ratio, amount
+
+
+def actions_from_revision(
+    *,
+    action_type: str,
+    ex_date: date,
+    instrument_ids: Any,
+    details: Any,
+    source: str | None,
+) -> list[CorporateAction]:
+    """Map one upstream revision (latest) back to openbars corporate actions."""
+    kind = kind_from_action_type(action_type)
+    if kind is None or ex_date is None:
+        return []
+    ratio, amount = ratio_amount_from_details(action_type, details)
+    raw_ids = _as_json(instrument_ids) or []
+    if isinstance(raw_ids, (str, int)):
+        raw_ids = [raw_ids]
+    ids = [str(i) for i in raw_ids if i is not None and str(i) != ""]
+    if not ids:
+        return []
+    src = (source or "").strip() or "unknown"
+    return [
+        CorporateAction(instrument_id=i, ex_date=ex_date, kind=kind, source=src, ratio=ratio, amount=amount)
+        for i in ids
+    ]
 
 
 class CompatIdentity:

@@ -379,6 +379,7 @@ storage:
     s = load_settings(write(tmp_path, yaml), env={"OPENBARS_PG_DSN": dsn})
     assert s.storage_backend == "postgres"
     assert s.postgres_mode == "upstream_compat" and s.postgres_write is True
+    assert s.postgres_quota == "sqlite"
     assert s.postgres_dsn == dsn
     assert dsn in s.secret_values()
     text = format_settings(s)
@@ -387,6 +388,37 @@ storage:
     assert "postgres.dsn: set" in text
     assert "postgres.mode: upstream_compat" in text
     assert "postgres.write: true" in text
+    assert "postgres.quota: sqlite" in text
+
+
+def test_postgres_quota_can_be_postgres(tmp_path):
+    yaml = """
+markets: [us]
+storage:
+  backend: postgres
+  postgres:
+    dsn: ${OPENBARS_PG_DSN}
+    mode: upstream_compat
+    quota: postgres
+"""
+    s = load_settings(write(tmp_path, yaml), env={"OPENBARS_PG_DSN": "postgresql://x"})
+    assert s.postgres_quota == "postgres"
+    assert "postgres.quota: postgres" in format_settings(s)
+
+
+def test_postgres_quota_must_be_known(tmp_path):
+    yaml = "markets: [us]\nstorage: {backend: postgres, postgres: {quota: redis}}\n"
+    with pytest.raises(ConfigError, match="sqlite or postgres"):
+        load_settings(write(tmp_path, yaml), env={})
+
+
+def test_open_configured_quota_gate_requires_dsn(tmp_path):
+    from openbars.quota.postgres import open_configured_quota_gate
+
+    yaml = "markets: [us]\nstorage: {backend: postgres, postgres: {quota: postgres}}\n"
+    s = load_settings(write(tmp_path, yaml), env={})
+    with pytest.raises(ConfigError, match="dsn is required"):
+        open_configured_quota_gate(s, data_dir=tmp_path, policies={})
 
 
 def test_postgres_mode_must_be_known(tmp_path):
