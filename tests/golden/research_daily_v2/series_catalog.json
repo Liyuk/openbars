@@ -1,0 +1,8 @@
+[
+  {"source": "massive/eod/split", "price_basis": "split_adjusted", "adjustment_scope": "splits", "session_semantics": "provider_aligned", "volume_basis": "split_adjusted"},
+  {"source": "alpaca/sip/split", "price_basis": "split_adjusted", "adjustment_scope": "splits", "session_semantics": "provider_aligned", "volume_basis": "split_adjusted"},
+  {"source": "alpaca/iex/split", "price_basis": "split_adjusted", "adjustment_scope": "splits", "session_semantics": "provider_aligned", "volume_basis": "split_adjusted"},
+  {"source": "yfinance/yahoo/split", "price_basis": "provider_defined", "adjustment_scope": "unknown", "session_semantics": "provider_aligned", "volume_basis": "provider_defined"},
+  {"source": "twelve_data/daily/split", "price_basis": "split_adjusted", "adjustment_scope": "splits", "session_semantics": "provider_aligned", "volume_basis": "unknown"},
+  {"source": "alpha_vantage/daily/raw", "price_basis": "raw", "adjustment_scope": "none", "session_semantics": "provider_aligned", "volume_basis": "as_traded"}
+]

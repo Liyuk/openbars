@@ -123,23 +123,36 @@ Bar
   ts_start: datetime (UTC)  # bar 开始时刻，统一 UTC
   session_date: date        # 交易所本地交易日（日线主键）
   session: Session
-  open, high, low, close: Decimal | float64
-  volume: float | None
-  vwap, trade_count: optional
+  open, high, low, close: Decimal   # 精度 (20,8)，0 < 价格 < 1e12
+  volume: Decimal | None            # 精度 (28,8)，0 <= 成交量 < 1e20
+  vwap: Decimal | None, trade_count: int | None
   adjustment: Adjustment    # raw 层/规范层恒为 raw
   source: str               # raw: provider id; canonical: 选中的源
   feed: str | None          # 如 alpaca:sip / alpaca:iex —— 成交量口径标注
   flags: QualityFlag
-  ingested_at: datetime
+  ingested_at: datetime | None
 ```
 
-`RawBar` = Bar + `provider`、`fetch_id`、`symbol_as_returned`、`payload_hash`。
+`RawBar` = Bar 的价量字段 + `provider`、`fetch_id`、`symbol_as_returned`、`payload_hash`、`revision`（源 bar 版本，>= 1）、可选 `instrument_id` / `session_date`（符号解析后填入）、可选 `series: BarSeriesIdentity`（序列语义，见 §11.2 / §10.1）。
 `CanonicalBar` = Bar + `price_source`、`volume_source`、`sources_seen`、`reconcile_rule`、`revision`。
+
+数值口径（`openbars.core.ohlcv`）：**价格与成交量一律 `Decimal`，不经 `float` 往返**。构造时接受 `Decimal` / `int` / `str`，`float`（含 `bool`）直接 `TypeError`；非有限值、超过 8 位小数（无法无损落库）的值抛 `ValueError`。`validate_ohlcv(...)` 校验：价格 > 0、成交量 >= 0、`high >= low`、`low <= open <= high`、`low <= close <= high`；价格量级上限 `1e12`、成交量 `1e20`（均为开区间，保证落在 Numeric/decimal128 的声明精度内）。`Bar`、`RawBar`、`CanonicalDailyRow` 的构造函数都会调用它。
 
 ### 3.4 公司行动 / 日历
 
 - `CorporateAction`: `instrument_id, ex_date, kind (split|dividend|spinoff|symbol_change), ratio / amount, source`
-- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）
+- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1
+
+#### 3.4.1 XNYS 日历（`openbars.calendars.xnys`）
+
+- **复用 [`exchange_calendars`](https://pypi.org/project/exchange-calendars/)（PyPI `exchange-calendars>=4.9,<5`）的 `XNYS` 规则，不在仓库内维护节假日表**。许可证 Apache-2.0，与本项目（Apache-2.0）兼容。
+- `XNYSCalendar` 实现 `TradingCalendar` 协议，经入口点 `openbars.calendars` 的 `xnys` 注册；`market = Market.US`，`timezone = "America/New_York"`。
+- `sessions(start, end)`：闭区间交易日，`end < start` 抛 `ValueError`；`is_session(day)`；`session_bounds(day)` 返回 **UTC** `(open, close)`，XNYS 无午休故只有一段，半日市（如感恩节次日）13:00 America/New_York 提前收盘；非交易日返回空元组。夏令时由时区自动处理（09:30–16:00 EST = 14:30–21:00 UTC，EDT = 13:30–20:00 UTC）。
+- `TradingSession(session_date, opens_at, closes_at)`（定义于 `core.calendar`，带时区；`XNYSCalendar.trading_session(s)` 返回 America/New_York 时间）。
+- `session_index(as_of, *, epoch=date(2000,1,1))`：不晚于 `as_of` 的最近一个会话的从 0 起序号；`as_of < epoch` 返回 0。
+- `latest_completed_session(now, wait_minutes=30) -> date | None`：`now` 必须带时区；会话收盘后至少等待 `wait_minutes` 分钟才算完成（在 America/New_York 比较）；向前最多找约 14 天；`wait_minutes < 0` 抛错。
+- 范围策略：缓存默认 `XNYS` 日历；请求范围超出其首/末会话时，构造起止各扩一天的有界日历（带缓存）。
+- `is_non_session_date(day)`：周末恒为非交易日；节假日只在默认日历范围内判定（约 2006 年起），范围之外的工作日**不**当作非交易日，避免拒收更早的长历史。`reject_non_session_bars(bars, *, session_date_attr="session_date")` 是纯函数，返回 `accepted` 与 `rejected`（理由 `"non_session_date"`）。
 
 ### 3.5 Provider 能力声明
 
@@ -305,6 +318,38 @@ data/
 - zstd 压缩；分区键 `market / interval / year`（分钟线再加 `month`）。
 - Postgres 后端实现同一 `StorageBackend` 接口，表结构与 Parquet schema 一一对应。
 
+### 10.1 Arrow / Parquet schema 声明（`openbars.core.schema`）
+
+当前只声明 schema（存储实现——Parquet 写入、DuckDB 视图、compaction、Postgres 映射——随后续 issue 加入）。`SCHEMA_VERSION = 1`；schema 的 metadata 带 `openbars.schema_version`。模块不强依赖 pyarrow：字段声明是纯数据（`RAW_DAILY_BAR_FIELDS`、`CANONICAL_DAILY_FIELDS`），`raw_daily_bar_schema()` / `canonical_daily_schema()` 在调用时才惰性构造 `pyarrow.Schema`（需要 `openbars[parquet]`）。
+
+类型映射：价格 `decimal128(20,8)`；成交量 `decimal128(28,8)`；`session_date` / `adjustment_as_of` 为 `date32`；时间戳为 `timestamp[us, tz=UTC]`；`revision` 为 `int64`；`capabilities` 为 `list<item: string>`；其余为 `string`。
+
+原始日线（raw daily bars），`?` 表示可空：
+
+| 组 | 字段 |
+| --- | --- |
+| 标识 | `instrument_id?`、`session_date?`、`ts_start`、`symbol_as_returned`、`fetch_id`、`revision`（>= 1） |
+| 源身份三元组 | `provider`、`feed`、`adjustment`（旧版 adjustment 字符串，如 `split` / `raw`） |
+| 序列语义 | `interval`（`"1d"`）、`price_basis`、`adjustment_scope`、`adjustment_as_of?`、`session_semantics`、`currency?`、`volume_basis` |
+| 数值 | `open`、`high`、`low`、`close`（价格）、`volume?`（成交量）、`vwap?`（价格） |
+| 溯源 | `payload_hash?`、`ingested_at?` |
+
+规范层日线（research-daily-v2，对应 `CanonicalDailyRow`），唯一键 `(instrument_id, session_date, policy_version)`：
+
+`instrument_id`(string)、`session_date`(date32)、`policy_version`(string)、`selected_source_bar_id?`(string)、`provider`、`feed`、`adjustment`(string)、`revision`(int64)、`open`、`high`、`low`、`close`(decimal 20,8)、`volume`(decimal 28,8)、`selection_reason`、`quality_status`(string)、`capabilities`(list<string>)、`source_fingerprint`(string)、`generated_at`(timestamp UTC)。
+
+`instrument_id` 在 openbars 中是稳定字符串 ID（非整数外键）；`selected_source_bar_id` 在存储 ID 出现之前可为空。`selection_reason` 取 `primary_source` / `primary_source_corroborated` / `compatible_gap_fill` / `fill_<provider>` / `spike_replaced`；`quality_status` 取 `complete` / `divergent` / `volume_missing` / `spike_suspect`（均以字符串存储，`fill_<provider>` 不是固定枚举）。
+
+内存模型：源身份 `SourceIdentity(provider, feed, adjustment)`、`BarSeriesIdentity`、枚举 `PriceBasis` / `AdjustmentScope` / `SessionSemantics` / `VolumeBasis` 与 `BarSeriesCatalog.resolve(source, *, interval=Interval.D1, currency="USD")` 位于 `openbars.core.series`。目录的保守映射：
+
+| 源身份（`1d`） | `price_basis` | `adjustment_scope` | `session_semantics` | `volume_basis` |
+| --- | --- | --- | --- | --- |
+| `alpaca/iex/split`、`alpaca/sip/split`、`massive/eod/split` | `split_adjusted` | `splits` | `provider_aligned` | `split_adjusted` |
+| `alpha_vantage/daily/raw` | `raw` | `none` | `provider_aligned` | `as_traded` |
+| `twelve_data/daily/split` | `split_adjusted` | `splits` | `provider_aligned` | `unknown`（成交量处理依赖源） |
+| `yfinance/yahoo/split` | `provider_defined` | `unknown` | `provider_aligned` | `provider_defined`（可检视，不视为已证明兼容） |
+| 其他 | `unknown` | `unknown` | `unknown` | `unknown`（`currency` 仍按入参设置） |
+
 ## 11. 上游搬运来源与 backend 兼容与切换
 
 openbars 的数据层**以一套已在生产运行的上游内部实现（下称 upstream）为主搬运**，不是重新发明；搬运时按 [`docs/sanitization.md`](sanitization.md) 脱敏。upstream 的模块路径与 openbars 的逐文件对照只记录在仓库外的私有笔记中，本文与 issue 只写功能描述。
@@ -318,7 +363,7 @@ openbars 的数据层**以一套已在生产运行的上游内部实现（下称
 | `providers.us.*` | Alpaca SIP/IEX 日线（多代码批量、免费档最近时段处理）、Massive grouped daily / 单代码区间 / 代码清单 / 退市清单 / 代码类型、yfinance 批量（`auto_adjust=False`）、公司行动适配器；Twelve Data、Alpha Vantage 作为可选兜底源 | 直接搬，改导入与配置注入 |
 | `quota` | 进程内固定节奏限速、**持久化令牌闸门**（按 provider 行锁预约下一个请求时刻）、可选日额度（UTC 日 / 滚动 24h）与 `retry_at`、各源请求上限常量 | 改接口后搬：常量变为 `QuotaPolicy` 默认值；新增 SQLite 实现（upstream 只有 PG 行锁） |
 | `orchestrator` | Job 租约与重试、优先级策略、过期租约回收、调度单例锁、每日同步计划与批次切分、历史回补窗口与“覆盖即废弃”规则、每会话重建调度 | 改接口后搬：脱离 upstream ORM 与 worker 进程模型 |
-| `core.calendar` | XNYS 交易日历（`exchange_calendars`）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬 |
+| `core.calendar` / `calendars` | XNYS 交易日历（复用 `exchange_calendars`，见 §3.4.1）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬（已完成） |
 | `normalize.instruments` | 点时（point-in-time）身份证据与解析、代码别名有效期、退市目录、身份对账、代码类型 → 证券类型映射、ETF 作为独立证券类型 | 改接口后搬 |
 | `normalize.adjust` | 公司行动“观测追加 + 规范修订”模型、拆股后旧历史重抓检测、`adjustment_as_of` 一致性检查（只拆股复权，不含分红） | 改接口后搬 |
 | `reconcile` | **research-daily-v2 选数**：按源优先级、兼容性闸门、兜底源能力集、价格 0.5% / 成交量 5% 容差、独立源佐证（quorum 2）、质量标记、人工/规则覆盖、确定性数据修复 R1–R4（预览/应用、熔断上限、可撤销审计） | 核心逻辑直接搬，持久化改接口 |
@@ -378,7 +423,8 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 
 ```text
 src/openbars/
-  core/          models.py · errors.py · calendar.py · types.py
+  core/          models.py · ohlcv.py · series.py · schema.py · errors.py · calendar.py
+  calendars/     xnys.py（后续：crypto · cn · hk）
   config/        schema.py · loader.py
   cli/           main.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
