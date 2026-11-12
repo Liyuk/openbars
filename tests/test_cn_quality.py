@@ -10,6 +10,7 @@ import pytest
 from openbars.calendars import cn as cn_calendar
 from openbars.core.models import Interval, QualityFlag, RawBar
 from openbars.normalize.cn_quality import (
+    MAIN_ST_REFORM_DATE,
     CnBoard,
     board_of_code,
     board_of_symbol,
@@ -91,9 +92,40 @@ def test_star_is_twenty_percent_from_launch():
     assert limit_ratio(CnBoard.STAR, date(2019, 7, 19)) is None  # the board did not exist yet
 
 
-def test_st_is_five_percent():
-    assert limit_ratio(CnBoard.MAIN, DAY, is_st=True, listed_on=LONG_AGO) == D("0.05")
+def test_main_st_is_five_percent_until_2026_07_05_then_ten():
+    assert limit_ratio(CnBoard.MAIN, DAY, is_st=True, listed_on=LONG_AGO) == D("0.05")  # the existing DAY
+    assert limit_ratio(CnBoard.MAIN, date(2026, 7, 5), is_st=True, listed_on=LONG_AGO) == D("0.05")
+    assert limit_ratio(CnBoard.MAIN, date(2026, 7, 6), is_st=True, listed_on=LONG_AGO) == D("0.1")
+    assert limit_ratio(CnBoard.MAIN, date(2027, 1, 4), is_st=True, listed_on=LONG_AGO) == D("0.1")
+    assert MAIN_ST_REFORM_DATE == date(2026, 7, 6)
+
+
+def test_chinext_st_follows_the_2020_08_24_reform():
+    assert limit_ratio(CnBoard.CHINEXT, date(2020, 8, 24), is_st=True, listed_on=LONG_AGO) == D("0.2")
+    assert limit_ratio(CnBoard.CHINEXT, DAY, is_st=True, listed_on=LONG_AGO) == D("0.2")
+    assert limit_ratio(CnBoard.CHINEXT, date(2020, 8, 21), is_st=True, listed_on=LONG_AGO) == D("0.05")
+    assert limit_ratio(CnBoard.CHINEXT, date(2020, 8, 21), listed_on=LONG_AGO) == D("0.1")  # non-ST unchanged
+
+
+def test_star_st_is_always_twenty_percent():
+    for day in (date(2019, 7, 22), DAY, date(2026, 7, 5), date(2026, 7, 6)):
+        assert limit_ratio(CnBoard.STAR, day, is_st=True, listed_on=LONG_AGO) == D("0.2")
+    assert limit_ratio(CnBoard.STAR, date(2019, 7, 19), is_st=True) is None  # before the board existed
+
+
+def test_non_st_ratios_ignore_the_st_dates():
+    for day in (DAY, date(2026, 7, 5), date(2026, 7, 6)):
+        assert limit_ratio(CnBoard.MAIN, day, listed_on=LONG_AGO) == D("0.1")
+        assert limit_ratio(CnBoard.CHINEXT, day, listed_on=LONG_AGO) == D("0.2")
+        assert limit_ratio(CnBoard.STAR, day, listed_on=LONG_AGO) == D("0.2")
+
+
+def test_st_ratio_is_a_test_only_override_and_ipo_windows_still_win():
     assert limit_ratio(CnBoard.MAIN, DAY, is_st=True, listed_on=LONG_AGO, st_ratio=D("0.1")) == D("0.1")
+    assert limit_ratio(CnBoard.CHINEXT, DAY, listed_on=LONG_AGO, st_ratio=D("0.5")) == D("0.2")  # not ST: ignored
+    listed = date(2026, 3, 2)  # registration-system IPO: first 5 sessions have no limit, ST or not
+    assert limit_ratio(CnBoard.MAIN, listed, is_st=True, listed_on=listed) is None
+    assert limit_ratio(CnBoard.STAR, listed, is_st=True, listed_on=listed) is None
 
 
 def test_limit_prices_round_half_up_not_bankers():
@@ -174,6 +206,20 @@ def test_close_at_the_limit_flags_up_and_down():
     pre = {"preclose": "10.00", "tradestatus": 1}
     assert flags_for_cn_bar(rawbar("sh.600000", DAY, "11.00", extra=pre), listed_on=LONG_AGO) is QualityFlag.LIMIT_UP
     assert flags_for_cn_bar(rawbar("sh.600000", DAY, "9.00", extra=pre), listed_on=LONG_AGO) is QualityFlag.LIMIT_DOWN
+
+
+def test_st_bar_flags_use_the_board_and_date_ratio():
+    st = {"preclose": "10.00", "tradestatus": 1, "isST": 1}
+    flag = lambda code, day, close: flags_for_cn_bar(  # noqa: E731
+        rawbar(code, day, close, extra=st), listed_on=LONG_AGO
+    )
+    assert flag("sz.300750", DAY, "12.00") is QualityFlag.LIMIT_UP  # ChiNext ST: ±20%
+    assert flag("sz.300750", date(2020, 8, 21), "10.50") is QualityFlag.LIMIT_UP  # ... ±5% before the reform
+    assert flag("sh.688001", DAY, "8.00") is QualityFlag.LIMIT_DOWN  # STAR ST: ±20%
+    assert flag("sh.600000", DAY, "10.50") is QualityFlag.LIMIT_UP  # main ST on DAY: ±5%
+    assert flag("sh.600000", date(2026, 7, 5), "10.50") is QualityFlag.LIMIT_UP
+    assert flag("sh.600000", date(2026, 7, 6), "10.50") is QualityFlag.NONE  # ±10% from 2026-07-06
+    assert flag("sh.600000", date(2026, 7, 6), "11.00") is QualityFlag.LIMIT_UP
 
 
 def test_one_tick_away_is_not_a_limit():
