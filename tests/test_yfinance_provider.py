@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 
 import pytest
@@ -186,6 +186,76 @@ def test_column_oriented_and_tuple_keys():
     assert [b.close for b in batch.bars] == [Decimal(2), Decimal(3)]
 
 
+NOISY = [
+    # (open, high, low, close, volume): IEEE floats whose repr has > 8 fractional digits
+    (10.123456789012, 10.987654321098, 9.876543210987, 10.555555555555, 1234.123456789012),
+    (11.111111111111, 12.222222222222, 10.000000000001, 11.555555555555, 2000.2500000001),
+    (0.123456785, 0.123456795, 0.123456775, 0.123456785, 2.000000005),  # half-even ties on repr
+]
+
+
+def _noisy_rows(dates=("2024-01-02", "2024-01-03", "2024-01-04")):
+    return [
+        {"Date": d, "Open": o, "High": h, "Low": lo, "Close": c, "Volume": v}
+        for d, (o, h, lo, c, v) in zip(dates, NOISY)
+    ]
+
+
+def _q8(value: float) -> Decimal:
+    return Decimal(repr(value)).quantize(Decimal("1e-8"), rounding=ROUND_HALF_EVEN)
+
+
+def _assert_noisy_quantized(bars):
+    assert len(bars) == len(NOISY)
+    for bar, inputs in zip(bars, NOISY):
+        got = (bar.open, bar.high, bar.low, bar.close, bar.volume)
+        for value, raw in zip(got, inputs):
+            assert isinstance(value, Decimal)
+            assert value.as_tuple().exponent >= -8
+            assert value == _q8(raw)
+
+
+def test_noisy_float_prices_are_quantized_not_empty_result():
+    assert len(repr(NOISY[0][0]).split(".")[1]) > 8
+    result = provider(FakeDownload({"TEST1": _noisy_rows()})).fetch_bars_result(req())
+    assert result.batch.error is None and not result.symbol_errors and not result.skipped
+    assert [b.session_date.isoformat() for b in result.batch.bars] == [
+        "2024-01-02", "2024-01-03", "2024-01-04",
+    ]
+    _assert_noisy_quantized(result.batch.bars)
+    assert result.batch.bars[0].open == Decimal("10.12345679")
+    assert result.batch.bars[2].open == Decimal("0.12345678")  # tie -> even
+    assert result.batch.bars[2].high == Decimal("0.1234568")  # tie -> even
+
+
+def test_noisy_two_session_inclusive_window():
+    download = FakeDownload({"TEST1": _noisy_rows(("2024-01-02", "2024-01-03"))[:2]})
+    batch = provider(download).fetch_bars(req(start="2024-01-02", end="2024-01-03"))
+    assert download.calls[0][1]["end"] == "2024-01-04"
+    assert [b.session_date.isoformat() for b in batch.bars] == ["2024-01-02", "2024-01-03"]
+
+
+def test_exact_str_decimal_inputs_with_too_many_digits_stay_invalid():
+    rows = [
+        {"Date": "2024-01-02", "Open": "1.123456789", "High": "2", "Low": "1", "Close": "1", "Volume": 1},
+        {"Date": "2024-01-03", "Open": Decimal("1.123456789"), "High": 2, "Low": 1, "Close": 1, "Volume": 1},
+    ]
+    with pytest.raises(ProviderError) as e:
+        provider(FakeDownload({"TEST1": rows})).fetch_bars(req())
+    assert e.value.code == "empty_result"
+
+
+def test_float_still_invalid_after_quantization_is_skipped():
+    rows = _noisy_rows()[:1] + [
+        {"Date": "2024-01-03", "Open": 1.5, "High": 1.0000000001, "Low": 1.9999999999,
+         "Close": 1.5, "Volume": 1.0},  # high < low even after quantization
+        {"Date": "2024-01-04", "Open": float("inf"), "High": 2.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+    ]
+    result = provider(FakeDownload({"TEST1": rows})).fetch_bars_result(req())
+    assert [b.session_date.day for b in result.batch.bars] == [2]
+    assert result.skipped == {"invalid_row": 2}
+
+
 def test_rate_limited_symbol_is_retryable_and_keeps_other_bars():
     download = FakeDownload(errors={"TEST1": RuntimeError("Too Many Requests. Rate limited")})
     result = provider(download).fetch_bars_result(req("TEST1", "ZZZA"))
@@ -292,6 +362,32 @@ def test_pandas_dataframe_with_multiindex_columns():
     )
     batch = provider(FakeDownload({"TEST1": frame})).fetch_bars(req())
     assert [b.close for b in batch.bars] == [Decimal("1.75"), Decimal("2.75")]
+
+
+def test_pandas_yfinance_18_group_by_ticker_shape_with_noisy_floats():
+    pd = pytest.importorskip("pandas")
+    columns = pd.MultiIndex.from_product(
+        [["TEST1"], ["Open", "High", "Low", "Close", "Volume"]], names=["Ticker", "Price"]
+    )
+    values = [list(row) for row in NOISY]
+    frame = pd.DataFrame(
+        values, columns=columns, index=pd.DatetimeIndex(["2024-01-02", "2024-01-03", "2024-01-04"], name="Date")
+    )
+    assert ("Date", "") in frame.reset_index().columns  # the shape under test
+    result = provider(FakeDownload({"TEST1": frame})).fetch_bars_result(req())
+    assert result.batch.error is None and not result.skipped
+    assert [b.session_date.isoformat() for b in result.batch.bars] == [
+        "2024-01-02", "2024-01-03", "2024-01-04",
+    ]
+    _assert_noisy_quantized(result.batch.bars)
+
+
+def test_pandas_numpy_float32_scalars_are_quantized():
+    np = pytest.importorskip("numpy")
+    row = {"Date": "2024-01-02", "Open": np.float32(1.1), "High": np.float32(2.2),
+           "Low": np.float32(1.0), "Close": np.float32(1.5), "Volume": np.float32(7)}
+    (bar,) = provider(FakeDownload({"TEST1": [row]})).fetch_bars(req()).bars
+    assert bar.open.as_tuple().exponent >= -8 and bar.volume == Decimal(7)
 
 
 # -- routing ----------------------------------------------------------------------------------
