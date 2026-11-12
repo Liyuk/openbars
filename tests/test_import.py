@@ -43,6 +43,8 @@ MODULES = [
     "openbars.providers.us.massive",
     "openbars.providers.us.massive_window",
     "openbars.providers.us.yfinance",
+    "openbars.providers.crypto",
+    "openbars.providers.crypto.binance",
     "openbars.raw.store",
     "openbars.normalize.instruments",
     "openbars.normalize.normalizer",

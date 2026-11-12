@@ -51,6 +51,9 @@ ALPACA_IEX_SPLIT = SourceIdentity("alpaca", "iex", "split")
 YFINANCE_YAHOO_SPLIT = SourceIdentity("yfinance", "yahoo", "split")
 TWELVE_DATA_DAILY_SPLIT = SourceIdentity("twelve_data", "daily", "split")
 ALPHA_VANTAGE_DAILY_RAW = SourceIdentity("alpha_vantage", "daily", "raw")
+# Crypto spot (UTC-day klines). Deliberately NOT in KNOWN_SOURCES: that tuple is the US
+# research-daily-v2 source list.
+BINANCE_SPOT_RAW = SourceIdentity("binance", "spot", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -134,6 +137,14 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
     (ALPACA_SIP_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
     (MASSIVE_EOD_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.SPLIT_ADJUSTED),
     (ALPHA_VANTAGE_DAILY_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.PROVIDER_ALIGNED,
+        volume_basis=VolumeBasis.AS_TRADED,
+    ),
+    # Spot klines are as-traded and cut at UTC 00:00 (``PROVIDER_ALIGNED``: the enum has no
+    # dedicated UTC-day member, and adding one would change the storage schema enum).
+    (BINANCE_SPOT_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.PROVIDER_ALIGNED,
