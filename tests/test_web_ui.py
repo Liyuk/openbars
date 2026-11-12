@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from openbars.api.http import create_app, default_static_dir
+from openbars.core.models import QualityFlag
 
 pytestmark = pytest.mark.usefixtures("no_network")
 
@@ -79,3 +81,29 @@ def test_frontend_switches_source_and_annotates_gaps(client):
 def test_pages_reject_writes(client):
     for path in ("/", "/chart", "/flags"):
         assert client.post(path).status_code == 405
+
+def test_dashboard_hides_zero_flag_counts(client):
+    js = client.get("/assets/app.js").text
+    # Only flags with a positive count are drawn on the dashboard summary.
+    assert "counts[k] > 0" in js
+    assert "dash.flags_empty" in js
+
+
+def test_every_quality_flag_has_en_and_zh_labels(client):
+    """New QualityFlag members must ship with both language labels."""
+    js = client.get("/assets/app.js").text
+    names = [flag.name.lower() for flag in QualityFlag if flag is not QualityFlag.NONE]
+    assert names, "expected at least one quality flag"
+    missing = []
+    for name in names:
+        key = f"flag.{name}"
+        values = re.findall(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', js)
+        if len(values) != 2:
+            missing.append(f"{key} (found {len(values)} labels: {values})")
+            continue
+        if any(not value.strip() or value.strip() == key for value in values):
+            missing.append(f"{key} has an empty or fallback label: {values}")
+    assert not missing, "quality flags missing bilingual labels: " + "; ".join(missing)
+    # Both languages actually differ for at least the newly completed keys.
+    assert "single source" in js and "单一来源" in js
+    assert "limit up" in js and "涨停" in js

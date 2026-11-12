@@ -47,10 +47,19 @@
       "chart.pick": "Enter a symbol or instrument id, then load.",
       "chart.flags": "Flags on this bar",
       "err.generic": "Unable to load data.",
+      "dash.flags_empty": "No flagged bars.",
       "flag.divergent": "divergent",
       "flag.spike_suspect": "spike suspect",
       "flag.volume_missing": "volume missing",
+      "flag.single_source": "single source",
+      "flag.filled_from_fallback": "filled from fallback",
       "flag.stale": "stale",
+      "flag.gap": "gap",
+      "flag.revised": "revised",
+      "flag.adjustment_unverified": "adjustment unverified",
+      "flag.limit_up": "limit up",
+      "flag.limit_down": "limit down",
+      "flag.suspended": "suspended",
       "gap.label": "gap"
     },
     zh: {
@@ -97,10 +106,19 @@
       "chart.pick": "输入代码或品种 id，然后加载。",
       "chart.flags": "本根标记",
       "err.generic": "无法加载数据。",
+      "dash.flags_empty": "没有带标记的 K 线。",
       "flag.divergent": "价格分歧",
       "flag.spike_suspect": "疑似尖刺",
       "flag.volume_missing": "成交量缺失",
+      "flag.single_source": "单一来源",
+      "flag.filled_from_fallback": "由备源填充",
       "flag.stale": "陈旧",
+      "flag.gap": "缺口",
+      "flag.revised": "已修订",
+      "flag.adjustment_unverified": "复权未核实",
+      "flag.limit_up": "涨停",
+      "flag.limit_down": "跌停",
+      "flag.suspended": "停牌",
       "gap.label": "缺失"
     }
   };
@@ -230,11 +248,12 @@
           }).join("");
         }
         var counts = flags.counts || {};
-        var parts = Object.keys(counts).map(function (k) {
+        var parts = Object.keys(counts).filter(function (k) { return counts[k] > 0; }).map(function (k) {
           return '<div class="metric"><span>' + escapeHtml(flagLabel(k)) + "</span><span>" + counts[k] + "</span></div>";
         }).join("");
         document.getElementById("flag-summary").innerHTML =
-          parts + '<p class="note"><a href="/flags">' + t("nav.flags") + "</a></p>";
+          (parts || '<p class="empty">' + t("dash.flags_empty") + "</p>") +
+          '<p class="note"><a href="/flags">' + t("nav.flags") + "</a></p>";
 
         var quotaBox = document.getElementById("quota");
         if (!quota.available || !(quota.providers || []).length) {
