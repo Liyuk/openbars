@@ -245,6 +245,25 @@ def test_alpaca_hourly_pages_and_aggregates_per_symbol():
     assert bar.volume == Decimal(200) and bar.extra["session"] == "regular"
 
 
+def test_alpaca_hourly_skips_unrequested_bars_and_reports_count(caplog):
+    rows = [{"t": t.isoformat(), **row} for t, row in half_hours(DAY)]
+    def server(request):
+        return httpx.Response(200, json={"bars": {"ZZZA": rows, "ZZZX": rows[:2]}})
+    batch = alpaca(server).fetch_bars(req("ZZZA"))
+    assert len(batch.bars) == 7
+    assert {bar.symbol_as_returned for bar in batch.bars} == {"ZZZA"}
+    assert "2" in caplog.text and "ZZZX" not in caplog.text
+
+
+@pytest.mark.parametrize("items", [None, [{"t": "invalid"}]])
+def test_alpaca_hourly_rejects_malformed_unrequested_bars(items):
+    def server(request):
+        return httpx.Response(200, json={"bars": {"ZZZX": items}})
+    with pytest.raises(ProviderError) as info:
+        alpaca(server).fetch_bars(req("ZZZA"))
+    assert info.value.code == "invalid_payload"
+
+
 def test_alpaca_hourly_sip_delay_limits_end():
     during = ny(DAY, 12, 0)
     server = AlpacaServer(page_size=1000)

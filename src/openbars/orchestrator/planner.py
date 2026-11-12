@@ -62,6 +62,7 @@ from openbars.normalize.hk_instruments import (
 from openbars.normalize.instruments import InstrumentMaster
 from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
+from openbars.providers.us.alpaca import ESTIMATED_BARS_PER_PAGE
 from openbars.providers.us.massive_window import (
     ROLLING_WINDOW_DAYS,
     massive_grouped_sessions,
@@ -412,7 +413,8 @@ def estimate_requests(job: Job, cap: SourceCapability | None) -> int:
         if job.provider == "massive":
             return max(1, len(job.instruments) * math.ceil(minutes / 50000))
         if job.provider == "alpaca":
-            return max(1, math.ceil(len(job.instruments) * minutes / 30 / 10000))
+            # Regular sessions contain 13 half-hour bars; extended hours add pages.
+            return max(1, math.ceil(len(job.instruments) * len(sessions) * 13 / ESTIMATED_BARS_PER_PAGE))
         if job.provider == "twelve_data":
             return max(1, len(job.instruments) * math.ceil(minutes / 60 / 5000))
         if job.provider == "yfinance":
