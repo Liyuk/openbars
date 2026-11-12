@@ -1,0 +1,37 @@
+name: Feature
+description: 新功能或能力（应先在 Discussions 达成共识）
+labels: ["feature"]
+body:
+  - type: input
+    id: discussion
+    attributes:
+      label: 关联 Discussion
+      placeholder: https://github.com/Liyuk/openbars/discussions/...
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 为什么要做，解决什么问题
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围
+      description: 做什么、不做什么；涉及的层（provider / scheduler / normalize / storage / cli）
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 可验证的检查项（测试、命令输出、数据指标）
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: 依赖
+      placeholder: "依赖 #..."

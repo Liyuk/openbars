@@ -1,0 +1,52 @@
+import importlib
+
+import pytest
+
+MODULES = [
+    "openbars",
+    "openbars.core.models",
+    "openbars.core.errors",
+    "openbars.core.calendar",
+    "openbars.config.schema",
+    "openbars.config.loader",
+    "openbars.cli.main",
+    "openbars.orchestrator.jobs",
+    "openbars.orchestrator.planner",
+    "openbars.orchestrator.nodes",
+    "openbars.orchestrator.runner",
+    "openbars.quota.policy",
+    "openbars.quota.gate",
+    "openbars.providers.base",
+    "openbars.providers.registry",
+    "openbars.raw.store",
+    "openbars.normalize.instruments",
+    "openbars.normalize.normalizer",
+    "openbars.normalize.adjust",
+    "openbars.reconcile.policy",
+    "openbars.reconcile.reconciler",
+    "openbars.storage.base",
+    "openbars.storage.parquet_duckdb",
+    "openbars.storage.postgres",
+    "openbars.api.reader",
+    "openbars.api.http",
+]
+
+
+@pytest.mark.parametrize("name", MODULES)
+def test_module_imports(name):
+    importlib.import_module(name)
+
+
+def test_version_and_cli():
+    import openbars
+    from openbars.cli.main import main
+
+    assert openbars.__version__
+    assert main([]) == 0
+
+
+def test_interval_semantics():
+    from openbars.core.models import Interval
+
+    assert not Interval.D1.is_intraday
+    assert Interval.H1.is_intraday

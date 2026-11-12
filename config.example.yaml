@@ -1,0 +1,78 @@
+# openbars example configuration. Copy to config.yaml (git-ignored).
+# Secrets are referenced as ${ENV_VAR}; never write keys inline.
+version: 1
+
+# 选择市场（多选）: us | crypto | cn | hk
+markets: [us]
+
+# 选择粒度（多选）: 1d (default) | 1h | 30m | 15m | 5m | 1m
+# 非日线粒度会触发对应 provider 的额外限额规则与回补预算检查。
+intervals: [1d]
+
+# 历史回补范围
+history:
+  start: 2016-01-01        # or "max"
+  end: null                # null = today
+
+universe:
+  us:
+    include: [common_stock, etf]   # adr, preferred, ... 可选
+    exclude_otc: true
+
+storage:
+  backend: parquet_duckdb  # parquet_duckdb | postgres
+  path: ./data
+  postgres:
+    dsn: ${OPENBARS_PG_DSN}
+
+conventions:
+  adjustment: split        # raw | split | split_dividend | all（查询时派生，落库只存不复权+公司行动）
+  us_hourly_alignment: session_open   # session_open (9:30) | clock_hour
+  include_extended_hours: false
+
+providers:
+  alpaca:
+    enabled: true
+    feed: sip              # sip | iex —— 成交量不得跨 feed 混用
+    key_id: ${ALPACA_API_KEY_ID}
+    secret_key: ${ALPACA_API_SECRET_KEY}
+    # quota 留空则使用 provider 声明的默认免费额度；可在此收紧
+    quota: { per_minute: 190 }
+  massive:
+    enabled: true
+    api_key: ${MASSIVE_API_KEY}
+    quota: { per_minute: 4 }
+  yfinance:
+    enabled: true
+    quota: { per_minute: 30 }
+  alpha_vantage:
+    enabled: false
+    api_key: ${ALPHA_VANTAGE_API_KEY}
+    role: audit            # primary | fallback | audit
+  binance:                 # v0.2
+    enabled: false
+    base_url: https://data-api.binance.vision
+
+# 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
+reconcile:
+  us:
+    1d:
+      price: [massive, alpaca, yfinance]
+      volume: [alpaca]     # 只用同一 feed
+  tolerances:
+    price_rel: 0.005
+    volume_rel: 0.10
+
+# 采集节点：本机或远程（例如需要国内网络的 A 股/港股）
+nodes:
+  - name: local
+    kind: local
+  # - name: cn-node
+  #   kind: remote
+  #   url: https://cn-node.example.com
+  #   token: ${OPENBARS_NODE_TOKEN}
+  #   markets: [cn, hk]
+
+schedule:
+  daily_at: "06:30"        # in timezone below
+  timezone: America/New_York
