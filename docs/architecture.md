@@ -470,6 +470,7 @@ data/
 - **去重规则（same key, last write wins）**：键相同的行里，文件名最大的 part 中的那一行可见。读取与 DuckDB 视图都用窗口函数实现该规则，所以重复行在 compaction 之前就已不可见。同一批内键重复时，批内最后一行胜出。
 - 写入前与分区内当前可见行比较（忽略血缘列，见下）；**内容完全一致则不写文件**。因此重试同一个 Job、重复 upsert 不会产生新文件或重复行。血缘列：raw 的 `fetch_id / source_artifact_ref / ingest_run_id / ingested_at`，canonical 的 `generated_at`——只有这些列不同的重写视为无变化（历史请求见 `fetch_log`）。
 - `compact()`：把每个分区内的所有 part 合并成**一个**去重后的 part（原子写入，再删除输入）。合并产物保留最新输入的排序位次，因此并发写入的更新 part 仍然胜出；崩溃发生在“新 part 已落盘、旧 part 未删”之间时，数据冗余但读取结果一致。
+- 维护命令（#127，`src/openbars/storage/maintenance.py`、`cli/storage.py`）：`openbars compact` 默认只读出计划（分区、part 数、去重后行数、预计体积），`--apply` 才调用 `compact()`；`openbars usage` 按 layer / market / interval / year（raw 另按 provider）统计；`openbars retention` 仅在配置了 `storage.retention` 时生效，只能删除 raw 层整年 `year=` 分区（canonical / ref 永不删除），先列候选、`--apply` 才删且持写锁；`openbars backup` 持写锁复制数据目录（SQLite 用在线备份，跳过 `.lock`、`.tmp`、点文件和可重建的 catalog）。均不改去重语义、不提升 `SCHEMA_VERSION`，Postgres 路径不变。
 - 写入者用 `data/.lock`（`flock`）串行化；读取不加锁。
 - 新增的新 revision（`revision` 属于键的一部分）是独立的行，不会覆盖旧 revision。
 
