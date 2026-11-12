@@ -1,8 +1,22 @@
 """Load ``config.yaml``: parse, expand ``${ENV}`` references, map into typed settings.
 
-``${NAME}`` expands to the environment value (empty when unset, so a disabled provider's
-unset key is harmless); ``${NAME:-default}`` supplies a default. Resolved values are never
-logged or echoed in error messages -- errors name the offending key, not its value.
+Resolution order for secrets and other ``${VAR}`` values (highest wins):
+
+1. The process environment (or the ``env`` mapping passed to :func:`load_settings`).
+2. A dotenv file, chosen by the first of: the ``env_file`` argument (CLI
+   ``--env-file``), the ``OPENBARS_ENV_FILE`` environment variable, or the
+   ``env_file`` key in ``config.yaml``.
+3. A ``${VAR:-default}`` default in the YAML.
+
+Literal (non-placeholder) values in ``config.yaml`` are used as written and are
+not overwritten by the environment. ``ALPACA_API_KEY`` / ``ALPACA_API_SECRET``
+are accepted as aliases for ``ALPACA_API_KEY_ID`` / ``ALPACA_API_SECRET_KEY``
+when the canonical name is unset.
+
+``${NAME}`` expands to the environment value (empty when unset, so a disabled
+provider's unset key is harmless); ``${NAME:-default}`` supplies a default.
+Resolved values are never logged or echoed in error messages -- errors name the
+offending key or file path, not its value.
 """
 
 from __future__ import annotations
@@ -10,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +37,17 @@ from openbars.core.models import Adjustment, Interval, Market
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _RESERVED_PROVIDER_KEYS = {"enabled", "role", "quota"}
+_ENV_LINE = re.compile(
+    r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$"
+)
+
+ENV_FILE_VAR = "OPENBARS_ENV_FILE"
+
+# Canonical name -> accepted aliases (used only when the canonical name is unset).
+ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "ALPACA_API_KEY_ID": ("ALPACA_API_KEY",),
+    "ALPACA_API_SECRET_KEY": ("ALPACA_API_SECRET",),
+}
 
 
 def expand_env(value: Any, env: Mapping[str, str]) -> Any:
@@ -35,6 +61,80 @@ def expand_env(value: Any, env: Mapping[str, str]) -> Any:
     if isinstance(value, dict):
         return {k: expand_env(v, env) for k, v in value.items()}
     return value
+
+
+def _strip_env_value(raw: str) -> str:
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    # Unquoted: drop an inline comment that starts at a preceding space.
+    if " #" in text:
+        text = text[: text.index(" #")]
+    return text.rstrip()
+
+
+def parse_env_file(path: str | Path) -> dict[str, str]:
+    """Parse a dotenv file into a name->value mapping. Values never appear in errors."""
+    file = Path(path)
+    if not file.is_file():
+        raise ConfigError(f"env file not found: {file}")
+    try:
+        text = file.read_text(encoding="utf-8-sig")
+    except OSError:
+        raise ConfigError(f"env file not readable: {file}") from None
+    out: dict[str, str] = {}
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _ENV_LINE.match(line)
+        if match is None:
+            raise ConfigError(f"env file {file} line {lineno} is not NAME=VALUE")
+        out[match.group(1)] = _strip_env_value(match.group(2))
+    return out
+
+
+def apply_env_aliases(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy alias values onto unset (or empty) canonical names."""
+    out = dict(env)
+    for canonical, aliases in ENV_ALIASES.items():
+        if out.get(canonical):
+            continue
+        for alias in aliases:
+            if out.get(alias):
+                out[canonical] = out[alias]
+                break
+    return out
+
+
+def merge_env(process_env: Mapping[str, str], file_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Process environment wins; then the dotenv file; then aliases."""
+    merged = dict(file_env or {})
+    merged.update(process_env)
+    return apply_env_aliases(merged)
+
+
+def resolve_env_file(
+    data: Mapping[str, Any],
+    process_env: Mapping[str, str],
+    *,
+    env_file: str | Path | None = None,
+    config_dir: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Pick the dotenv path. Explicit argument wins, then ``OPENBARS_ENV_FILE``, then YAML."""
+    if env_file:
+        return Path(env_file).expanduser(), "--env-file"
+    if process_env.get(ENV_FILE_VAR):
+        return Path(process_env[ENV_FILE_VAR]).expanduser(), ENV_FILE_VAR
+    raw = data.get("env_file") if isinstance(data, Mapping) else None
+    if raw is None or raw == "":
+        return None, None
+    if not isinstance(raw, str):
+        raise ConfigError("'env_file' must be a string path")
+    path = Path(expand_env(raw, process_env)).expanduser()
+    if not path.is_absolute() and config_dir is not None:
+        path = config_dir / path
+    return path, "config.env_file"
 
 
 def _enum(enum_cls: type, raw: Any, what: str) -> Any:
@@ -159,11 +259,16 @@ def parse_settings(data: Any) -> Settings:
     )
 
 
-def load_settings(path: str | Path, *, env: Mapping[str, str] | None = None) -> Settings:
-    """Parse ``config.yaml``, expand ``${ENV_VAR}`` references and validate.
+def load_settings(
+    path: str | Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    env_file: str | Path | None = None,
+) -> Settings:
+    """Parse ``config.yaml``, optionally load a dotenv file, expand ``${ENV_VAR}`` and validate.
 
     Raises :class:`~openbars.core.errors.ConfigError` for a missing/unreadable file, bad
-    YAML or an invalid market/interval/adjustment.
+    YAML or an invalid market/interval/adjustment. Secret values never appear in the error.
     """
     file = Path(path)
     if not file.is_file():
@@ -172,4 +277,18 @@ def load_settings(path: str | Path, *, env: Mapping[str, str] | None = None) -> 
         data = yaml.safe_load(file.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         raise ConfigError(f"config file {file} is not valid YAML") from None
-    return parse_settings(expand_env(data, os.environ if env is None else env))
+    if data is None:
+        data = {}
+    if not isinstance(data, Mapping):
+        raise ConfigError("config root must be a mapping")
+
+    process_env = os.environ if env is None else env
+    chosen, source = resolve_env_file(data, process_env, env_file=env_file, config_dir=file.parent)
+    file_env = parse_env_file(chosen) if chosen is not None else None
+    merged = merge_env(process_env, file_env)
+    settings = parse_settings(expand_env(data, merged))
+    return replace(
+        settings,
+        env_file=str(chosen) if chosen is not None else None,
+        env_file_source=source,
+    )

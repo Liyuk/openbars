@@ -23,7 +23,7 @@ echo "新词" | python3 scripts/check_sanitized.py --hash-term >> scripts/saniti
 
 | 类别 | 例子（描述，不写实值） | 规则 |
 | --- | --- | --- |
-| 密钥 / token | provider API key、secret、数据库口令 | 一律走环境变量或 `.env`（不入库）；代码中只出现变量名；`config.example.yaml` / `.env.example` 只放空值或 `${VAR}` 占位。日志与错误信息中的凭据按 upstream 做法在落盘前替换为 `[REDACTED]` |
+| 密钥 / token | provider API key、secret、数据库口令 | 一律走环境变量或 `.env`（不入库）；代码中只出现变量名；`config.example.yaml` / `.env.example` 只放空值或 `${VAR}` 占位。解析优先级（高者覆盖）：进程环境，然后 dotenv（`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`），然后 `${VAR:-default}`。`openbars config` 查看生效配置时，所有密钥只显示 `set` / `missing`。日志与错误信息中的凭据按 upstream 做法在落盘前替换为 `[REDACTED]` |
 | SEC 等要求的 User-Agent | 带联系邮箱的 UA | 不设默认值；由用户在配置中填写，缺失时报错。文档示例用 `example.com` 域名 |
 | 个人邮箱 | 提交作者邮箱、注释中的邮箱 | 文件中禁止；提交作者邮箱使用 GitHub noreply 地址（转公开前用 `--strict-authors` 检查，见 §4） |
 | 本机路径 | 用户 home 目录、`~/Documents` 等 | 一律改为相对路径或配置项（如 `data_dir`）；示例用 `./data` |

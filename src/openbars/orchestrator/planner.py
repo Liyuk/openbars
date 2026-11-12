@@ -227,10 +227,14 @@ def _normalize_universe(
     }
 
 
-def _latest_ready_session(now: datetime) -> date | None:
+def latest_ready_session(now: datetime) -> date | None:
+    """Latest XNYS session strictly before the New York date of ``now``."""
     today = now.astimezone(NEW_YORK).date()
     found = xnys.sessions(today - timedelta(days=14), today - timedelta(days=1))
     return found[-1] if found else None
+
+
+_latest_ready_session = latest_ready_session
 
 
 def _bars_per_session(interval: Interval) -> int:

@@ -48,6 +48,9 @@ class Settings:
     universe: Mapping[Market, tuple[str, ...]] = field(default_factory=dict)
     reconcile: Mapping[str, object] = field(default_factory=dict)  # raw ``reconcile:`` section
     schedule: Mapping[str, object] = field(default_factory=dict)  # raw ``schedule:`` section
+    # Path of the dotenv file that was actually loaded, if any, and how it was chosen.
+    env_file: str | None = None
+    env_file_source: str | None = None  # --env-file | OPENBARS_ENV_FILE | config.env_file
 
     def secret_values(self, min_length: int = 8) -> tuple[str, ...]:
         """Resolved credential values (for output scrubbing only; never log them)."""
@@ -57,7 +60,7 @@ class Settings:
                     v
                     for p in self.providers.values()
                     for k, v in p.options.items()
-                    if isinstance(v, str) and len(v) >= min_length and _is_secret_key(k)
+                    if isinstance(v, str) and len(v) >= min_length and is_secret_key(k)
                 }
             )
         )
@@ -66,6 +69,6 @@ class Settings:
 _SECRET_KEY_PARTS = ("key", "secret", "token", "password", "dsn")
 
 
-def _is_secret_key(name: str) -> bool:
+def is_secret_key(name: str) -> bool:
     lowered = name.lower()
     return any(part in lowered for part in _SECRET_KEY_PARTS)

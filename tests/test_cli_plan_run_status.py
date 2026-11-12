@@ -72,8 +72,8 @@ def test_no_command_prints_help_and_returns_zero(capsys):
     assert "usage" in capsys.readouterr().out.lower()
 
 
-def test_unimplemented_commands_return_2(capsys):
-    assert main(["init"]) == 2 and main(["verify"]) == 2
+def test_init_is_not_implemented(capsys):
+    assert main(["init"]) == 2
 
 
 def test_plan_is_a_dry_run(tmp_path, capsys):
@@ -210,3 +210,27 @@ def test_default_factory_skips_providers_without_credentials(tmp_path, capsys):
     assert main(["--config", config(tmp_path), "plan"], clock=lambda: NOW, env={}) == 0
     out = capsys.readouterr().out
     assert "plan: 0 jobs" in out and "missing credentials" in out
+
+
+def test_config_command_redacts_secrets(tmp_path, capsys):
+    key_id = "kid-cli-" + "aaaabbbb"
+    secret = "sec-cli-" + "ccccdddd"
+    env_path = tmp_path / "keys.env"
+    env_path.write_text(f"T_KEY_ID={key_id}\nT_SECRET={secret}\n")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+markets: [us]
+providers:
+  alpaca:
+    feed: sip
+    key_id: ${T_KEY_ID}
+    secret_key: ${T_SECRET}
+"""
+    )
+    assert main(["--config", str(path), "--env-file", str(env_path), "config"], env={}) == 0
+    out = capsys.readouterr().out
+    assert key_id not in out and secret not in out
+    assert "key_id: set" in out and "secret_key: set" in out
+    assert "--env-file" in out
+    assert "feed: sip" in out
