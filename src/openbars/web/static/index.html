@@ -4,10 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>openbars</title>
+  <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <h1>openbars</h1>
-  <p>Local read-only UI. Dashboard pages land in a follow-up issue.</p>
-  <p>本机只读界面。看板页面将在后续 issue 中提供。</p>
+  <header>
+    <div class="brand"><a href="/">openbars</a></div>
+    <nav>
+      <a href="/" data-nav="/" data-i18n="nav.dashboard">Dashboard</a>
+      <a href="/chart" data-nav="/chart" data-i18n="nav.chart">Chart</a>
+      <a href="/flags" data-nav="/flags" data-i18n="nav.flags">Flags</a>
+    </nav>
+    <span class="readonly" data-i18n="header.readonly">Local read-only UI. Not a public API.</span>
+    <button class="lang" id="lang-toggle" type="button" aria-label="Switch language">中文</button>
+  </header>
+  <main id="app">
+    <p class="lede">Local read-only UI. 本机只读界面。</p>
+  </main>
+  <footer>
+    <p data-i18n="footer.api">Routes under /api/v1 are for this local UI only and are not a stable public API.</p>
+  </footer>
+  <script src="/assets/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/assets/app.js"></script>
 </body>
 </html>

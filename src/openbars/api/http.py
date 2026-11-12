@@ -166,11 +166,15 @@ def create_app(
     if root.is_dir():
         index = root / "index.html"
 
-        @app.get("/")
-        def index_page() -> Any:
+        def spa_page() -> Any:
             if index.is_file():
                 return FileResponse(index)
             return {"ok": True, "version": __version__}
+
+        # Dashboard, chart and flags share one shell; the script routes on the path.
+        app.get("/")(spa_page)
+        app.get("/chart")(spa_page)
+        app.get("/flags")(spa_page)
 
         assets = root / "assets"
         if assets.is_dir():
