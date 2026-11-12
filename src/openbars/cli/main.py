@@ -41,7 +41,7 @@ from openbars.storage.errors import StorageError
 from openbars.storage.state import SqliteStateStore
 
 COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config", "shadow", "serve",
-            "usage", "compact", "retention", "backup")
+            "usage", "compact", "retention", "backup", "jobs")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
 DEFAULT_CONFIG = "./config.yaml"
@@ -152,6 +152,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from openbars.cli.storage import register as register_storage
 
     register_storage(sub, common)
+    from openbars.cli.jobs import register as register_jobs
+
+    register_jobs(sub, common)
     return parser
 
 
@@ -204,6 +207,10 @@ def main(
             from openbars.cli.serve import run_serve
 
             return run_serve(args, settings, out)
+        if args.command == "jobs":
+            from openbars.cli.jobs import run_jobs
+
+            return run_jobs(args, settings, out, now)
         if args.command in ("usage", "compact", "retention", "backup"):
             from openbars.cli.storage import run_storage
 
