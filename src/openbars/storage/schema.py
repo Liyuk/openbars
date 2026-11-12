@@ -69,6 +69,7 @@ class SessionSemantics(StrEnum):
     REGULAR = "regular"
     EXTENDED = "extended"
     PROVIDER_ALIGNED = "provider_aligned"
+    UTC_DAY = "utc_day"
     UNKNOWN = "unknown"
 
 

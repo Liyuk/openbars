@@ -170,11 +170,18 @@ def _is_spot(item: Mapping[str, Any]) -> bool:
     return isinstance(sets, list) and any(isinstance(s, list) and "SPOT" in s for s in sets)
 
 
+def _asset(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def parse_exchange_info(payload: Any) -> list[ProviderInstrument]:
     """Parse ``/api/v3/exchangeInfo`` into spot ``ProviderInstrument`` rows.
 
-    Base/quote assets are not carried (``ProviderInstrument`` has no such fields yet) and
-    no instrument id is derived here.
+    ``base_asset`` / ``quote_asset`` come from ``baseAsset`` / ``quoteAsset`` (stripped);
+    missing, non-string or blank values stay ``None``. No instrument id is derived here
+    (see ``normalize.crypto_pairs.listing_from_provider_instrument``).
     """
     if not isinstance(payload, dict):
         raise _invalid("exchangeInfo payload is not an object")
@@ -198,6 +205,8 @@ def parse_exchange_info(payload: Any) -> list[ProviderInstrument]:
                 exchange=EXCHANGE,
                 active=item.get("status") == "TRADING",
                 native_id=symbol.strip(),
+                base_asset=_asset(item.get("baseAsset")),
+                quote_asset=_asset(item.get("quoteAsset")),
             )
         )
     return out

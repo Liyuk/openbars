@@ -86,6 +86,7 @@ class SessionSemantics(str, Enum):
     REGULAR = "regular"
     EXTENDED = "extended"
     PROVIDER_ALIGNED = "provider_aligned"
+    UTC_DAY = "utc_day"
     UNKNOWN = "unknown"
 
 
@@ -142,12 +143,11 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         session_semantics=SessionSemantics.PROVIDER_ALIGNED,
         volume_basis=VolumeBasis.AS_TRADED,
     ),
-    # Spot klines are as-traded and cut at UTC 00:00 (``PROVIDER_ALIGNED``: the enum has no
-    # dedicated UTC-day member, and adding one would change the storage schema enum).
+    # Spot klines are as-traded and cut at UTC 00:00 (``UTC_DAY``).
     (BINANCE_SPOT_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
-        session_semantics=SessionSemantics.PROVIDER_ALIGNED,
+        session_semantics=SessionSemantics.UTC_DAY,
         volume_basis=VolumeBasis.AS_TRADED,
     ),
     # Volume handling is provider-dependent, so it stays unknown.

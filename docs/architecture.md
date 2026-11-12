@@ -184,7 +184,7 @@ Bar
 
 - `CryptoCalendar` 实现 `TradingCalendar` 协议，经入口点 `openbars.calendars` 的 `crypto` 注册；`market = Market.CRYPTO`，`timezone = "UTC"`。纯标准库实现，不依赖 `exchange_calendars`。
 - **24/7**：每个 UTC 日历日都是会话，无周末、无节假日、无午休。`sessions(start, end)` 返回闭区间内的每一天，`end < start` 抛 `ValueError`；`is_session(day)` 恒为 `True`。
-- **切日口径**：日线 `session_date` = 该 bar 的 **UTC 日期**；`ts_start` = 当日 `00:00:00 UTC`。按交易所本地时区切日的源（例如以 UTC+8 午夜为日界）不能直接当作规范日线，需先换算到 UTC 00:00 口径（从更细粒度 bar 重新聚合，或改用按 UTC 切日的接口）。
+- **切日口径**：日线 `session_date` = 该 bar 的 **UTC 日期**；`ts_start` = 当日 `00:00:00 UTC`；对应的序列口径为 `session_semantics=utc_day`（§3.5.1、§10.7 目录表）。按交易所本地时区切日的源（例如以 UTC+8 午夜为日界）不能直接当作规范日线，需先换算到 UTC 00:00 口径（从更细粒度 bar 重新聚合，或改用按 UTC 切日的接口）。
 - `session_bounds(day)` 返回恰好一段 UTC 半开区间 `[00:00:00 UTC, 次日 00:00:00 UTC)`；相邻两日首尾相接（第 N 日 `closes_at` == 第 N+1 日 `opens_at`），无重叠、无空隙；收盘瞬时属于下一会话。`closes_at > opens_at` 恒成立，满足 `TradingSession` 的约束。
 - `trading_session(day)` / `trading_sessions(start, end)` 返回 `TradingSession`，开收盘瞬时保持 UTC（不换到其他时区）。
 - `session_index(as_of, *, epoch=date(2000,1,1))`：不晚于 `as_of` 的最近一个会话的从 0 起序号，即 `(as_of - epoch).days`；`as_of < epoch` 返回 0。
@@ -221,11 +221,11 @@ QuotaPolicy
 
 - 公开 spot klines（`/api/v3/klines`，`interval=1d`），**无需 API key**，`secret_values()` 为空；来源标识 `binance/spot/raw`（不属于美股 `KNOWN_SOURCES`）。
 - **默认 base URL 为 `https://data-api.binance.vision`**（只读行情镜像）。`api.binance.com` 对部分地区（含美国 IP）返回 451，因此不作默认；构造时可用 `base_url` 覆盖。451 映射为不可重试的 `provider_rejected_request`，消息提示该地区不可用。`https://data.binance.vision` 的批量归档是后续可选来源，本版不实现。
-- **UTC 00:00 切日**：`ts_start` 必须恰为当日 `00:00:00 UTC`，`session_date` = 其 UTC 日期，与 §3.4.2 一致；`openTime` 不在 UTC 零点的行视为切日口径不符，整批以 `invalid_payload` 拒收。请求窗口按 UTC 毫秒取闭区间（起日 `00:00:00.000` 至止日 `23:59:59.999`）。
+- **UTC 00:00 切日**：序列口径 `session_semantics=utc_day`（不是泛化的 `provider_aligned`）；`ts_start` 必须恰为当日 `00:00:00 UTC`，`session_date` = 其 UTC 日期，与 §3.4.2 一致；`openTime` 不在 UTC 零点的行视为切日口径不符，整批以 `invalid_payload` 拒收。请求窗口按 UTC 毫秒取闭区间（起日 `00:00:00.000` 至止日 `23:59:59.999`）。
 - 价格、成交量按字符串解析为 `Decimal`（不经 float）；`volume` 为基础资产成交量，成交额与成交笔数放 `extra`。口径 `price_basis=raw`、`volume_basis=as_traded`，`currency=None`（计价资产如 USDT 不是 ISO 货币）。
 - 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
 - **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
-- `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`）；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。无公司行动。
+- `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`），并按 `baseAsset` / `quoteAsset`（去空白；缺失或空白为 `None`）填充 `base_asset` / `quote_asset`；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。`normalize.crypto_pairs.listing_from_provider_instrument(row, provider=…, venue=None)` 把此类行转成 `CryptoPairListing`（缺 base/quote 抛 `ValueError`，`venue` 缺省取 `row.exchange`），由调用方显式使用，编排器暂不自动调用。无公司行动。
 - 目前**尚未接入编排器**（计划、配置入口随后续 issue 加入）。
 
 ### 3.6 Job / Checkpoint
@@ -442,7 +442,9 @@ data/
 
 ### 10.6 Schema 版本与迁移
 
-v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；**读取方遇到更高版本的 Parquet 文件会拒绝而不是猜测**：`parquet_schema_version()` 读取页脚元数据 `openbars.schema_version`（缺失按 v1），若 `> SCHEMA_VERSION` 抛 `SchemaVersionError`（`StorageError` 子类），不迁移、不截断列。检查覆盖打开后端、`ref/*.parquet` 读取、raw / canonical 分区读取与写入前的去重比较、`compact`，以及 `rebuild_catalog()` / `query()` 建 DuckDB 视图之前（DuckDB 不会悄悄 union 一个 v2 文件）；通过的文件按 `(mtime, size)` 缓存，重复读取只做 `stat`。低于当前版本的文件不拒绝（v1 是第一个版本，暂无迁移器）。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
+v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `openbars.schema_version=1` 与 `openbars.layer`，`state.db` 的 `schema_meta` 记录 `schema_version`。此后任何列名/类型/键/分区的变更都必须提升 `SCHEMA_VERSION` 并在此处记录迁移方式（Parquet：离线重写 part 并 `compact`；SQLite / Postgres：编号迁移脚本）；**读取方遇到更高版本的 Parquet 文件会拒绝而不是猜测**：`parquet_schema_version()` 读取页脚元数据 `openbars.schema_version`（缺失按 v1），若 `> SCHEMA_VERSION` 抛 `SchemaVersionError`（`StorageError` 子类），不迁移、不截断列。检查覆盖打开后端、`ref/*.parquet` 读取、raw / canonical 分区读取与写入前的去重比较、`compact`，以及 `rebuild_catalog()` / `query()` 建 DuckDB 视图之前（DuckDB 不会悄悄 union 一个 v2 文件）；通过的文件按 `(mtime, size)` 缓存，重复读取只做 `stat`。低于当前版本的文件不拒绝（v1 是第一个版本，暂无迁移器）。
+
+**字符串枚举的追加成员**（例如 `session_semantics` 新增 `utc_day`，`openbars.core.series` 与 `openbars.storage.schema` 两份枚举的值列表必须一致，由测试断言）：向字符串枚举**追加**成员不提升 `SCHEMA_VERSION`；列名、类型、键、分区都没变，磁盘上仍是字符串列。旧文件（`provider_aligned` / `regular` 等）可被新代码读取；新写入方可写出 `utc_day`。旧代码若遇到未知值，会按现有 `_enum_value` 拒绝该行（`InvalidBarError`），而不是整文件 `SchemaVersionError`。这是有意的：列集合未变。`policy_version`（口径版本，§11.2）与 `SCHEMA_VERSION`（存储格式版本）互相独立。
 
 ### 10.7 Arrow / Parquet schema 声明（`openbars.core.schema`）
 
@@ -474,6 +476,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `alpha_vantage/daily/raw` | `raw` | `none` | `provider_aligned` | `as_traded` |
 | `twelve_data/daily/split` | `split_adjusted` | `splits` | `provider_aligned` | `unknown`（成交量处理依赖源） |
 | `yfinance/yahoo/split` | `provider_defined` | `unknown` | `provider_aligned` | `provider_defined`（可检视，不视为已证明兼容） |
+| `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | 其他 | `unknown` | `unknown` | `unknown` | `unknown`（`currency` 仍按入参设置） |
 
 ## 11. 上游搬运来源与 backend 兼容与切换
