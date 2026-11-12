@@ -108,8 +108,37 @@ def _check_store(make_store):
     assert [(r.session_date, r.adjustment) for r in got] == [(d, "split") for d in DAYS]
 
 
+def _check_conflicting_coexistence(make_store):
+    """The legacy raw identity must not count as independent corroboration.
+
+    Massive is the primary and disagrees with Alpaca. One independent source supports
+    Massive; a second apparent independent vote must not be manufactured by the legacy
+    Massive row retaining its old ``raw`` identity.
+    """
+    store = make_store("conflicting-coexistence")
+    store.append_rows(legacy_rows(close="10"))
+    store.append_rows(rows([bar("massive", "eod", d, close="10") for d in DAYS]))
+    store.append_rows(rows([bar("yfinance", "yahoo", d, close="10") for d in DAYS]))
+
+    output = []
+    sink = ReconcilingSink(
+        MemoryReconciler(), lambda rs, m: output.extend(rs), raw=store,
+        other_providers=("massive", "yfinance", "alpaca"),
+    )
+    # Alpaca is the fetched secondary and diverges from Massive. With normalization,
+    # only yfinance independently backs Massive, below the corroboration quorum of 2.
+    job = Job("j", JobKind.DAILY, "alpaca", Market.US, Interval.D1, ("TEST1",), WINDOW)
+    sink.after_fetch(job, [bar("alpaca", "sip", d, close="10.2") for d in DAYS])
+
+    assert len(output) == len(DAYS)
+    assert {(r.provider, r.feed, r.adjustment) for r in output} == {("massive", "eod", "split")}
+    assert {r.quality_status for r in output} == {"divergent"}
+    assert {r.selection_reason for r in output} == {"primary_source"}
+
+
 def test_parquet_selection_is_unchanged_by_legacy_rows(tmp_path):
     _check_store(lambda name: open_backend(tmp_path / name).raw)
+    _check_conflicting_coexistence(lambda name: open_backend(tmp_path / name).raw)
 
 
 @pytest.mark.postgres_live
@@ -126,3 +155,4 @@ def test_postgres_native_selection_is_unchanged_by_legacy_rows(pg_dsn):
             return PostgresBackend(pg_dsn, mode="native", write=True, schema=schema).raw
 
         _check_store(make)
+        _check_conflicting_coexistence(make)
