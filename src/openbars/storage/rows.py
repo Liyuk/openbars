@@ -44,6 +44,7 @@ from openbars.storage.schema import (
     CANONICAL_BARS_SCHEMA,
     DEFAULT_POLICY_VERSION,
     PRICE_SCALE,
+    RAW_BARS_PARQUET_SCHEMA,
     RAW_BARS_SCHEMA,
     UNKNOWN,
     AdjustmentScope,
@@ -181,6 +182,80 @@ def quality_status_for(flags: QualityFlag) -> str:
 
 # --- raw rows ----------------------------------------------------------------------------
 
+# ``RawBar.extra`` keys that map to a first-class ``RawBarRow`` column, or that ``to_raw_bar``
+# synthesises from one; they are never stored in the leftover ``extra`` JSON.
+_FIRST_CLASS_EXTRA = frozenset(
+    {
+        "session_date", "instrument_id", "adjustment", "price_basis", "adjustment_scope",
+        "adjustment_as_of", "session_semantics", "currency", "volume_basis", "revision", "vwap",
+        "trade_count", "market", "source_artifact_ref", "ingest_run_id",
+        "open_exact", "high_exact", "low_exact", "close_exact", "volume_exact",
+    }
+)  # fmt: skip
+_TAGS = {"$decimal": Decimal, "$date": date.fromisoformat, "$datetime": datetime.fromisoformat}
+
+
+def leftover_extra(extra: Mapping[str, Any]) -> dict[str, object] | None:
+    """The ``RawBar.extra`` entries without a column of their own (``None`` when there are none)."""
+    rest = {k: v for k, v in extra.items() if k not in _FIRST_CLASS_EXTRA}
+    return rest or None
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise InvalidBarError("extra: NaN / infinity cannot be stored")
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise InvalidBarError("extra: NaN / infinity cannot be stored")
+        return {"$decimal": str(value)}
+    if isinstance(value, datetime):  # before date: datetime is a date
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"$date": value.isoformat()}
+    if isinstance(value, Mapping):
+        return {str(k): _json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(v) for v in value]
+    return str(value)
+
+
+def encode_extra(extra: Mapping[str, object] | None) -> str | None:
+    """``RawBar.extra`` leftovers -> a deterministic JSON object string (``None`` when empty).
+
+    ``Decimal`` / ``date`` / ``datetime`` become ``{"$decimal": "10.15"}`` / ``{"$date": ...}``
+    / ``{"$datetime": ...}`` and come back as the same types; ``bool`` / ``int`` / ``str`` /
+    ``None`` are native JSON. Keys are sorted so an unchanged row is a no-op re-write.
+    """
+    if not extra:
+        return None
+    return json.dumps(_json_value(dict(extra)), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _revive(obj: dict[str, Any]) -> Any:
+    if len(obj) == 1:
+        (key, value), = obj.items()
+        if key in _TAGS and isinstance(value, str):
+            return _TAGS[key](value)
+    return obj
+
+
+def decode_extra(value: Mapping[str, object] | str | None) -> Mapping[str, object] | None:
+    """Inverse of ``encode_extra``; a mapping passes through, empty / null is ``None``."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value, object_hook=_revive)
+        except ValueError as exc:
+            raise InvalidBarError(f"extra is not valid JSON: {exc}") from None
+    if not isinstance(value, Mapping):
+        raise InvalidBarError("extra must be a JSON object")
+    return dict(value) or None
+
 
 @dataclass(frozen=True)
 class RawBarRow:
@@ -211,10 +286,15 @@ class RawBarRow:
     source_artifact_ref: str | None = None
     ingest_run_id: str | None = None
     ingested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # ``RawBar.extra`` keys without a column of their own (tradestatus, isST, preclose, ...).
+    # Persisted by the Parquet raw layer only, as a JSON string (a JSON string is accepted here
+    # and decoded); Postgres has no such column. ``None`` = nothing to keep.
+    extra: Mapping[str, object] | str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider or not self.symbol_as_returned or not self.fetch_id:
             raise InvalidBarError("provider, symbol_as_returned and fetch_id are required")
+        _set(self, "extra", decode_extra(self.extra))
         _set(self, "market", Market(self.market))
         _set(self, "interval", Interval(self.interval))
         _set(self, "ts_start", _utc(self.ts_start, "ts_start"))
@@ -258,6 +338,7 @@ class RawBarRow:
     def to_raw_bar(self) -> RawBar:
         """In-memory ``RawBar``. Exact ``Decimal`` values; extra fields travel in ``extra``."""
         extra: dict[str, object] = {
+            **(self.extra or {}),  # leftovers first: a first-class column below always wins
             "market": self.market.value,
             "instrument_id": self.instrument_id,
             "session_date": self.session_date,
@@ -308,8 +389,9 @@ def raw_rows_from_batch(
     ``market`` comes from ``batch.request``. Everything the legacy ``RawBar`` lacks is read
     from ``RawBar.extra`` (keys: ``instrument_id``, ``session_date``, ``adjustment``,
     ``price_basis``, ``adjustment_scope``, ``adjustment_as_of``, ``session_semantics``,
-    ``currency``, ``volume_basis``, ``revision``, ``vwap``, ``trade_count``); unknown
-    extras are ignored. ``session_date`` is ``extra["session_date"]``, else ``RawBar.session_date``
+    ``currency``, ``volume_basis``, ``revision``, ``vwap``, ``trade_count``); every other key
+    is kept in ``RawBarRow.extra`` (stored by the Parquet raw layer, see ``leftover_extra``).
+    ``session_date`` is ``extra["session_date"]``, else ``RawBar.session_date``
     (A-share bars start at 00:00 Asia/Shanghai, the previous UTC day), else the UTC date of
     ``ts_start`` - normalizers should supply the exchange-local session date.
     """
@@ -349,6 +431,7 @@ def raw_rows_from_batch(
                 source_artifact_ref=source_artifact_ref,
                 ingest_run_id=ingest_run_id,
                 ingested_at=now,
+                extra=leftover_extra(extra),
             )
         )
     return rows
@@ -571,6 +654,18 @@ def row_values(row: Any, schema: pa.Schema) -> list[Any]:
 
 def raw_rows_to_table(rows: Sequence[RawBarRow]) -> pa.Table:
     return rows_to_table(rows, RAW_BARS_SCHEMA)
+
+
+def raw_rows_to_parquet_table(rows: Sequence[RawBarRow]) -> pa.Table:
+    """Like ``raw_rows_to_table`` but for the Parquet raw layer: adds the JSON ``extra`` column."""
+    arrays = [
+        pa.array(
+            [encode_extra(r.extra) if f.name == "extra" else _cell(getattr(r, f.name)) for r in rows],
+            type=f.type,
+        )
+        for f in RAW_BARS_PARQUET_SCHEMA
+    ]
+    return pa.Table.from_arrays(arrays, schema=RAW_BARS_PARQUET_SCHEMA)
 
 
 def canonical_rows_to_table(rows: Sequence[CanonicalBarRow]) -> pa.Table:
