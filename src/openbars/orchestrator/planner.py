@@ -60,7 +60,7 @@ from openbars.normalize.hk_instruments import (
     to_yahoo_hk_ticker,
 )
 from openbars.normalize.instruments import InstrumentMaster
-from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
+from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, JobState, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
 from openbars.providers.us.alpaca import ESTIMATED_BARS_PER_PAGE
 from openbars.providers.us.massive_window import (
@@ -140,8 +140,10 @@ class StaticCoverage:
 class RawStoreCoverage:
     """Coverage derived from ``RawStore.scan`` (one scan per provider/market/interval/window)."""
 
-    def __init__(self, raw: RawStore) -> None:
+    def __init__(self, raw: RawStore, *, state=None) -> None:
         self._raw = raw
+        self.state = state
+        self._hourly_history = None
         self._cache: dict[tuple, tuple[set[date], dict[str, set[date]]]] = {}
 
     def _load(
@@ -165,7 +167,39 @@ class RawStoreCoverage:
 
     def covered(self, provider, market, interval, window, *, symbol=None) -> set[date]:  # noqa: ANN001
         whole, per_symbol = self._load(provider, market, interval, window)
-        return set(whole) if symbol is None else set(per_symbol.get(symbol, ()))
+        result = set(whole) if symbol is None else set(per_symbol.get(symbol, ()))
+        if self.state is not None and market is Market.US and interval is Interval.H1 and symbol is not None:
+            result |= self._attempts(provider, symbol, window)
+        return result
+
+    def _attempts(self, provider, symbol, window):
+        if self._hourly_history is None:
+            jobs = self.state.list_jobs()
+            fetches = self.state.list_fetches(market=Market.US, interval=Interval.H1)
+            successful = defaultdict(list)
+            for fetch in fetches:
+                if fetch.status in {"ok", "empty"} and fetch.started_at is not None:
+                    successful[fetch.job_id].append(fetch)
+            self._hourly_history = (jobs, successful)
+        jobs, successful = self._hourly_history
+        result = set()
+        for job in jobs:
+            if job.provider != provider or job.market is not Market.US or job.interval is not Interval.H1 or symbol not in job.instruments:
+                continue
+            start, end = max(window.start, job.window.start), min(window.end, job.window.end)
+            if start > end:
+                continue
+            for day in xnys.sessions(start, end):
+                # Failed/dead jobs (including yfinance empty-result errors) do not cover;
+                # a colliding job ID still follows the existing submit behavior.
+                if job.state in {JobState.PENDING, JobState.LEASED, JobState.RUNNING}:
+                    result.add(day)  # Existing work reserves its cells and avoids duplicate jobs.
+                elif job.state is JobState.DONE and any(
+                    f.window.start <= day <= f.window.end and f.started_at.astimezone(NEW_YORK).date() > day
+                    for f in successful.get(job.job_id, ())
+                ):
+                    result.add(day)
+        return result
 
 
 # --- plan / budget ------------------------------------------------------------------------
@@ -668,7 +702,7 @@ class DefaultPlanner:
         """Plan complete US sessions; readiness follows the daily next-day rule.
 
         This conservative rule also exceeds Alpaca SIP's close + 16 minute delay.
-        Each request spans one session so covered sessions are never crossed.
+        Windows never cross a session already covered for every requested symbol.
         """
         if not symbols:
             notes.append(PlanNote("no_universe", "us/1h: no symbols configured; skipped"))
@@ -686,16 +720,40 @@ class DefaultPlanner:
             groups = defaultdict(list)
             for symbol in symbols:
                 have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
-                # One stored bar covers the session; missing hours are a quality concern.
+                # Complete-session fetches make missing hours genuine no-trade hours.
                 for day in eligible:
                     if day not in have:
                         groups[day].append(symbol)
             size = 1 if cap.batch is BatchShape.PER_SYMBOL else self._batch_size(name, cap)
-            for day, syms in groups.items():
-                kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
-                for chunk in _chunks(syms, size):
-                    emit(kind, name, chunk, DateRange(day, day),
-                         PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+            # Without state history, retain old job IDs so existing queued jobs cannot overlap.
+            if getattr(coverage, "state", None) is None:
+                for day, syms in groups.items():
+                    kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
+                    for chunk in _chunks(syms, size):
+                        emit(kind, name, chunk, DateRange(day, day),
+                             PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+                continue
+            active = {}
+            def flush(chunk):
+                start, end, count = active.pop(chunk)
+                kind = JobKind.DAILY if start == end == latest else JobKind.BACKFILL
+                emit(kind, name, chunk, DateRange(start, end),
+                     PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
+            for day in eligible:
+                chunks = set(_chunks(groups.get(day, []), size))
+                for chunk in list(active):
+                    start, _, count = active[chunk]
+                    limit = max(1, 20000 // (13 * len(chunk))) if name == "alpaca" else (312 if name == "twelve_data" else 366)
+                    if chunk not in chunks or count >= limit or (day - start).days >= self.max_window_days:
+                        flush(chunk)
+                for chunk in chunks:
+                    if chunk in active:
+                        start, _, count = active[chunk]
+                        active[chunk] = (start, day, count + 1)
+                    else:
+                        active[chunk] = (day, day, 1)
+            for chunk in list(active):
+                flush(chunk)
 
     def _symbols_for(
         self,
