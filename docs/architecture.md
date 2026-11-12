@@ -226,7 +226,7 @@ QuotaPolicy
 - 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
 - **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
 - `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`），并按 `baseAsset` / `quoteAsset`（去空白；缺失或空白为 `None`）填充 `base_asset` / `quote_asset`；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。`normalize.crypto_pairs.listing_from_provider_instrument(row, provider=…, venue=None)` 把此类行转成 `CryptoPairListing`（缺 base/quote 抛 `ValueError`，`venue` 缺省取 `row.exchange`），由调用方显式使用，编排器暂不自动调用。无公司行动。
-- 目前**尚未接入编排器**（计划、配置入口随后续 issue 加入）。
+- **编排器接入（#44）**：`markets: [crypto]` 时 `plan` / `run` 生成并执行加密日线任务。规划器按市场分派日历：`Market.US` → XNYS，`Market.CRYPTO` → `CryptoCalendar`（`latest_ready_session(now, market=CRYPTO)` = 已收盘满 30 分钟的最近 UTC 日，周末也出任务）；其它市场仍记 `no_calendar` 并跳过。声明 `crypto`/`1d` 的已启用 provider 参与；yfinance 只是美股回退，不参与。Binance、Coinbase 均为 `PER_SYMBOL`，且**每个 symbol 只发给方言匹配的 provider**：未注入交易对主数据时按启发式——含 `-` 的是 Coinbase product id，`[A-Z0-9]+` 的是 Binance symbol；`DefaultPlanner(instruments=master)` 注入主数据后改为只在 `resolve(symbol, provider=…, market=CRYPTO)` 命中时才规划。宁可跳过一个 symbol，也不产生一个必然失败的任务。两家交易所永不合并为一个任务或一个 instrument。配置只需 `markets: [crypto]`、启用 `providers.binance` / `providers.coinbase`（无 API key）、`universe.crypto.symbols`；`openbars verify` 仍只面向美股。
 
 #### 3.5.2 Coinbase Exchange 日线（`openbars.providers.crypto.coinbase`）
 
@@ -237,7 +237,7 @@ QuotaPolicy
 - 每次请求 1 个产品（Coinbase product id，如 `TEST-USDT`）；单次请求最多 300 根。窗口更长时按每页最多 300 天分段翻页，下一页从本页末根之后开始（游标必须前进，否则报 `pagination_loop`；跨页不升序按 `invalid_payload`）；后续页失败时返回已得部分并带 `next_cursor`（Unix 秒）。无数据返回空批次而非错误。
 - **额度**：公开 REST 每 IP 每秒 10 次（`key_scope="per_ip"`，`safety_margin=0.9`），每页权重 1，经 `QuotaGate.acquire` 获取；429 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`，其余 4xx 为 `provider_rejected_request`。官方文档见 `QuotaPolicy.official_docs_url`。
 - `list_instruments(Market.CRYPTO)` 读 `GET /products`（`exchange="COINBASE"`，`active` = `status == "online"` 且（若有该字段）未 `trading_disabled`），按 `base_currency` / `quote_currency` 填充 `base_asset` / `quote_asset`；不生成 `instrument_id`。无公司行动。
-- 目前**尚未接入编排器**，也**不在 `KNOWN_SOURCES`** 中；加密对账口径见 §11.2.1 `crypto-daily-v1`。
+- 已接入编排器（见 §3.5.1 的“编排器接入”：用 `BASE-QUOTE` product id 作 symbol，只发往 Coinbase），但**不在 `KNOWN_SOURCES`** 中；加密对账口径见 §11.2.1 `crypto-daily-v1`。
 
 ### 3.6 Job / Checkpoint
 
@@ -549,7 +549,8 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 - **容差**（`Decimal` 百分比）：价格 **1%**、成交量 **10%**（美股为 0.5% / 5%）。同一交易对的不同加密源（实时 klines 与再发布的归档）差异可能大于美股 SIP 与官方收盘价之间的差异，所以放宽；但超出仍然只标记，不平滑。`corroboration_quorum` 保持 2，且跨 venue 的 bar 不计入独立佐证。
 - **分歧处理**：同一 instrument 的主源与同所备源超出容差，`quality_status = divergent`（并去掉成交量能力，沿用既有质量标记与 `selection_reason`），**选中的仍是主源整根 bar，绝不取平均**、不拼接不同源的价量。
 - **切日与完成时间**：`CryptoCalendar`，UTC 00:00 切日、`session_semantics = utc_day`（§3.4.2）；周末、节假日都是会话；会话收盘（次日 00:00 UTC）后等待 `completion_wait_minutes = 30` 才视为完成。
-- **入口**：`policy_for_instrument(instrument_id)`（非加密 id 或无注册源的 venue 抛 `ValueError`，只有主备源随 venue 变化）、`reconcile_crypto(instrument_id, start, end, observations, *, generated_at=None)`；`CRYPTO_DAILY_V1` 是 Binance venue 策略的别名。当前未接入编排器。
+- **入口**：`policy_for_instrument(instrument_id)`（非加密 id 或无注册源的 venue 抛 `ValueError`，只有主备源随 venue 变化）、`reconcile_crypto(instrument_id, start, end, observations, *, generated_at=None)`；`CRYPTO_DAILY_V1` 是 Binance venue 策略的别名。
+- **编排器接入**：`run` 的落库由 `orchestrator.finalize` 完成。`CryptoReconcilingSink` 对 `job.market = CRYPTO` 的 bar：缺 `instrument_id` 时用 `master.resolve(symbol, on=session_date, provider=bar.provider, market=CRYPTO)` 解析，**解析不到的只保留 raw，不写 canonical**；按 `instrument_id` 分组后调用 `reconcile_crypto`（绝不使用 `research-daily-v2`），Coinbase 观测因 `reject_cross_venue` 不会填补或佐证 Binance instrument。`DispatchingSink(us=…, crypto=…)` 按 `job.market` 选 sink，使调用方仍只传一个 sink；`ReconcilingSink`（XNYS）遇到加密任务只留 raw。canonical 行的 `policy_version = crypto-daily-v1`，读取时需显式传 `policy_version`（默认过滤的是美股口径）。CLI `run` 目前仍直接构造 `ReconcilingSink`，需改用 `DispatchingSink`（工厂 `cli.wiring.make_sink(backend, providers)` 一行替换）才会写加密 canonical（另一 lane 改动 `cli/main.py`，此处未动）。`openbars verify` 不使用加密口径。
 
 ### 11.3 PG 兼容策略
 

@@ -25,14 +25,21 @@ _CREDENTIALS: dict[str, dict[str, str]] = {
     "alpaca": {"api_key": "key_id", "api_secret": "secret_key"},
     "massive": {"api_key": "api_key"},
     "yfinance": {},
+    "binance": {},  # public market data: no key
+    "coinbase": {},
 }
 
+
+# Providers whose constructor takes ``base_url`` (read from ``providers.<name>.base_url``).
+_BASE_URL_PROVIDERS = frozenset({"binance", "coinbase"})
 
 # Markets each known provider serves (used to decide whether missing credentials matter).
 _PROVIDER_MARKETS: dict[str, frozenset[Market]] = {
     "alpaca": frozenset({Market.US}),
     "massive": frozenset({Market.US}),
     "yfinance": frozenset({Market.US}),
+    "binance": frozenset({Market.CRYPTO}),
+    "coinbase": frozenset({Market.CRYPTO}),
 }
 
 
@@ -53,8 +60,36 @@ def build_providers(settings: Settings, gate: QuotaGate | None = None) -> dict[s
             param: str(cfg.options.get(option) or "").strip()
             for param, option in _CREDENTIALS[name].items()
         }
+        base_url = str(cfg.options.get("base_url") or "").strip()
+        if base_url and name in _BASE_URL_PROVIDERS:
+            kwargs["base_url"] = base_url
         out[name] = classes[name](**kwargs, quota_gate=gate)  # type: ignore[operator]
     return out
+
+
+def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN201
+    """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``) + crypto (``crypto-daily-v1``).
+
+    ``backend`` is a ``ParquetDuckDbBackend`` (``raw``, ``canonical``, ``instruments``). Drop-in
+    for the sink ``run`` builds inline: ``LocalNode(..., sink=make_sink(backend, providers))``.
+    """
+    from openbars.orchestrator.finalize import (
+        CryptoReconcilingSink,
+        DispatchingSink,
+        ReconcilingSink,
+        parquet_canonical_writer,
+    )
+    from openbars.reconcile.reconciler import MemoryReconciler
+
+    writer = parquet_canonical_writer(backend.canonical)  # type: ignore[attr-defined]
+    raw = backend.raw  # type: ignore[attr-defined]
+    others = tuple(providers)
+    return DispatchingSink(
+        us=ReconcilingSink(MemoryReconciler(), writer, raw=raw, other_providers=others),
+        crypto=CryptoReconcilingSink(
+            backend.instruments, writer, raw=raw, other_providers=others  # type: ignore[attr-defined]
+        ),
+    )
 
 
 def missing_credentials(settings: Settings, name: str) -> list[str]:
