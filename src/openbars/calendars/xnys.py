@@ -7,8 +7,9 @@ first/last session use a bounded calendar built for the requested range.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import date, datetime, timedelta, timezone
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
@@ -17,7 +18,7 @@ import exchange_calendars as xcals
 import pandas as pd
 
 from openbars.core.calendar import TradingSession
-from openbars.core.models import Market
+from openbars.core.models import HourlyAlignment, Market, Session
 
 XNYS_CODE = "XNYS"
 NY_TZ = ZoneInfo("America/New_York")
@@ -105,6 +106,34 @@ class XNYSCalendar:
         for ts in cal.sessions_in_range(_label(start), _label(end)):
             opens, closes = _session_open_close_utc(cal, ts.date())
             out.append(TradingSession(ts.date(), opens.astimezone(NY_TZ), closes.astimezone(NY_TZ)))
+        return out
+
+
+
+    def hourly_slots(
+        self,
+        day: date,
+        *,
+        alignment: HourlyAlignment | str = HourlyAlignment.SESSION_OPEN,
+        include_extended_hours: bool = False,
+    ) -> list[HourlyBarSlot]:
+        """See :func:`hourly_slots`."""
+        session = self.trading_session(day)
+        if session is None:
+            return []
+        align = _as_alignment(alignment)
+        opens = session.opens_at.astimezone(NY_TZ)
+        closes = session.closes_at.astimezone(NY_TZ)
+        out: list[HourlyBarSlot] = []
+        if include_extended_hours:
+            pre_start = _ny_at(day, _EXTENDED_PRE_START)
+            out.extend(_to_slot(day, a, b, Session.PRE) for a, b in _iter_cuts(pre_start, opens, align))
+        out.extend(_to_slot(day, a, b, Session.REGULAR) for a, b in _iter_cuts(opens, closes, align))
+        if include_extended_hours:
+            close_clock = closes.time()
+            post_end_clock = _EARLY_CLOSE_POST_END if close_clock < _REGULAR_CLOSE else _EXTENDED_POST_END
+            post_end = _ny_at(day, post_end_clock)
+            out.extend(_to_slot(day, a, b, Session.POST) for a, b in _iter_cuts(closes, post_end, align))
         return out
 
 
@@ -204,18 +233,126 @@ def reject_non_session_bars(
     return BarFilterResult(accepted, rejected)
 
 
+
+# --- hourly slots (US 1h bars; see Discussion #112 / issue #114) -----------------------------
+
+# Official-style US equity extended hours in America/New_York. Regular open/close always
+# come from the exchange calendar (half days included). Early-close post ends at 17:00.
+_EXTENDED_PRE_START = time(4, 0)
+_EXTENDED_POST_END = time(20, 0)
+_EARLY_CLOSE_POST_END = time(17, 0)
+_REGULAR_CLOSE = time(16, 0)
+
+
+@dataclass(frozen=True)
+class HourlyBarSlot:
+    """One US hourly bar on the XNYS grid. ``ts_start`` / ``ts_end`` are UTC and aware; end is exclusive."""
+
+    session_date: date
+    ts_start: datetime
+    ts_end: datetime
+    session: Session
+
+    def __post_init__(self) -> None:
+        for name in ("ts_start", "ts_end"):
+            value = getattr(self, name)
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must be timezone-aware")
+        if self.ts_end <= self.ts_start:
+            raise ValueError("ts_end must be after ts_start")
+
+
+def _as_alignment(alignment: HourlyAlignment | str) -> HourlyAlignment:
+    return alignment if isinstance(alignment, HourlyAlignment) else HourlyAlignment(alignment)
+
+
+def _ny_at(day: date, clock: time) -> datetime:
+    return datetime(day.year, day.month, day.day, clock.hour, clock.minute, tzinfo=NY_TZ)
+
+
+def _next_cut(start: datetime, alignment: HourlyAlignment) -> datetime:
+    if alignment is HourlyAlignment.SESSION_OPEN:
+        return start + timedelta(hours=1)
+    if start.minute == 0 and start.second == 0 and start.microsecond == 0:
+        return start + timedelta(hours=1)
+    return start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
+def _iter_cuts(start: datetime, end: datetime, alignment: HourlyAlignment) -> list[tuple[datetime, datetime]]:
+    if end <= start:
+        return []
+    out: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        nxt = min(_next_cut(cursor, alignment), end)
+        out.append((cursor, nxt))
+        cursor = nxt
+    return out
+
+
+def _to_slot(day: date, start: datetime, end: datetime, session: Session) -> HourlyBarSlot:
+    return HourlyBarSlot(day, start.astimezone(UTC), end.astimezone(UTC), session)
+
+
+def hourly_slots(
+    day: date,
+    *,
+    alignment: HourlyAlignment | str = HourlyAlignment.SESSION_OPEN,
+    include_extended_hours: bool = False,
+) -> list[HourlyBarSlot]:
+    """Hourly grid for one XNYS session date. Empty on a non-session day.
+
+    Regular open/close come from :class:`XNYSCalendar`. Default alignment is
+    ``session_open`` (09:30, 10:30, …; last bar may be shorter). ``clock_hour``
+    stubs the first regular bar to the next New York clock hour. Extended hours
+    (04:00 NY to regular open, regular close to 20:00 NY, or 17:00 NY after an
+    early close) are included only when ``include_extended_hours`` is true.
+    """
+    return _CALENDAR.hourly_slots(day, alignment=alignment, include_extended_hours=include_extended_hours)
+
+
+def filter_hourly_slots(
+    slots: Sequence[HourlyBarSlot], *, include_extended_hours: bool = False
+) -> list[HourlyBarSlot]:
+    """Drop PRE/POST slots unless ``include_extended_hours`` is true."""
+    if include_extended_hours:
+        return list(slots)
+    return [slot for slot in slots if slot.session is Session.REGULAR]
+
+
+def session_for_hourly_ts(
+    day: date,
+    ts_start: datetime,
+    *,
+    alignment: HourlyAlignment | str = HourlyAlignment.SESSION_OPEN,
+    include_extended_hours: bool = False,
+) -> Session | None:
+    """``Session`` of a bar whose ``ts_start`` sits on the grid, else ``None``."""
+    if ts_start.tzinfo is None or ts_start.utcoffset() is None:
+        raise ValueError("ts_start must be timezone-aware")
+    ts = ts_start.astimezone(UTC)
+    for slot in hourly_slots(day, alignment=alignment, include_extended_hours=include_extended_hours):
+        if slot.ts_start == ts:
+            return slot.session
+    return None
+
+
 __all__ = [
     "BarFilterResult",
     "BarRejection",
+    "HourlyBarSlot",
     "NON_SESSION_REASON",
     "NY_TZ",
     "TradingSession",
     "XNYSCalendar",
+    "filter_hourly_slots",
+    "hourly_slots",
     "is_non_session_date",
     "is_session",
     "latest_completed_session",
     "reject_non_session_bars",
     "session_bounds",
+    "session_for_hourly_ts",
     "session_index",
     "sessions",
 ]

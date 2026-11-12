@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Mapping
 
-from openbars.core.models import Adjustment, Interval, Market
+from openbars.core.models import Adjustment, HourlyAlignment, Interval, Market
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,8 @@ class Settings:
     postgres_schema: str | None = None
     postgres_quota: str = "sqlite"  # sqlite | postgres
     default_adjustment: Adjustment = Adjustment.SPLIT
+    us_hourly_alignment: HourlyAlignment = HourlyAlignment.SESSION_OPEN
+    include_extended_hours: bool = False
     nodes: tuple[NodeConfig, ...] = (NodeConfig(name="local"),)
     # Explicit symbols per market (InstrumentMaster-based universes come later).
     universe: Mapping[Market, tuple[str, ...]] = field(default_factory=dict)

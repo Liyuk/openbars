@@ -35,7 +35,7 @@ import yaml
 
 from openbars.config.schema import NodeConfig, ProviderConfig, Selection, Settings
 from openbars.core.errors import ConfigError
-from openbars.core.models import Adjustment, Interval, Market
+from openbars.core.models import Adjustment, HourlyAlignment, Interval, Market
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _RESERVED_PROVIDER_KEYS = {"enabled", "role", "quota"}
@@ -275,6 +275,14 @@ def parse_settings(data: Any) -> Settings:
         kwargs["nodes"] = tuple(nodes)
     if "adjustment" in conventions:
         kwargs["default_adjustment"] = _enum(Adjustment, conventions["adjustment"], "conventions.adjustment")
+    if "us_hourly_alignment" in conventions:
+        kwargs["us_hourly_alignment"] = _enum(
+            HourlyAlignment, conventions["us_hourly_alignment"], "conventions.us_hourly_alignment"
+        )
+    if "include_extended_hours" in conventions:
+        kwargs["include_extended_hours"] = _as_bool(
+            conventions["include_extended_hours"], "conventions.include_extended_hours"
+        )
     pg = storage.get("postgres") if isinstance(storage.get("postgres"), Mapping) else {}
     dsn = pg.get("dsn")
     dsn_text = str(dsn).strip() if dsn is not None and str(dsn).strip() else None

@@ -61,6 +61,13 @@ class Session(str, Enum):
     CONTINUOUS = "continuous"  # 24/7 markets (crypto)
 
 
+class HourlyAlignment(str, Enum):
+    """How US hourly bars are cut inside a session (see Discussion #112)."""
+
+    SESSION_OPEN = "session_open"  # 09:30, 10:30, …; last bar may be shorter
+    CLOCK_HOUR = "clock_hour"  # stubs to the next NY clock hour, then on the hour
+
+
 class Adjustment(str, Enum):
     """Price basis of a bar series.
 

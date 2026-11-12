@@ -61,6 +61,8 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
         if settings.postgres_schema:
             lines.append(f"  postgres.schema: {settings.postgres_schema}")
     lines.append(f"adjustment: {settings.default_adjustment.value}")
+    lines.append(f"us_hourly_alignment: {settings.us_hourly_alignment.value}")
+    lines.append(f"include_extended_hours: {str(settings.include_extended_hours).lower()}")
 
     lines.append("providers:")
     if not settings.providers:

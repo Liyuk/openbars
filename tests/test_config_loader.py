@@ -7,7 +7,7 @@ import pytest
 from openbars.config.display import format_settings
 from openbars.config.loader import ENV_FILE_VAR, expand_env, load_settings, parse_env_file
 from openbars.core.errors import ConfigError
-from openbars.core.models import Adjustment, Interval, Market
+from openbars.core.models import Adjustment, HourlyAlignment, Interval, Market
 
 pytestmark = pytest.mark.usefixtures("no_network")
 
@@ -99,6 +99,8 @@ def test_example_config_loads():
 
     s = load_settings(Path(__file__).resolve().parent.parent / "config.example.yaml", env={})
     assert Market.US in s.selection.markets and "massive" in s.providers
+    assert s.us_hourly_alignment is HourlyAlignment.SESSION_OPEN
+    assert s.include_extended_hours is False
 
 
 
@@ -434,3 +436,38 @@ def test_open_configured_backend_requires_dsn(tmp_path):
     s = load_settings(write(tmp_path, yaml), env={})
     with pytest.raises(ConfigError, match="dsn is required"):
         open_configured_backend(s, data_dir=tmp_path)
+
+
+
+def test_hourly_conventions_default_and_explicit(tmp_path):
+    s = load_settings(write(tmp_path, "markets: [us]\n"), env={})
+    assert s.us_hourly_alignment is HourlyAlignment.SESSION_OPEN
+    assert s.include_extended_hours is False
+    text = format_settings(s)
+    assert "us_hourly_alignment: session_open" in text
+    assert "include_extended_hours: false" in text
+
+    s = load_settings(
+        write(
+            tmp_path,
+            "markets: [us]\nconventions: {us_hourly_alignment: clock_hour, include_extended_hours: true}\n",
+        ),
+        env={},
+    )
+    assert s.us_hourly_alignment is HourlyAlignment.CLOCK_HOUR
+    assert s.include_extended_hours is True
+    text = format_settings(s)
+    assert "us_hourly_alignment: clock_hour" in text
+    assert "include_extended_hours: true" in text
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("markets: [us]\nconventions: {us_hourly_alignment: sideways}\n", "us_hourly_alignment"),
+        ("markets: [us]\nconventions: {include_extended_hours: sometimes}\n", "include_extended_hours"),
+    ],
+)
+def test_hourly_conventions_invalid(tmp_path, text, message):
+    with pytest.raises(ConfigError, match=message):
+        load_settings(write(tmp_path, text), env={})
