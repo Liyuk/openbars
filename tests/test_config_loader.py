@@ -242,3 +242,123 @@ providers:
     assert "feed: sip" in text
     assert "env_file: (none)" in text
     assert "process environment" in text
+
+
+DEFAULT_YAML = """
+markets: [us]
+providers:
+  massive:
+    api_key: ${T_KEY_ID}
+"""
+
+
+def test_default_dotenv_next_to_config_is_loaded(tmp_path):
+    value = "dot-key-" + "11aa22bb"
+    _env_file(tmp_path, f"T_KEY_ID={value}\n", ".env")
+    s = load_settings(write(tmp_path, DEFAULT_YAML), env={})
+    assert s.providers["massive"].options["api_key"] == value
+    assert s.env_file == str(tmp_path / ".env") and s.env_file_source == "./.env"
+    text = format_settings(s)
+    assert value not in text and "(./.env)" in text and "api_key: set" in text
+
+
+def test_default_dotenv_is_not_read_from_the_cwd(tmp_path, monkeypatch):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    _env_file(other, "T_KEY_ID=" + "cwd-key-" + "99887766\n", ".env")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.chdir(other)
+    s = load_settings(write(cfg, DEFAULT_YAML), env={})
+    assert s.env_file is None and not s.providers["massive"].options["api_key"]
+
+
+def test_missing_default_dotenv_is_fine(tmp_path):
+    s = load_settings(write(tmp_path, DEFAULT_YAML), env={})
+    assert s.env_file is None and s.env_file_source is None
+    assert not s.providers["massive"].options["api_key"]
+    assert "env_file: (none)" in format_settings(s)
+
+
+def test_process_env_beats_default_dotenv(tmp_path):
+    from_file = "dot-key-" + "33cc44dd"
+    from_proc = "proc-key-" + "55ee66ff"
+    _env_file(tmp_path, f"T_KEY_ID={from_file}\n", ".env")
+    s = load_settings(write(tmp_path, DEFAULT_YAML), env={"T_KEY_ID": from_proc})
+    assert s.providers["massive"].options["api_key"] == from_proc
+
+
+def test_explicit_env_sources_beat_default_dotenv(tmp_path):
+    default = "dot-key-" + "77aa88bb"
+    via_flag = "flag-key-" + "99cc00dd"
+    via_var = "var-key-" + "11ee22ff"
+    via_yaml = "yaml-key-" + "33aa44bb"
+    _env_file(tmp_path, f"T_KEY_ID={default}\n", ".env")
+    flag_file = _env_file(tmp_path, f"T_KEY_ID={via_flag}\n", "flag.env")
+    var_file = _env_file(tmp_path, f"T_KEY_ID={via_var}\n", "var.env")
+    _env_file(tmp_path, f"T_KEY_ID={via_yaml}\n", "yaml.env")
+    path = write(tmp_path, DEFAULT_YAML)
+    s = load_settings(path, env={ENV_FILE_VAR: str(var_file)}, env_file=flag_file)
+    assert s.providers["massive"].options["api_key"] == via_flag and s.env_file_source == "--env-file"
+    s = load_settings(path, env={ENV_FILE_VAR: str(var_file)})
+    assert s.providers["massive"].options["api_key"] == via_var and s.env_file_source == ENV_FILE_VAR
+    s = load_settings(write(tmp_path, "env_file: yaml.env\n" + DEFAULT_YAML), env={})
+    assert s.providers["massive"].options["api_key"] == via_yaml and s.env_file_source == "config.env_file"
+
+
+def test_yaml_default_beats_nothing_but_loses_to_default_dotenv(tmp_path):
+    yaml = "markets: [us]\nproviders:\n  massive:\n    api_key: ${T_KEY_ID:-yaml-default}\n"
+    assert load_settings(write(tmp_path, yaml), env={}).providers["massive"].options["api_key"] == "yaml-default"
+    value = "dot-key-" + "55cc66dd"
+    _env_file(tmp_path, f"T_KEY_ID={value}\n", ".env")
+    assert load_settings(write(tmp_path, yaml), env={}).providers["massive"].options["api_key"] == value
+
+
+def test_env_refs_record_variable_names_only(tmp_path):
+    value = "ref-key-" + "77ee88ff"
+    s = load_settings(write(tmp_path, DEFAULT_YAML), env={"T_KEY_ID": value})
+    assert s.providers["massive"].env_refs == {"api_key": ("T_KEY_ID",)}
+    assert value not in repr(s.providers["massive"].env_refs)
+
+
+@pytest.mark.parametrize(
+    "yaml",
+    ["markets: [${T_KEY_ID}]\n", "markets: [us]\nintervals: [${T_KEY_ID}]\n",
+     "markets: [us]\nconventions: {adjustment: ${T_KEY_ID}}\n"],
+)  # fmt: skip
+def test_secret_values_never_appear_in_config_errors(tmp_path, yaml):
+    secret = "leak-key-" + "99aa00bb"
+    with pytest.raises(ConfigError) as info:
+        load_settings(write(tmp_path, yaml), env={"T_KEY_ID": secret})
+    assert secret not in str(info.value) and secret not in repr(info.value)
+
+
+def test_secret_values_never_appear_in_env_file_errors(tmp_path):
+    secret = "leak-key-" + "11cc22dd"
+    bad = _env_file(tmp_path, f"GOOD=1\nthis line has {secret} but no equals\n", "bad.env")
+    with pytest.raises(ConfigError) as info:
+        load_settings(write(tmp_path, DEFAULT_YAML), env={}, env_file=bad)
+    assert secret not in str(info.value) and "line 2" in str(info.value)
+
+
+def test_quota_override_flag_is_parsed_separately_from_limits(tmp_path):
+    yaml = "markets: [us]\nproviders:\n  alpaca:\n    quota: {per_minute: 999, override: true}\n  massive:\n    quota: {per_minute: 2}\n"
+    s = load_settings(write(tmp_path, yaml), env={})
+    assert s.providers["alpaca"].quota_overrides == {"per_minute": 999.0}
+    assert s.providers["alpaca"].quota_override is True
+    assert s.providers["massive"].quota_override is False
+    assert "override: true" in format_settings(s)
+
+
+@pytest.mark.parametrize("quota", ["{override: yes please}", "{per_minute: true}", "{per_minute: lots}"])
+def test_bad_quota_values_are_config_errors(tmp_path, quota):
+    yaml = f"markets: [us]\nproviders:\n  alpaca:\n    quota: {quota}\n"
+    with pytest.raises(ConfigError, match="quota"):
+        load_settings(write(tmp_path, yaml), env={})
+
+
+def test_unknown_market_and_interval_messages_list_valid_choices(tmp_path):
+    with pytest.raises(ConfigError, match=r"invalid market 'mars'.*us"):
+        load_settings(write(tmp_path, "markets: [mars]\n"), env={})
+    with pytest.raises(ConfigError, match=r"invalid interval '7d'.*1d"):
+        load_settings(write(tmp_path, "markets: [us]\nintervals: [7d]\n"), env={})

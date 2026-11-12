@@ -26,6 +26,10 @@ class ProviderConfig:
     role: str = "primary"  # primary | fallback | audit
     options: Mapping[str, object] = field(default_factory=dict)  # secrets resolved from env
     quota_overrides: Mapping[str, float] = field(default_factory=dict)
+    # ``quota: {override: true}`` -- allow raising (not just tightening) the listed limits.
+    quota_override: bool = False
+    # option -> names of the ``${ENV_VAR}`` it referenced in config.yaml (for error messages).
+    env_refs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -50,7 +54,7 @@ class Settings:
     schedule: Mapping[str, object] = field(default_factory=dict)  # raw ``schedule:`` section
     # Path of the dotenv file that was actually loaded, if any, and how it was chosen.
     env_file: str | None = None
-    env_file_source: str | None = None  # --env-file | OPENBARS_ENV_FILE | config.env_file
+    env_file_source: str | None = None  # --env-file | OPENBARS_ENV_FILE | config.env_file | ./.env
 
     def secret_values(self, min_length: int = 8) -> tuple[str, ...]:
         """Resolved credential values (for output scrubbing only; never log them)."""

@@ -6,6 +6,8 @@ Resolution order for secrets and other ``${VAR}`` values (highest wins):
 2. A dotenv file, chosen by the first of: the ``env_file`` argument (CLI
    ``--env-file``), the ``OPENBARS_ENV_FILE`` environment variable, or the
    ``env_file`` key in ``config.yaml``.
+   If none of those is set, ``.env`` next to ``config.yaml`` is read when it exists
+   (no error when it does not).
 3. A ``${VAR:-default}`` default in the YAML.
 
 Literal (non-placeholder) values in ``config.yaml`` are used as written and are
@@ -42,6 +44,8 @@ _ENV_LINE = re.compile(
 )
 
 ENV_FILE_VAR = "OPENBARS_ENV_FILE"
+DEFAULT_ENV_FILE = ".env"
+DEFAULT_ENV_SOURCE = "./.env"
 
 # Canonical name -> accepted aliases (used only when the canonical name is unset).
 ENV_ALIASES: dict[str, tuple[str, ...]] = {
@@ -121,14 +125,18 @@ def resolve_env_file(
     env_file: str | Path | None = None,
     config_dir: Path | None = None,
 ) -> tuple[Path | None, str | None]:
-    """Pick the dotenv path. Explicit argument wins, then ``OPENBARS_ENV_FILE``, then YAML."""
+    """Pick the dotenv path: argument, ``OPENBARS_ENV_FILE``, YAML ``env_file``, else ``<config dir>/.env``.
+
+    The default ``.env`` is only returned when it exists; its absence is not an error.
+    """
     if env_file:
         return Path(env_file).expanduser(), "--env-file"
     if process_env.get(ENV_FILE_VAR):
         return Path(process_env[ENV_FILE_VAR]).expanduser(), ENV_FILE_VAR
     raw = data.get("env_file") if isinstance(data, Mapping) else None
     if raw is None or raw == "":
-        return None, None
+        default = (config_dir if config_dir is not None else Path(".")) / DEFAULT_ENV_FILE
+        return (default, DEFAULT_ENV_SOURCE) if default.is_file() else (None, None)
     if not isinstance(raw, str):
         raise ConfigError("'env_file' must be a string path")
     path = Path(expand_env(raw, process_env)).expanduser()
@@ -207,7 +215,13 @@ def parse_settings(data: Any) -> Settings:
         quota = body.get("quota") or {}
         if not isinstance(quota, Mapping):
             raise ConfigError(f"providers.{name}.quota must be a mapping")
+        quota = dict(quota)
+        allow_widen = quota.pop("override", False)
+        if not isinstance(allow_widen, bool):
+            raise ConfigError(f"providers.{name}.quota.override must be true or false")
         try:
+            if any(isinstance(v, bool) for v in quota.values()):
+                raise TypeError
             overrides = {str(k): float(v) for k, v in quota.items()}
         except (TypeError, ValueError):
             raise ConfigError(f"providers.{name}.quota values must be numbers") from None
@@ -217,6 +231,7 @@ def parse_settings(data: Any) -> Settings:
             role=str(body.get("role", "primary")),
             options={k: v for k, v in body.items() if k not in _RESERVED_PROVIDER_KEYS},
             quota_overrides=overrides,
+            quota_override=allow_widen,
         )
 
     storage = _section(data, "storage")
@@ -259,6 +274,49 @@ def parse_settings(data: Any) -> Settings:
     )
 
 
+def _referenced_values(data: Any, env: Mapping[str, str], min_length: int = 4) -> list[str]:
+    """Values substituted for ``${NAME}`` references in the raw YAML (to scrub from errors)."""
+    names: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            names.update(m.group(1) for m in _ENV_REF.finditer(node))
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+
+    walk(data)
+    return sorted({env[n] for n in names if len(env.get(n, "")) >= min_length}, key=len, reverse=True)
+
+
+def _scrub(text: str, values: list[str]) -> str:
+    for value in values:
+        text = text.replace(value, "***")
+    return text
+
+
+def _provider_env_refs(data: Mapping[str, Any]) -> dict[str, dict[str, tuple[str, ...]]]:
+    """provider -> option -> env var names referenced by that option in the raw YAML."""
+    out: dict[str, dict[str, tuple[str, ...]]] = {}
+    providers = data.get("providers")
+    if not isinstance(providers, Mapping):
+        return out
+    for name, body in providers.items():
+        if not isinstance(body, Mapping):
+            continue
+        refs = {
+            str(k): tuple(m.group(1) for m in _ENV_REF.finditer(v))
+            for k, v in body.items()
+            if isinstance(v, str) and _ENV_REF.search(v)
+        }
+        if refs:
+            out[str(name)] = refs
+    return out
+
+
 def load_settings(
     path: str | Path,
     *,
@@ -286,9 +344,18 @@ def load_settings(
     chosen, source = resolve_env_file(data, process_env, env_file=env_file, config_dir=file.parent)
     file_env = parse_env_file(chosen) if chosen is not None else None
     merged = merge_env(process_env, file_env)
-    settings = parse_settings(expand_env(data, merged))
+    try:
+        settings = parse_settings(expand_env(data, merged))
+    except ConfigError as exc:
+        raise ConfigError(_scrub(str(exc), _referenced_values(data, merged))) from None
+    refs = _provider_env_refs(data)
+    providers = {
+        name: replace(cfg, env_refs=refs[name]) if name in refs else cfg
+        for name, cfg in settings.providers.items()
+    }
     return replace(
         settings,
+        providers=providers,
         env_file=str(chosen) if chosen is not None else None,
         env_file_source=source,
     )

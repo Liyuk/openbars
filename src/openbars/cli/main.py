@@ -1,4 +1,4 @@
-"""`openbars` CLI: ``plan`` (dry run), ``run`` (plan + submit + execute), ``status``, ``verify``, ``config``.
+"""`openbars` CLI: ``init``, ``plan`` (dry run), ``run`` (plan + submit + execute), ``status``, ``verify``, ``config``.
 
 ``plan`` never writes jobs unless ``--submit`` is given; ``run`` plans, submits and executes
 until the queue is idle. Everything printed passes through a scrubber that masks configured
@@ -18,6 +18,7 @@ from openbars import __version__
 from openbars.cli.wiring import (
     ProviderFactory,
     build_providers,
+    check_ready,
     data_dir,
     effective_policies,
     skipped_providers,
@@ -35,6 +36,7 @@ from openbars.storage.state import SqliteStateStore
 COMMANDS = ("init", "plan", "run", "backfill", "verify", "status", "config")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUDGET = 0, 1, 2, 3
 LIST_LIMIT = 50
+DEFAULT_CONFIG = "./config.yaml"
 
 
 class _Out:
@@ -74,7 +76,7 @@ def _iso_date(text: str) -> date:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha)")
     parser.add_argument("--version", action="version", version=f"openbars {__version__}")
-    parser.add_argument("--config", default="./config.yaml", help="config file (default ./config.yaml)")
+    parser.add_argument("--config", default=DEFAULT_CONFIG, help=f"config file (default {DEFAULT_CONFIG})")
     parser.add_argument("--data", default=None, help="storage directory (overrides storage.path)")
     parser.add_argument(
         "--env-file",
@@ -89,7 +91,8 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--data", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         p.add_argument("--env-file", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
-    common(sub.add_parser("init", help="not implemented yet"))
+    init = sub.add_parser("init", help="write config.yaml and .env from the examples (never overwrites)")
+    init.add_argument("directory", nargs="?", default=".", help="target directory (default .)")
 
     verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars")
     common(verify)
@@ -136,8 +139,12 @@ def main(
         parser.print_help()
         return EXIT_OK
     if args.command == "init":
-        print("openbars init: not implemented yet (pre-alpha)", file=sys.stderr)
-        return EXIT_USAGE
+        from openbars.cli.init import init_project
+
+        if args.config != DEFAULT_CONFIG:
+            print("error: init takes a directory argument; --config is not used", file=sys.stderr)
+            return EXIT_USAGE
+        return init_project(args.directory, _Out(), exit_usage=EXIT_USAGE)
 
     out = _Out()
     try:
@@ -220,6 +227,7 @@ def _plan(args: argparse.Namespace, settings: Settings, out: _Out, factory: Prov
     root = data_dir(settings, args.data)
     providers = factory(settings, None)
     notes = skipped_providers(settings, providers)
+    check_ready(settings, providers, strict=False)
     backend = _open_backend(root)
     db = root / "state.db"
     if not args.submit:  # dry run: read-only apart from creating empty storage folders
@@ -249,11 +257,12 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
     from openbars.reconcile.reconciler import MemoryReconciler
 
     root = data_dir(settings, args.data)
+    # The gate needs the providers' policies; build once without it to read them.
+    probe = factory(settings, None)
+    check_ready(settings, probe, strict=True)  # before anything is written
     root.mkdir(parents=True, exist_ok=True)
     backend = _open_backend(root)
     state = SqliteStateStore(root / "state.db")
-    # The gate needs the providers' policies; build once without it to read them.
-    probe = factory(settings, None)
     policies = effective_policies(settings, probe)
     gate = SqliteQuotaGate(root / "quota.db", policies)
     providers = factory(settings, gate)

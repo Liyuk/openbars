@@ -1,9 +1,10 @@
-# openbars example configuration. Copy to config.yaml (git-ignored).
+# openbars example configuration. `openbars init` writes it as config.yaml (git-ignored).
 # Secrets are referenced as ${ENV_VAR}; never write keys inline.
 #
 # Optional dotenv file (never commit it). Resolution, highest wins:
 #   1. process environment
-#   2. env file (--env-file, else OPENBARS_ENV_FILE, else this key)
+#   2. env file (--env-file, else OPENBARS_ENV_FILE, else this key,
+#      else .env next to this file when it exists)
 #   3. ${VAR:-default} below
 # Literal values here are used as written.
 # `openbars config` prints the effective settings; secret values are redacted.
@@ -48,7 +49,9 @@ providers:
     feed: sip              # sip | iex —— 成交量不得跨 feed 混用
     key_id: ${ALPACA_API_KEY_ID}
     secret_key: ${ALPACA_API_SECRET_KEY}
-    # quota 留空则使用 provider 声明的默认免费额度；可在此收紧
+    # quota 留空则使用 provider 声明的默认免费额度；可在此收紧。
+    # 要调高（超过默认值）必须显式写 override: true，否则报错：
+    #   quota: { per_minute: 999, override: true }
     quota: { per_minute: 190 }
   massive:
     enabled: true
