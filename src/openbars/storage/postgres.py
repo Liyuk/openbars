@@ -87,6 +87,7 @@ from openbars.storage.schema import (
     INSTRUMENTS_SCHEMA,
     RAW_BARS_SCHEMA,
     REF_IDENTITY_SCHEMAS,
+    SAME_SOURCE_BAR_COLUMNS,
     STATE_TABLES,
     SYMBOL_MAPPINGS_SCHEMA,
     SCHEMA_VERSION,
@@ -522,11 +523,14 @@ def _write_raw_rows(conn: "_Conn", rows: Sequence[RawBarRow]) -> int:
 
 _RAW_DAILY_SQL = _raw_upsert_sql("session_date", True)
 _RAW_INTRADAY_SQL = _raw_upsert_sql("ts_start", False)
-# #154: same source bar (same ``source_fingerprint``) keeps the earliest known ``available_at``
-# (``LEAST`` ignores NULL), like ``_PartitionedTable._carry_available_at`` in the Parquet layer.
+# #154: the same source bar (every ``SAME_SOURCE_BAR_COLUMNS`` value matches) keeps the earliest
+# known ``available_at`` (``LEAST`` ignores NULL), like ``_PartitionedTable._carry_available_at``.
+_SAME_SOURCE_BAR_SQL = " AND ".join(
+    f'"canonical_bars".{qident(c)} IS NOT DISTINCT FROM EXCLUDED.{qident(c)}' for c in SAME_SOURCE_BAR_COLUMNS
+)
 _CANON_AVAILABLE_SET = (
     '"available_at" = EXCLUDED."available_at"',
-    '"available_at" = CASE WHEN "canonical_bars"."source_fingerprint" = EXCLUDED."source_fingerprint" '
+    f'"available_at" = CASE WHEN {_SAME_SOURCE_BAR_SQL} '
     'THEN LEAST("canonical_bars"."available_at", EXCLUDED."available_at") '
     'ELSE EXCLUDED."available_at" END',
 )
