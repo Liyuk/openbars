@@ -87,6 +87,7 @@ from openbars.storage.schema import (
     INSTRUMENTS_SCHEMA,
     RAW_BARS_SCHEMA,
     REF_IDENTITY_SCHEMAS,
+    SAME_SOURCE_BAR_COLUMNS,
     STATE_TABLES,
     SYMBOL_MAPPINGS_SCHEMA,
     SCHEMA_VERSION,
@@ -292,8 +293,15 @@ def check_upstream_compat(catalog: Catalog) -> None:
         raise UpstreamSchemaError(problems)
 
 
+# Additive nullable columns a pre-migration database may lack (``write=True`` adds them).
+_OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at")})  # #154
+
+
 def check_native(catalog: Catalog) -> None:
-    problems = check_schema(catalog, NATIVE_REQUIRED)
+    problems = [
+        p for p in check_schema(catalog, NATIVE_REQUIRED)
+        if not (p.kind == "missing_column" and (p.table, p.column) in _OPTIONAL_NATIVE_COLUMNS)
+    ]
     # ``raw_bars.extra`` is optional (pre-#122 databases). If present it must be JSON/JSONB.
     raw = catalog.get("raw_bars") or {}
     if "extra" in raw and raw["extra"].data_type not in _FAMILY_TYPES["json"]:
@@ -366,6 +374,8 @@ def native_ddl() -> list[str]:
         _table_ddl("canonical_bars", CANONICAL_BARS_SCHEMA),
         _unique_index("ux_canonical_bars_daily", "canonical_bars", _CANON_KEY_COLS, [], "session_date", True),
         _unique_index("ux_canonical_bars_intraday", "canonical_bars", _CANON_KEY_COLS, [], "ts_start", False),
+        # #154: additive, nullable; databases created before it get the column on write=True.
+        'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ',
         'CREATE INDEX IF NOT EXISTS "ix_canonical_bars_scan" ON "canonical_bars" ("market", "interval", "policy_version", "session_date")',
         _table_ddl("instruments", INSTRUMENTS_SCHEMA, _REF_KEYS["instruments"]),
         _table_ddl("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, _REF_KEYS["symbol_mappings"]),
@@ -513,16 +523,31 @@ def _write_raw_rows(conn: "_Conn", rows: Sequence[RawBarRow]) -> int:
 
 _RAW_DAILY_SQL = _raw_upsert_sql("session_date", True)
 _RAW_INTRADAY_SQL = _raw_upsert_sql("ts_start", False)
-_CANON_DAILY_SQL = _upsert_sql(
-    "canonical_bars", CANONICAL_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _CANON_KEY_COLS), "session_date"]),
-    "\"interval\" = '1d'", (*_CANON_KEY_COLS, "session_date"),
+# #154: the same source bar (every ``SAME_SOURCE_BAR_COLUMNS`` value matches) keeps the earliest
+# known ``available_at`` (``LEAST`` ignores NULL), like ``_PartitionedTable._carry_available_at``.
+_SAME_SOURCE_BAR_SQL = " AND ".join(
+    f'"canonical_bars".{qident(c)} IS NOT DISTINCT FROM EXCLUDED.{qident(c)}' for c in SAME_SOURCE_BAR_COLUMNS
 )
-_CANON_INTRADAY_SQL = _upsert_sql(
-    "canonical_bars", CANONICAL_BARS_SCHEMA,
-    ", ".join([*(qident(c) for c in _CANON_KEY_COLS), "ts_start"]),
-    "\"interval\" <> '1d'", (*_CANON_KEY_COLS, "ts_start"),
+_CANON_AVAILABLE_SET = (
+    '"available_at" = EXCLUDED."available_at"',
+    f'"available_at" = CASE WHEN {_SAME_SOURCE_BAR_SQL} '
+    'THEN LEAST("canonical_bars"."available_at", EXCLUDED."available_at") '
+    'ELSE EXCLUDED."available_at" END',
 )
+
+
+def _canon_upsert_sql(time_col: str, daily: bool) -> str:
+    sql = _upsert_sql(
+        "canonical_bars", CANONICAL_BARS_SCHEMA,
+        ", ".join([*(qident(c) for c in _CANON_KEY_COLS), time_col]),
+        "\"interval\" = '1d'" if daily else "\"interval\" <> '1d'", (*_CANON_KEY_COLS, time_col),
+    )
+    assert sql.count(_CANON_AVAILABLE_SET[0]) == 1
+    return sql.replace(*_CANON_AVAILABLE_SET)
+
+
+_CANON_DAILY_SQL = _canon_upsert_sql("session_date", True)
+_CANON_INTRADAY_SQL = _canon_upsert_sql("ts_start", False)
 
 
 def _write_rows(conn: _Conn, rows: Sequence[Any], schema: pa.Schema, daily_sql: str, intraday_sql: str) -> int:

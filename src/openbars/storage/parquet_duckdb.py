@@ -72,6 +72,7 @@ from openbars.storage.rows import (
     CanonicalBarRow,
     InvalidBarError,
     RawBarRow,
+    available_by_utc,
     canonical_rows_to_table,
     check_rows,
     raw_rows_from_batch,
@@ -92,6 +93,7 @@ from openbars.storage.schema import (
     RAW_BARS_PARQUET_SCHEMA,
     RAW_KEY_SQL,
     RAW_LINEAGE_COLUMNS,
+    SAME_SOURCE_BAR_COLUMNS,
     SCHEMA_VERSION,
     SYMBOL_MAPPINGS_SCHEMA,
     SYMBOL_OBSERVATIONS_SCHEMA,
@@ -330,6 +332,8 @@ class _PartitionedTable:
             for directory, group in sorted(groups.items()):
                 table = to_table(group)
                 existing = self.parts(directory=directory)
+                if existing and self.spec.name == "canonical":
+                    table = self._carry_available_at(table, existing)
                 if existing:
                     table = self._drop_unchanged(table, existing)
                 if table.num_rows == 0:
@@ -354,6 +358,52 @@ class _PartitionedTable:
             lambda fh: pq.write_table(table, fh, compression="zstd", write_statistics=True),
         )
         return path
+
+    def _carry_available_at(self, incoming: pa.Table, existing_files: Sequence[Path]) -> pa.Table:
+        """Keep the earliest known ``available_at`` of an unchanged source bar (#154).
+
+        When the visible row with the same key is the same selected source bar (every
+        ``SAME_SOURCE_BAR_COLUMNS`` value matches: fingerprint, source and prices), the incoming
+        row gets the earlier of the two non-null values.
+        A re-run of the same fetch therefore never moves a bar's availability later, and a
+        null stored value can still be filled. Postgres native applies the same rule in SQL.
+        """
+        present = {n for p in existing_files for n in pq.read_schema(p).names}
+        if "available_at" not in present or "available_at" not in incoming.column_names:
+            return incoming
+        spec = self.spec
+        self.backend.check_versions(existing_files)
+        indexed = incoming.append_column("_idx", pa.array(range(incoming.num_rows), pa.int64()))
+        on = " AND ".join(
+            f"{a} IS NOT DISTINCT FROM {b}"
+            for a, b in zip(key_exprs(spec.key_sql, "i"), key_exprs(spec.key_sql, "e"))
+        )
+        sql = (
+            f"WITH e AS ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')}) "
+            f"SELECT i._idx, e.available_at FROM incoming i JOIN e ON {on} "
+            + "".join(f" AND i.{c} IS NOT DISTINCT FROM e.{c}" for c in SAME_SOURCE_BAR_COLUMNS)
+            + " WHERE e.available_at IS NOT NULL"
+        )
+        con = _mem_connection()
+        try:
+            con.register("incoming", indexed)
+            stored = dict(con.execute(sql, [[str(p) for p in existing_files]]).fetchall())
+        finally:
+            con.close()
+        if not stored:
+            return incoming
+        values = incoming.column("available_at").to_pylist()
+        changed = False
+        for idx, old in stored.items():
+            old = old.astimezone(UTC) if old.tzinfo is not None else old.replace(tzinfo=UTC)
+            new = values[idx]
+            if new is None or old < new:
+                values[idx] = old
+                changed = True
+        if not changed:
+            return incoming
+        pos = incoming.column_names.index("available_at")
+        return incoming.set_column(pos, incoming.schema.field(pos), pa.array(values, incoming.schema.field(pos).type))
 
     def _drop_unchanged(self, incoming: pa.Table, existing_files: Sequence[Path]) -> pa.Table:
         spec = self.spec
@@ -954,6 +1004,14 @@ _CN = Market.CN.value
 _HK = Market.HK.value
 
 
+def _with_available_at(table: pa.Table) -> pa.Table:
+    """Add an all-null ``available_at`` when no canonical file has the column yet (#154)."""
+    if "available_at" in table.column_names:
+        return table
+    field = CANONICAL_BARS_SCHEMA.field("available_at")
+    return table.append_column(field, pa.nulls(table.num_rows, field.type))
+
+
 class DuckDbBarReader:
     """``BarReader`` over the DuckDB catalog views; returns ``pyarrow.Table`` (exact decimals).
 
@@ -1062,8 +1120,11 @@ class DuckDbBarReader:
         on_missing_actions: str = "raise",
         on_missing_factors: str | None = None,
         factor_source: str | None = None,
+        available_by: datetime | None = None,
     ) -> pa.Table:
         mode = None if adjustment is None else Adjustment(adjustment)
+        if available_by is not None:
+            available_by = available_by_utc(available_by)
         stored = Adjustment(stored_adjustment)
         derive = mode is not None and mode is not stored
         # Dividend adjustment of a bar needs the later sessions (the prior close of every
@@ -1120,7 +1181,14 @@ class DuckDbBarReader:
             f"SELECT * FROM {CANONICAL_LAYER.view} WHERE {' AND '.join(where)} "
             "ORDER BY session_date, instrument_id, ts_start"
         )
-        table = self.backend.query(sql, params)
+        table = _with_available_at(self.backend.query(sql, params))
+        if available_by is not None:
+            # point in time (#154): the stored (newest) row of each key, hidden when it was not
+            # available yet; never an older superseded part. Applied before any derivation.
+            col = table.column("available_at")
+            table = table.filter(
+                pc.fill_null(pc.less_equal(col, pa.scalar(available_by, type=col.type)), False)
+            )
         if table.num_rows == 0:
             return table
         # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they

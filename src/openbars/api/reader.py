@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Protocol, Sequence
 
 from openbars.core.models import Adjustment, Interval
@@ -18,6 +18,7 @@ class BarReader(Protocol):
         end: date | None = None,
         adjustment: Adjustment = Adjustment.SPLIT,
         as_of: date | None = None,
+        available_by: datetime | None = None,
     ) -> Any:
         """Return a columnar table (pyarrow.Table when the parquet extra is installed).
 
@@ -30,5 +31,10 @@ class BarReader(Protocol):
         an ``instrument_id`` is queried as is. The parquet reader also takes ``market`` and
         ``policy_version`` (default auto: ``crypto-daily-v1`` for crypto, ``cn-daily-v1`` for CN,
         else ``research-daily-v2``).
+
+        ``available_by`` (#154, tz-aware datetime, optional) is a point-in-time filter: only the
+        stored row of each key whose ``available_at <= available_by`` is returned; a row with a
+        null ``available_at`` is treated as not available. An older revision that a newer row
+        replaced is never returned. ``None`` (default) = no filter.
         """
         ...
