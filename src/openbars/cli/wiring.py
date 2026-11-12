@@ -39,7 +39,7 @@ _BASE_URL_PROVIDERS = frozenset({"binance", "coinbase"})
 _PROVIDER_MARKETS: dict[str, frozenset[Market]] = {
     "alpaca": frozenset({Market.US}),
     "massive": frozenset({Market.US}),
-    "yfinance": frozenset({Market.US}),
+    "yfinance": frozenset({Market.US, Market.HK}),
     "binance": frozenset({Market.CRYPTO}),
     "coinbase": frozenset({Market.CRYPTO}),
     "baostock": frozenset({Market.CN}),

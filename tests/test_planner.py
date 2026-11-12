@@ -348,22 +348,167 @@ class _HkFake(FakeProvider):
         return tuple(replace(c, market=Market.HK) for c in super().capabilities())
 
 
-def _hk_plan(provider):
+def _hk_plan(provider, universe=("00700",), now=None):
     return DefaultPlanner().plan(
         Selection(frozenset({Market.HK}), frozenset({Interval.D1}), date(2026, 3, 2), None),
-        EmptyCoverage(), now=NOW, universe={Market.HK: ["TEST1"]},
-        providers={"fake": provider},
+        EmptyCoverage(), now=now or NOW, universe={Market.HK: list(universe)},
+        providers={provider.id: provider},
     )  # fmt: skip
 
 
 def test_other_markets_are_skipped_without_jobs():
-    p = _hk_plan(FakeProvider("fake"))  # declares US only -> no_provider
+    p = _hk_plan(
+        FakeProvider("fake"), universe=("00700",)
+    )  # declares US only -> no_provider
     assert p.jobs == () and any(n.code == "no_provider" for n in p.notes)
 
 
-def test_market_without_a_calendar_is_skipped_with_no_calendar():
-    p = _hk_plan(_HkFake("fake"))  # a provider exists, but HK has no calendar yet
-    assert p.jobs == () and [n.code for n in p.notes] == ["no_calendar"]
+# --- Hong Kong (Market.HK): XHKG calendar, Asia/Hong_Kong clock, yfinance only -----------------------
+
+HONG_KONG = ZoneInfo("Asia/Hong_Kong")
+HK_NOW = datetime(
+    2026, 3, 6, 17, 0, tzinfo=HONG_KONG
+)  # Friday, 1h after the 16:00 close
+
+
+def hk_sel(start: date, end: date | None = None) -> Selection:
+    return Selection(frozenset({Market.HK}), frozenset({Interval.D1}), start, end)
+
+
+def hk_plan(selection, providers, coverage=None, universe=("00700",), now=HK_NOW):
+    return DefaultPlanner().plan(
+        selection, coverage or EmptyCoverage(), now=now, universe={Market.HK: list(universe)},
+        providers={p.id: p for p in providers},
+    )  # fmt: skip
+
+
+def test_hk_plans_yfinance_jobs_without_no_calendar_note():
+    p = hk_plan(hk_sel(date(2026, 3, 2), date(2026, 3, 6)), [_HkFake("yfinance")])
+    assert not [n for n in p.notes if n.code == "no_calendar"]
+    assert p.jobs and {j.provider for j in p.jobs} == {"yfinance"}
+    assert all(j.market is Market.HK and j.instruments == ("00700",) for j in p.jobs)
+    covered = sorted(d for j in p.jobs for d in (j.window.start, j.window.end))
+    assert covered[0] == date(2026, 3, 2) and covered[-1] == date(2026, 3, 6)
+    daily = [j for j in p.jobs if j.kind is JobKind.DAILY]
+    assert [j.window for j in daily] == [DateRange(date(2026, 3, 6), date(2026, 3, 6))]
+
+
+def test_hk_weekend_and_holiday_windows_contain_only_xhkg_sessions():
+    # Around Lunar New Year 2026, mid-week closures (e.g. 2026-02-17) are not sessions
+    p = hk_plan(
+        hk_sel(date(2026, 2, 12), date(2026, 3, 2)),
+        [_HkFake("yfinance")],
+        now=datetime(2026, 3, 3, 9, 0, tzinfo=HONG_KONG),
+    )
+    from openbars.calendars import hk
+
+    expected = hk.sessions(date(2026, 2, 12), date(2026, 3, 2))
+    assert date(2026, 2, 17) not in expected
+    for j in p.jobs:
+        assert hk.is_session(j.window.start) and hk.is_session(j.window.end)
+    assert min(j.window.start for j in p.jobs) == expected[0]
+    assert max(j.window.end for j in p.jobs) == expected[-1] == date(2026, 3, 2)
+
+
+def test_hk_covered_sessions_are_not_planned_again_whatever_the_spelling():
+    cov = StaticCoverage(
+        [
+            ("yfinance", d, spelling)
+            for d in (date(2026, 3, 2), date(2026, 3, 3), date(2026, 3, 4))
+            for spelling in ("0700.HK", "00700")
+        ]
+    )
+    p = hk_plan(
+        hk_sel(date(2026, 3, 2), date(2026, 3, 6)),
+        [_HkFake("yfinance")],
+        coverage=cov,
+        universe=["0700.HK"],
+    )
+    assert [j.window for j in p.jobs if j.kind is JobKind.BACKFILL] == [
+        DateRange(date(2026, 3, 5), date(2026, 3, 5))
+    ]
+    assert [j.instruments for j in p.jobs] == [("0700.HK",)] * len(p.jobs)
+
+
+def test_hk_duplicate_spellings_plan_once_and_invalid_symbols_are_skipped():
+    p = hk_plan(
+        hk_sel(date(2026, 3, 5), date(2026, 3, 6)),
+        [_HkFake("yfinance")],
+        universe=["00700", "0700.HK", "hk:eq:xhkg:00700", "NOT_A_TICKER"],
+    )
+    assert all(len(j.instruments) == 1 for j in p.jobs)
+    planned = {j.instruments[0] for j in p.jobs}
+    assert planned <= {"00700", "0700.HK", "hk:eq:xhkg:00700"}
+    assert len(planned) == 1
+    assert any(n.code == "no_symbols" and "NOT_A_TICKER" in n.message for n in p.notes)
+
+
+def test_hk_latest_ready_session_waits_thirty_minutes_after_the_actual_close():
+    from openbars.orchestrator.planner import latest_ready_session
+
+    fri = date(2026, 3, 6)
+    assert latest_ready_session(
+        datetime(2026, 3, 6, 16, 29, tzinfo=HONG_KONG), Market.HK
+    ) == date(2026, 3, 5)
+    assert (
+        latest_ready_session(datetime(2026, 3, 6, 16, 30, tzinfo=HONG_KONG), Market.HK)
+        == fri
+    )
+    # 08:30 UTC == 16:30 Hong Kong (HKT, no DST)
+    assert (
+        latest_ready_session(datetime(2026, 3, 6, 8, 30, tzinfo=UTC), Market.HK) == fri
+    )
+    assert (
+        latest_ready_session(datetime(2026, 3, 8, 12, 0, tzinfo=HONG_KONG), Market.HK)
+        == fri
+    )  # weekend
+    # Christmas Eve 2025 is a half day (close 12:00 HKT)
+    eve = date(2025, 12, 24)
+    assert (
+        latest_ready_session(
+            datetime(2025, 12, 24, 12, 29, tzinfo=HONG_KONG), Market.HK
+        )
+        != eve
+    )
+    assert (
+        latest_ready_session(
+            datetime(2025, 12, 24, 12, 30, tzinfo=HONG_KONG), Market.HK
+        )
+        == eve
+    )
+
+
+def test_hk_job_is_not_planned_before_the_close_and_dates_use_the_hong_kong_day():
+    early = datetime(
+        2026, 3, 6, 16, 10, tzinfo=HONG_KONG
+    )  # Friday, still inside the wait
+    p = hk_plan(
+        hk_sel(date(2026, 3, 2), date(2026, 3, 6)), [_HkFake("yfinance")], now=early
+    )
+    assert max(j.window.end for j in p.jobs) == date(2026, 3, 5)
+    # 2026-03-06 23:00 UTC is already Saturday 07:00 in Hong Kong (NY and UTC are still Friday)
+    sat = hk_plan(
+        hk_sel(date(2026, 3, 2), date(2026, 3, 6)),
+        [_HkFake("yfinance")],
+        now=datetime(2026, 3, 6, 23, 0, tzinfo=UTC),
+    )
+    assert max(j.window.end for j in sat.jobs) == date(2026, 3, 6)
+
+
+def test_wiring_lists_yfinance_for_hk():
+    from openbars.cli.wiring import _PROVIDER_MARKETS
+
+    assert Market.HK in _PROVIDER_MARKETS["yfinance"]
+    assert "akshare" not in _PROVIDER_MARKETS
+
+
+def test_hk_planner_uses_only_yfinance_even_if_akshare_is_enabled():
+    yf = _HkFake("yfinance")
+    ak = _HkFake("akshare")
+    p = hk_plan(hk_sel(date(2026, 3, 5), date(2026, 3, 6)), [yf, ak])
+    assert {j.provider for j in p.jobs} == {"yfinance"}
+    only_ak = hk_plan(hk_sel(date(2026, 3, 5), date(2026, 3, 6)), [ak])
+    assert only_ak.jobs == () and any(n.code == "no_provider" for n in only_ak.notes)
 
 
 # --- A-share (Market.CN): XSHG calendar, Asia/Shanghai clock -----------------------------------------

@@ -99,8 +99,8 @@ class ReconcilingSink:
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is not Interval.D1:
             return  # the reconciler is daily-only for now
-        if Market(job.market) in (Market.CRYPTO, Market.CN):
-            return  # XNYS reconciler: crypto / A-share bars stay raw-only unless their own sink handles them
+        if Market(job.market) in (Market.CRYPTO, Market.CN, Market.HK):
+            return  # XNYS reconciler: other markets stay raw-only unless their own sink handles them
         mine = [o for o in (observation_from_raw(b) for b in bars) if o is not None]
         if not mine:
             return
@@ -331,7 +331,7 @@ class CnCanonicalSink:
 class DispatchingSink:
     """One sink for every market: ``job.market`` selects the ``us``, ``crypto`` or ``cn`` sink.
 
-    A market without a sink is raw-only (nothing is reconciled), never mis-reconciled.
+    A market without a sink (including HK in this version) is raw-only, never mis-reconciled.
     """
 
     us: CanonicalSink | None = None
