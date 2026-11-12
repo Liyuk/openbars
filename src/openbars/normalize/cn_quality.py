@@ -42,10 +42,12 @@ calendar hole carrying the mark), and it never gets ``LIMIT_*``. ``missing_sessi
 completeness check: a suspended session is *not* missing and a non-session day never is.
 
 The suspension fact must outlive the dropped canonical bar. Raw bars carry it as
-``extra["tradestatus"]`` while in flight, but the Parquet raw layer stores no ``extra``, so
-``suspended_dates`` reads ``tradestatus`` when present and otherwise falls back to the
-placeholder signature a suspended raw row keeps on disk: ``volume == 0``. Collect suspended
-dates from the **raw** layer, not from canonical.
+``extra["tradestatus"]`` while in flight, and the Parquet raw layer keeps it (and ``isST`` /
+``preclose``) in its JSON ``extra`` column (#94), so a read-back bar still has it.
+``suspended_dates`` reads ``tradestatus`` whenever present; only for rows without it (raw files
+written before that column existed, or bars that never had the field) does it fall back to the
+placeholder signature a suspended raw row keeps: ``volume == 0``. Collect suspended dates from
+the **raw** layer, not from canonical.
 """
 
 from __future__ import annotations
@@ -324,8 +326,8 @@ def suspended_dates(raw_bars: Iterable[Any]) -> set[date]:
     """Sessions of ``raw_bars`` that were trading suspensions.
 
     ``extra["tradestatus"]`` decides when present (``0`` suspended, ``1`` traded even with zero
-    volume); a bar without it (e.g. read back from Parquet, which stores no ``extra``) counts as
-    suspended when its ``volume`` is 0, the placeholder a suspended raw row keeps.
+    volume); only a bar without it (e.g. read from a raw Parquet file that predates the ``extra``
+    column) counts as suspended when its ``volume`` is 0, the placeholder a suspended raw row keeps.
     """
     out: set[date] = set()
     for bar in raw_bars:

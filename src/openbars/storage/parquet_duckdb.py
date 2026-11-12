@@ -75,7 +75,7 @@ from openbars.storage.rows import (
     canonical_rows_to_table,
     check_rows,
     raw_rows_from_batch,
-    raw_rows_to_table,
+    raw_rows_to_parquet_table,
     table_to_rows,
     to_decimal,
 )
@@ -89,7 +89,7 @@ from openbars.storage.schema import (
     DEFAULT_POLICY_VERSION,
     INSTRUMENTS_SCHEMA,
     METADATA_VERSION_KEY,
-    RAW_BARS_SCHEMA,
+    RAW_BARS_PARQUET_SCHEMA,
     RAW_KEY_SQL,
     RAW_LINEAGE_COLUMNS,
     SCHEMA_VERSION,
@@ -191,7 +191,7 @@ RAW_LAYER = LayerSpec(
     "raw",
     "raw_bars",
     "raw",
-    RAW_BARS_SCHEMA,
+    RAW_BARS_PARQUET_SCHEMA,  # RAW_BARS_SCHEMA + the optional JSON ``extra`` column (Parquet only, #94)
     RAW_KEY_SQL,
     RAW_LINEAGE_COLUMNS,
     ("provider", "market", "interval"),
@@ -304,7 +304,13 @@ class _PartitionedTable:
 
     def _conform(self, table: pa.Table) -> pa.Table:
         schema = self.spec.schema
-        columns = [table.column(f.name).cast(f.type) for f in schema]
+        # a nullable column missing from older files (e.g. raw ``extra``) reads as all-null
+        columns = [
+            pa.nulls(table.num_rows, f.type)
+            if f.nullable and f.name not in table.column_names
+            else table.column(f.name).cast(f.type)
+            for f in schema
+        ]
         return pa.Table.from_arrays(columns, schema=schema)
 
     # -- writes --
@@ -358,7 +364,11 @@ class _PartitionedTable:
             for a, b in zip(key_exprs(spec.key_sql, "i"), key_exprs(spec.key_sql, "e"))
         )
         content = [f.name for f in spec.schema if f.name not in spec.lineage]
-        differs = " OR ".join(f"i.{qident(c)} IS DISTINCT FROM e.{qident(c)}" for c in content)
+        present = {n for p in existing_files for n in pq.read_schema(p).names}
+        # a column no existing file has (older files) compares as NULL
+        differs = " OR ".join(
+            f"i.{qident(c)} IS DISTINCT FROM {'e.' + qident(c) if c in present else 'NULL'}" for c in content
+        )
         sql = (
             f"WITH e AS (SELECT *, TRUE AS _hit FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)')})) "
             f"SELECT i._idx FROM incoming i LEFT JOIN e ON {on} WHERE e._hit IS NULL OR ({differs})"
@@ -441,7 +451,7 @@ class ParquetRawStore:
     def append_rows(self, rows: Sequence[RawBarRow], *, validate: bool = True) -> int:
         if validate:
             check_rows(rows, "raw")
-        return self._table.upsert_table_rows(rows, raw_rows_to_table)
+        return self._table.upsert_table_rows(rows, raw_rows_to_parquet_table)
 
     def scan_table(
         self,
