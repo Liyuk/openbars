@@ -14,7 +14,7 @@ from openbars.core.errors import (
     QuotaExhausted,
     provider_error_diagnostic,
 )
-from openbars.core.models import Market
+from openbars.core.models import Interval, Market
 from openbars.orchestrator.finalize import CanonicalSink
 from openbars.orchestrator.jobs import WHOLE_MARKET, Checkpoint, Job
 from openbars.providers.adapter import NullQuotaGate
@@ -95,6 +95,8 @@ class LocalNode:
         clock: Callable[[], datetime] | None = None,
         redact: Callable[[str], str] | None = None,
         max_pages: int = MAX_PAGES,
+        hourly_alignment: str = "session_open",
+        include_extended_hours: bool = False,
     ) -> None:
         self.providers = dict(providers)
         self.store = store
@@ -105,6 +107,8 @@ class LocalNode:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._redact = redact or (lambda text: text)
         self.max_pages = max_pages
+        self.hourly_alignment = hourly_alignment
+        self.include_extended_hours = include_extended_hours
 
     def markets(self) -> set[Market]:
         return {cap.market for p in self.providers.values() for cap in p.capabilities()}
@@ -181,6 +185,8 @@ class LocalNode:
                 window=job.window,
                 cursor=cursor,
                 feed=feed,
+                hourly_alignment=self.hourly_alignment if job.market is Market.US and job.interval is Interval.H1 else None,
+                include_extended_hours=self.include_extended_hours if job.market is Market.US and job.interval is Interval.H1 else False,
             )
             fetch_id = f"{job.job_id}-{uuid.uuid4().hex[:12]}"
             self.store.start_fetch(

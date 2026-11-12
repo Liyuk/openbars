@@ -516,3 +516,18 @@ def test_kill_9_mid_run_resumes_without_duplicates_or_losses(tmp_path):
             assert counts[k] == 1
     assert sum(1 for c in counts.values() if c == 2) <= 1  # one worker thread => at most one in flight
     assert side.raw_count() == N_JOBS  # replays never duplicate raw rows
+
+
+def test_hourly_runner_passes_configured_options_after_lease(tmp_path, clock):
+    fake = FakeProvider(interval=Interval.H1)
+    store = SqliteStateStore(tmp_path / "state.db")
+    node = LocalNode({fake.id: fake}, store=store, raw=MemoryRawStore(), clock=clock,
+                     hourly_alignment="clock_hour", include_extended_hours=True)
+    runner = LocalOrchestrator(store, node, clock=clock, sleep=clock.sleep)
+    window = DateRange(DAY, DAY)
+    j = Job(make_job_id(JobKind.BACKFILL, fake.id, Market.US, Interval.H1, ("TEST1",), window),
+            JobKind.BACKFILL, fake.id, Market.US, Interval.H1, ("TEST1",), window)
+    assert runner.submit([j]) == 1
+    assert runner.run().done == 1
+    assert fake.requests[0].hourly_alignment == "clock_hour"
+    assert fake.requests[0].include_extended_hours is True

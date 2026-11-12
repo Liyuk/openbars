@@ -407,3 +407,25 @@ providers:
     assert code == 2
     assert "storage.postgres.dsn is required" in captured.err
     assert "postgresql://" not in captured.out + captured.err
+
+
+def test_sparse_hourly_session_is_not_planned_after_run(tmp_path, capsys):
+    from dataclasses import replace
+    from openbars.calendars import xnys
+
+    class SparseHourly(FakeProvider):
+        def bar(self, symbol, day, fetch_id):
+            return replace(super().bar(symbol, day, fetch_id), interval=Interval.H1,
+                           ts_start=xnys.hourly_slots(day)[0].ts_start)
+
+    provider = SparseHourly("massive", interval=Interval.H1)
+    settings = config(tmp_path, intervals="[1h]", extra_universe="[TEST1]", start="2026-03-09")
+    kw = dict(provider_factory=lambda settings, gate: {"massive": provider},
+              clock=lambda: NOW, env={"TEST_API_KEY": SECRET})
+    assert main(["--config", settings, "plan"], **kw) == 0
+    assert "plan: 1 jobs" in capsys.readouterr().out
+    assert main(["--config", settings, "run"], **kw) == 0
+    assert "done 1" in capsys.readouterr().out
+    assert len(provider.requests) == 1
+    assert main(["--config", settings, "plan"], **kw) == 0
+    assert "plan: 0 jobs" in capsys.readouterr().out
