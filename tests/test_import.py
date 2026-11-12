@@ -12,6 +12,7 @@ MODULES = [
     "openbars.core.schema",
     "openbars.calendars",
     "openbars.calendars.xnys",
+    "openbars.calendars.crypto",
     "openbars.config.schema",
     "openbars.config.loader",
     "openbars.config.display",

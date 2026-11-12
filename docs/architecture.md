@@ -155,7 +155,7 @@ Bar
 - **缺公司行动时的 RAW / 派生口径**：没有任何公司行动行 ≠ 这只股票从未拆股，所以对**没有任何公司行动行**的 instrument，派生非落库口径（`RAW`、从落库 `SPLIT` 派生 `SPLIT_DIVIDEND` / `ALL`，或从落库 `RAW` 派生 `SPLIT` 等）**绝不把落库价格改标签**：默认抛 `AdjustmentError`（`reason_code="missing_corporate_actions"`）；显式 `on_missing_actions="flag"` 时改为原样返回落库口径的 bar（`adjustment` 仍是 `split`，不声称是 RAW）并打 `QualityFlag.ADJUSTMENT_UNVERIFIED`（`quality_status` 不变，仍以 flags 为准）。instrument 有公司行动行但某 bar 之后没有拆股 = 已核对过，scale = 1，`RAW` 照常有效。`SPLIT` + `as_of` 且该 instrument 没有任何公司行动行时，价格仍是落库的 `SPLIT`（不改标签、不报错），但 as-of 声称无法核实，打上 `ADJUSTMENT_UNVERIFIED`。默认 `SPLIT` 读（无 `as_of`、快路径）不受影响。
 - **读取路径的 STALE 标记**：`DuckDbBarReader.bars` 在 instrument 有拆股行时对落库 bar 运行 `find_stale_after_split` 的逐 bar 版本（`stale_bar_indexes`），把 `QualityFlag.STALE` OR 到“抓取早于之后某次拆股”的 bar 上（只标记，不重抓、不调 API；派生口径的行保持同样的标记）。
 - **拆股后旧历史检测**（`normalize.actions.find_stale_after_split`，纯函数）：落库 bar 的 `session_date` 早于某次拆股 `ex_date`，且抓取时间（`generated_at` / `ingested_at`）也早于该 `ex_date`，则该段未经此次拆股复权，需在新价格基准下重抓；返回按（instrument, 拆股）聚合的区间。`raw` bar 不会过期；没有抓取时间的 bar 默认按过期报告（`treat_unknown_as_stale=False` 可关闭）。
-- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1
+- `TradingCalendar`（Protocol）：`sessions(start, end)`、`is_session(d)`、`session_bounds(d) -> [(open_utc, close_utc), …]`（支持午休、半日市；加密为 24/7 UTC）。实现见 §3.4.1、§3.4.2
 
 #### 3.4.1 XNYS 日历（`openbars.calendars.xnys`）
 
@@ -167,6 +167,17 @@ Bar
 - `latest_completed_session(now, wait_minutes=30) -> date | None`：`now` 必须带时区；会话收盘后至少等待 `wait_minutes` 分钟才算完成（在 America/New_York 比较）；向前最多找约 14 天；`wait_minutes < 0` 抛错。
 - 范围策略：缓存默认 `XNYS` 日历；请求范围超出其首/末会话时，构造起止各扩一天的有界日历（带缓存）。
 - `is_non_session_date(day)`：周末恒为非交易日；节假日只在默认日历范围内判定（约 2006 年起），范围之外的工作日**不**当作非交易日，避免拒收更早的长历史。`reject_non_session_bars(bars, *, session_date_attr="session_date")` 是纯函数，返回 `accepted` 与 `rejected`（理由 `"non_session_date"`）。
+
+#### 3.4.2 加密市场日历（`openbars.calendars.crypto`）
+
+- `CryptoCalendar` 实现 `TradingCalendar` 协议，经入口点 `openbars.calendars` 的 `crypto` 注册；`market = Market.CRYPTO`，`timezone = "UTC"`。纯标准库实现，不依赖 `exchange_calendars`。
+- **24/7**：每个 UTC 日历日都是会话，无周末、无节假日、无午休。`sessions(start, end)` 返回闭区间内的每一天，`end < start` 抛 `ValueError`；`is_session(day)` 恒为 `True`。
+- **切日口径**：日线 `session_date` = 该 bar 的 **UTC 日期**；`ts_start` = 当日 `00:00:00 UTC`。按交易所本地时区切日的源（例如以 UTC+8 午夜为日界）不能直接当作规范日线，需先换算到 UTC 00:00 口径（从更细粒度 bar 重新聚合，或改用按 UTC 切日的接口）。
+- `session_bounds(day)` 返回恰好一段 UTC 半开区间 `[00:00:00 UTC, 次日 00:00:00 UTC)`；相邻两日首尾相接（第 N 日 `closes_at` == 第 N+1 日 `opens_at`），无重叠、无空隙；收盘瞬时属于下一会话。`closes_at > opens_at` 恒成立，满足 `TradingSession` 的约束。
+- `trading_session(day)` / `trading_sessions(start, end)` 返回 `TradingSession`，开收盘瞬时保持 UTC（不换到其他时区）。
+- `session_index(as_of, *, epoch=date(2000,1,1))`：不晚于 `as_of` 的最近一个会话的从 0 起序号，即 `(as_of - epoch).days`；`as_of < epoch` 返回 0。
+- `latest_completed_session(now, wait_minutes=30) -> date | None`：`now` 必须带时区；**在 UTC 比较**，`now >= closes_at + wait_minutes` 才算完成（即次日 00:00 UTC 之后再等 N 分钟）；向前最多找约 14 天；`wait_minutes < 0` 抛错。
+- `is_non_session_date(day)` 恒为 `False`；`reject_non_session_bars` 与 XNYS 版本签名、返回类型（`BarFilterResult` / `BarRejection`）一致，但不会拒收任何 bar（含周末日期）。
 
 ### 3.5 Provider 能力声明
 
@@ -307,7 +318,7 @@ A 股/港股的部分源（东财等）对海外 IP 不可用，Binance 主站�
 | 议题 | 约定 |
 | --- | --- |
 | 时间戳 | 一律存 UTC 的 **bar 开始时刻** `ts_start`；另存交易所时区的 `session_date`。适配层负责把“收盘时刻标识”的源转换过来。 |
-| 日线切分 | 股票：交易所本地交易日，只含常规时段（盘前盘后不并入日线）。加密：**UTC 00:00 切日**。 |
+| 日线切分 | 股票：交易所本地交易日，只含常规时段（盘前盘后不并入日线）。加密：**UTC 00:00 切日**（见 §3.4.2）。 |
 | 小时线（预留） | 美股默认按开盘对齐（9:30 起，最后一根 15:30–16:00），整点对齐可选；A 股每天 4 根（午休不出 bar）；港股含午休，收市竞价口径待定。 |
 | 复权 | v0.1 默认使用兼容 profile `research-daily-v2`：只拆股复权、按源交付落库（见 §11.2）。后续可选 profile：**落库只存不复权价 + 公司行动表**；复权在查询时按 `adjustment` 参数派生。前复权（qfq）不落库，因为每次除权都会改写整段历史。默认读取口径 `split`。 |
 | 拆股时点冲突 | 以公司行动表为准，多源投票；不一致区段标 `divergent` 并记审计。 |
@@ -455,7 +466,7 @@ openbars 的数据层**以一套已在生产运行的上游内部实现（下称
 | `providers.us.*` | Alpaca SIP/IEX 日线（多代码批量、免费档最近时段处理）、Massive grouped daily / 单代码区间 / 代码清单 / 退市清单 / 代码类型、yfinance 批量（`auto_adjust=False`）、公司行动适配器；Twelve Data、Alpha Vantage 作为可选兜底源 | 直接搬，改导入与配置注入 |
 | `quota` | 进程内固定节奏限速、**持久化令牌闸门**（按 provider 行锁预约下一个请求时刻）、可选日额度（UTC 日 / 滚动 24h）与 `retry_at`、各源请求上限常量 | 改接口后搬：常量变为 `QuotaPolicy` 默认值；新增 SQLite 实现（upstream 只有 PG 行锁） |
 | `orchestrator` | Job 租约与重试、优先级策略、过期租约回收、调度单例锁、每日同步计划与批次切分、历史回补窗口与“覆盖即废弃”规则、每会话重建调度 | 改接口后搬：脱离 upstream ORM 与 worker 进程模型 |
-| `core.calendar` / `calendars` | XNYS 交易日历（复用 `exchange_calendars`，见 §3.4.1）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬（已完成） |
+| `core.calendar` / `calendars` | XNYS 交易日历（复用 `exchange_calendars`，见 §3.4.1）、加密 24/7 UTC 日历（见 §3.4.2）、收盘后等待 N 分钟才算完成的会话、非交易日拒收 | 直接搬（已完成） |
 | `normalize.instruments` | 点时（point-in-time）身份证据与解析、代码别名有效期、退市目录、身份对账、代码类型 → 证券类型映射、ETF 作为独立证券类型 | 改接口后搬 |
 | `normalize.adjust` / `normalize.actions` | 公司行动“观测追加 + 规范修订”模型、拆股后旧历史重抓检测、`adjustment_as_of` 一致性检查（落库口径只拆股复权，不含分红；分红口径仅查询时派生） | 改接口后搬（已完成：投票合并、检测、查询时派生，见 §3.4） |
 | `reconcile` | **research-daily-v2 选数**：按源优先级、兼容性闸门、兜底源能力集、价格 0.5% / 成交量 5% 容差、独立源佐证（quorum 2）、质量标记、人工/规则覆盖、确定性数据修复 R1–R4（预览/应用、熔断上限、可撤销审计） | 核心逻辑直接搬，持久化改接口 |
@@ -516,7 +527,7 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 ```text
 src/openbars/
   core/          models.py · ohlcv.py · series.py · schema.py · errors.py · calendar.py
-  calendars/     xnys.py（后续：crypto · cn · hk）
+  calendars/     xnys.py · crypto.py（后续：cn · hk）
   config/        schema.py · loader.py
   cli/           main.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
