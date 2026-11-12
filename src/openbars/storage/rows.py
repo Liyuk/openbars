@@ -416,6 +416,37 @@ def raw_ingested_at(bar: RawBar) -> datetime | None:
     return None
 
 
+ID_KIND_AUTO = "auto"
+ID_KIND_UPSTREAM = "upstream"
+ID_KINDS = (ID_KIND_AUTO, ID_KIND_UPSTREAM)
+_UPSTREAM_ID = re.compile(r"[0-9]+")
+
+
+def check_id_kind(id_kind: str) -> str:
+    """``auto`` (default: ids or tickers, resolved through openbars' mappings) or ``upstream``."""
+    if id_kind not in ID_KINDS:
+        raise ValueError(f"id_kind must be one of {', '.join(ID_KINDS)}, got {id_kind!r}")
+    return id_kind
+
+
+def upstream_instrument_ids(items: Iterable[Any]) -> list[str]:
+    """``id_kind="upstream"`` (#155): upstream integer ids, matched verbatim to ``instrument_id``.
+
+    Each item must be a non-negative integer or its decimal string (``"42"``, ASCII digits only).
+    No symbol mapping, instrument master or alias lookup is involved; identity (aliases, ticker
+    reuse) is the upstream's business. ``"042"`` stays ``"042"`` (verbatim, never renumbered).
+    """
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, bool):
+            raise ValueError("upstream ids must be integers or digit strings")
+        text = str(item).strip() if isinstance(item, (int, str)) else None
+        if text is None or not _UPSTREAM_ID.fullmatch(text):
+            raise ValueError(f"upstream id must be a digit string, got {item!r}")
+        out.append(text)
+    return out
+
+
 def available_by_utc(value: datetime) -> datetime:
     """Validate a point-in-time ``available_by`` (#154): tz-aware, returned in UTC."""
     if not isinstance(value, datetime):

@@ -71,8 +71,12 @@ from openbars.storage.errors import SchemaVersionError, StorageError
 from openbars.storage.rows import (
     CanonicalBarRow,
     InvalidBarError,
+    ID_KIND_AUTO,
+    ID_KIND_UPSTREAM,
     RawBarRow,
     available_by_utc,
+    check_id_kind,
+    upstream_instrument_ids,
     canonical_rows_to_table,
     check_rows,
     raw_rows_from_batch,
@@ -1033,6 +1037,12 @@ class DuckDbBarReader:
     provider-specific mapping it has (``binance`` ``TESTUSDT``, ``coinbase`` ``TEST-USDT``);
     the same text on two venues returns both venue instruments (never merged).
 
+    **Upstream ids (#155).** ``id_kind="upstream"`` takes upstream integer ids (``"42"`` or ``42``)
+    and matches them to ``instrument_id`` verbatim over the whole window: no symbol mapping, no
+    instrument-master lookup, nothing has to be registered. Use it for canonical rows imported
+    from an upstream whose own aliases decide identity (a reused ticker never merges two ids).
+    The default ``id_kind="auto"`` keeps the id-or-ticker rules above.
+
     **Policy.** ``policy_version`` defaults to ``"auto"``: ``market=CRYPTO`` or ``crypto:`` ids
     read ``crypto-daily-v1``, ``market=CN`` or ``cn:`` ids ``cn-daily-v1``, everything else
     ``research-daily-v2`` (without ``market``, each requested id gets its own). An explicit
@@ -1118,8 +1128,10 @@ class DuckDbBarReader:
         on_missing_factors: str | None = None,
         factor_source: str | None = None,
         available_by: datetime | None = None,
+        id_kind: str = ID_KIND_AUTO,
     ) -> pa.Table:
         mode = None if adjustment is None else Adjustment(adjustment)
+        upstream = check_id_kind(id_kind) == ID_KIND_UPSTREAM
         if available_by is not None:
             available_by = available_by_utc(available_by)
         stored = Adjustment(stored_adjustment)
@@ -1130,7 +1142,10 @@ class DuckDbBarReader:
 
         auto = policy_version == AUTO_POLICY_VERSION
         segments: list[tuple[str, date | None, date | None]] = []
-        if symbols_or_ids:
+        if symbols_or_ids and upstream:
+            # #155: upstream integer ids match ``instrument_id`` verbatim; no mapping lookup
+            segments = [(iid, None, None) for iid in dict.fromkeys(upstream_instrument_ids(symbols_or_ids))]
+        elif symbols_or_ids:
             segments = self._segments(symbols_or_ids, start, end, market)
         # auto: crypto market / crypto ids -> crypto-daily-v1, else research-daily-v2. Without a
         # market, each requested id gets its own policy (a mixed US + crypto read works).
