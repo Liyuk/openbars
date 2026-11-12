@@ -297,7 +297,7 @@ def _select_research_bars(
         )
 
     # No primary: first compatible priority source, else the fill sources by trust.
-    reference = BarSeriesCatalog.resolve(policy.primary)
+    reference = BarSeriesCatalog.resolve(policy.primary, interval=group[0].resolved_series.interval)
     fill_ids = {f.identity for f in policy.fill_sources}
     fills = [b for b in bars if b.identity in fill_ids]
     for secondary_id in policy.secondary_sources:
