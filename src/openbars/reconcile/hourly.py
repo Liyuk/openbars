@@ -12,6 +12,7 @@ from openbars.reconcile.overrides import SelectionOverride
 from openbars.reconcile.policy import DEFAULT_POLICY
 from openbars.reconcile.projection import SourceObservation, _difference_pct, project_canonical_bars
 from openbars.storage.rows import CanonicalBarRow, hourly_adjustment, raw_ingested_at
+from openbars.orchestrator.finalize import _freshness_for_raw
 
 # Reversible default: retain the daily policy version; interval is part of the storage key.
 HOURLY_POLICY = replace(
@@ -36,10 +37,12 @@ def reconcile_hourly(
         obs = SourceObservation(bar.instrument_id or None, bar.symbol_as_returned, bar.session_date,
                                 bar.open, bar.high, bar.low, bar.close, bar.volume,
                                 bar.provider, feed, adjustment, revision=bar.revision, series=series,
-                                available_at=raw_ingested_at(bar))
+                                available_at=raw_ingested_at(bar), freshness=_freshness_for_raw(bar))
         groups[(obs.key, bar.ts_start)].append((obs, bar))
     result = []
     for (key, ts), group in sorted(groups.items()):
+        if any(obs.freshness == "final" for obs, _ in group):
+            group = [(obs, bar) for obs, bar in group if obs.freshness == "final"]
         override = (overrides or {}).get((key, ts))
         daily_override = {(key, group[0][0].session_date): override} if override else None
         selections = project_canonical_bars(

@@ -49,6 +49,49 @@ from openbars.storage.rows import hourly_adjustment, raw_ingested_at
 CanonicalWriter = Callable[[Sequence[CanonicalDailyRow], Market], object]
 
 
+def _freshness_wins(rows: Sequence[Any], canonical: Any, market: Market) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Apply final-over-provisional at the shared sink boundary and describe every decision."""
+    if not rows:
+        return [], []
+    if canonical is None:
+        return list(rows), []
+    intervals = {Interval(getattr(r, "interval", Interval.D1)) for r in rows}
+    if len(intervals) != 1:
+        raise ValueError("a canonical sink batch must contain one interval")
+    interval = next(iter(intervals))
+    events: list[dict[str, Any]] = []
+    output: dict[tuple[Any, ...], Any] = {}
+    grouped: dict[tuple[Any, ...], Any] = {}
+    for row in rows:
+        moment = row.ts_start if interval is Interval.H1 else row.session_date
+        grouped[(row.instrument_id, moment, row.policy_version)] = row
+    for (iid, moment, policy), incoming in grouped.items():
+        day = incoming.session_date
+        current = canonical.scan_rows(
+            [iid], interval, DateRange(day, day), market=market, policy_version=policy,
+        )
+        previous = next((r for r in current if (r.ts_start if interval is Interval.H1 else r.session_date) == moment), None)
+        key = (iid, moment, policy)
+        if previous is not None and previous.freshness == "final" and incoming.freshness == "provisional":
+            events.append({"key": key, "reason": "rejected_provisional_over_final", "revision": previous.revision,
+                           "ohlcv_differs": any(getattr(previous, c) != getattr(incoming, c) for c in ("open", "high", "low", "close", "volume"))})
+            continue
+        if previous is not None:
+            incoming = replace(incoming, revision=max(incoming.revision, previous.revision + 1))
+            differs = any(getattr(previous, c) != getattr(incoming, c) for c in ("open", "high", "low", "close", "volume"))
+            reason = "provisional_to_final" if previous.freshness == "provisional" and incoming.freshness == "final" else "same_tier_rewrite"
+            events.append({"key": key, "reason": reason, "revision": incoming.revision,
+                           "ohlcv_differs": differs})
+        output[key] = incoming
+    return list(output.values()), events
+
+
+def _record_audit(sink: Any, events: list[dict[str, Any]], market: Market, interval: Interval) -> None:
+    if events and sink.audit_store is not None:
+        sink.audit_store.append_canonical_audit(events, market=market, interval=interval)
+    sink.audit_records.extend(events)
+
+
 class CanonicalSink(Protocol):
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None: ...
 
@@ -151,6 +194,8 @@ class ReconcilingSink:
     raw: RawStore | None = None
     other_providers: Sequence[str] = ()
     canonical: Any = None
+    audit_records: list[dict[str, Any]] = field(default_factory=list)
+    audit_store: Any = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is Interval.H1 and Market(job.market) is Market.US:
@@ -193,7 +238,10 @@ class ReconcilingSink:
             rows = reconcile_hourly(b for b in normalized
                                     if (b.instrument_id or b.symbol_as_returned, b.ts_start) in touched)
             if rows:
-                self.writer(rows, Market.US)
+                rows, events = _freshness_wins(rows, self.canonical, Market.US)
+                if rows:
+                    self.writer(rows, Market.US)
+                _record_audit(self, events, Market.US, Interval.H1)
             return
         if Interval(job.interval) is not Interval.D1:
             return
@@ -209,15 +257,48 @@ class ReconcilingSink:
         window = DateRange(min(days), max(days))
         extra = self._others(job, window)
         rows: list[CanonicalDailyRow] = []
+        existing_by_key = {}
+        rejected_events: list[dict[str, Any]] = []
+        if self.canonical is not None:
+            ids = sorted({key for key in by_key if key.startswith("us:")})
+            if ids:
+                existing = self.canonical.scan_rows(
+                    ids, Interval.D1, window, market=Market(job.market),
+                    policy_version=self.reconciler.policy.policy_version,
+                )
+                existing_by_key = {(r.instrument_id, r.session_date): r for r in existing}
         for key, observations in sorted(by_key.items()):
             observations = observations + extra.get(key, [])
+            # Freshness is an independent arbitration tier: once any final observation
+            # exists for a cell, provisional observations cannot win its source policy.
+            final_days = {o.session_date for o in observations if o.freshness == "final"}
+            observations = [
+                o for o in observations
+                if o.session_date not in final_days or o.freshness == "final"
+            ]
             first = min(o.session_date for o in observations)
             last = max(o.session_date for o in observations)
             first, last = max(first, window.start), min(last, window.end)
             result = self.reconciler.reconcile_range(key, first, last, observations)
-            rows.extend(result.canonical)
+            for candidate in result.canonical:
+                previous = existing_by_key.get((candidate.instrument_id, candidate.session_date))
+                if previous is not None and previous.freshness == "final" and candidate.freshness == "provisional":
+                    rejected_events.append({
+                        "key": (candidate.instrument_id, candidate.session_date, candidate.policy_version),
+                        "reason": "rejected_provisional_over_final", "revision": previous.revision,
+                        "ohlcv_differs": any(getattr(previous, c) != getattr(candidate, c)
+                                             for c in ("open", "high", "low", "close", "volume")),
+                    })
+                    continue
+                if previous is not None:
+                    candidate = replace(candidate, revision=max(candidate.revision, previous.revision + 1))
+                rows.append(candidate)
         if rows:
-            self.writer(rows, Market(job.market))
+            rows, events = _freshness_wins(rows, self.canonical, Market(job.market))
+            if rows:
+                self.writer(rows, Market(job.market))
+            rejected_events.extend(events)
+        _record_audit(self, rejected_events, Market(job.market), Interval.D1)
 
     def _others(self, job: Job, window: DateRange) -> dict[str, list[SourceObservation]]:
         out: dict[str, list[SourceObservation]] = defaultdict(list)
@@ -250,6 +331,9 @@ class CryptoReconcilingSink:
     writer: CanonicalWriter
     raw: RawStore | None = None
     other_providers: Sequence[str] = ()
+    canonical: Any = None
+    audit_records: list[dict[str, Any]] = field(default_factory=list)
+    audit_store: Any = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         from openbars.reconcile.crypto import reconcile_crypto
@@ -268,12 +352,18 @@ class CryptoReconcilingSink:
         rows: list[CanonicalDailyRow] = []
         for key, observations in sorted(by_key.items()):
             observations = observations + extra.get(key, [])
+            final_days = {o.session_date for o in observations if o.freshness == "final"}
+            observations = [o for o in observations
+                            if o.session_date not in final_days or o.freshness == "final"]
             first = max(min(o.session_date for o in observations), window.start)
             last = min(max(o.session_date for o in observations), window.end)
             result = reconcile_crypto(key, first, last, observations)
             rows.extend(result.result.canonical)
         if rows:
-            self.writer(rows, Market.CRYPTO)
+            rows, events = _freshness_wins(rows, self.canonical, Market.CRYPTO)
+            if rows:
+                self.writer(rows, Market.CRYPTO)
+            _record_audit(self, events, Market.CRYPTO, Interval.D1)
 
     def _observations(self, bars: Sequence[RawBar]) -> list[SourceObservation]:
         out: list[SourceObservation] = []
@@ -342,6 +432,9 @@ class CnCanonicalSink:
     factor_store: Any = None
     factor_start: date | None = None
     factor_errors: list[tuple[str, str]] = field(default_factory=list)
+    canonical: Any = None
+    audit_records: list[dict[str, Any]] = field(default_factory=list)
+    audit_store: Any = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is not Interval.D1 or Market(job.market) is not Market.CN:
@@ -358,7 +451,10 @@ class CnCanonicalSink:
             flags = flags_for_cn_series(group, listed_on=self._listed_on(iid))
             rows += [self._row(iid, b, f) for b, f in zip(group, flags, strict=True) if not is_suspended(b)]
         if rows:
-            self.writer(stamp_available_at(rows))
+            rows, events = _freshness_wins(rows, self.canonical, Market.CN)
+            if rows:
+                self.writer(stamp_available_at(rows))
+            _record_audit(self, events, Market.CN, Interval.D1)
         self._ingest_factors(job, by_id)
 
     def _resolve(self, job: Job, bars: Sequence[RawBar]) -> dict[str, str]:
@@ -437,6 +533,9 @@ class HkCanonicalSink:
     writer: CanonicalWriter
     raw: RawStore | None = None
     other_providers: Sequence[str] = ()
+    canonical: Any = None
+    audit_records: list[dict[str, Any]] = field(default_factory=list)
+    audit_store: Any = None
 
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         from openbars.reconcile.hk import reconcile_hk
@@ -456,12 +555,18 @@ class HkCanonicalSink:
         rows: list[CanonicalDailyRow] = []
         for key, observations in sorted(by_key.items()):
             observations = observations + extra.get(key, [])
+            final_days = {o.session_date for o in observations if o.freshness == "final"}
+            observations = [o for o in observations
+                            if o.session_date not in final_days or o.freshness == "final"]
             first = max(min(o.session_date for o in observations), window.start)
             last = min(max(o.session_date for o in observations), window.end)
             result = reconcile_hk(key, first, last, observations)
             rows.extend(result.result.canonical)
         if rows:
-            self.writer(rows, Market.HK)
+            rows, events = _freshness_wins(rows, self.canonical, Market.HK)
+            if rows:
+                self.writer(rows, Market.HK)
+            _record_audit(self, events, Market.HK, Interval.D1)
 
     def _resolve(self, job: Job, bars: Sequence[RawBar]) -> dict[str, str]:
         out: dict[str, str] = {}
