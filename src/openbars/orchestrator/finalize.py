@@ -99,9 +99,11 @@ class ReconcilingSink:
     writer: CanonicalWriter
     raw: RawStore | None = None
     other_providers: Sequence[str] = ()
+    canonical: Any = None
+
     def after_fetch(self, job: Job, bars: Sequence[RawBar]) -> None:
         if Interval(job.interval) is Interval.H1 and Market(job.market) is Market.US:
-            from openbars.reconcile.hourly import reconcile_hourly
+            from openbars.reconcile.hourly import HOURLY_POLICY, reconcile_hourly
 
             if not bars:
                 return
@@ -123,6 +125,18 @@ class ReconcilingSink:
                 if not instrument_id and len(candidates) == 1:
                     instrument_id = next(iter(candidates))
                 normalized.append(replace(bar, instrument_id=instrument_id))
+            symbols = {b.symbol_as_returned for b in normalized[:len(bars)]
+                       if b.instrument_id and b.instrument_id != b.symbol_as_returned}
+            if self.canonical is not None and symbols:
+                existing = self.canonical.scan_rows(
+                    sorted(symbols), Interval.H1, window, market=Market.US,
+                    policy_version=HOURLY_POLICY.policy_version,
+                )
+                symbol_hours = {(row.instrument_id, row.ts_start) for row in existing}
+                # An hour first persisted under its symbol keeps that identity until rebuilt.
+                normalized = [replace(b, instrument_id=None)
+                              if (b.symbol_as_returned, b.ts_start) in symbol_hours else b
+                              for b in normalized]
             touched = {(b.instrument_id or b.symbol_as_returned, b.ts_start)
                        for b in normalized[:len(bars)]}
             rows = reconcile_hourly(b for b in normalized
