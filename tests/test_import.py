@@ -15,6 +15,7 @@ MODULES = [
     "openbars.calendars.crypto",
     "openbars.calendars.cn",
     "openbars.calendars.hk",
+    "openbars.calendars.hk_closures",
     "openbars.config.schema",
     "openbars.config.loader",
     "openbars.config.display",

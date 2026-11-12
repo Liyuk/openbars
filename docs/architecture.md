@@ -243,7 +243,8 @@ Bar
 - **常规时段**（库自 2011-03-07 起记录）：连续竞价 09:30–12:00、13:00–16:00（16:00 为收市竞价结束）。`session_bounds(day)` 在常规交易日返回**两段** UTC `(open, close)`。
 - **半日市**：圣诞节前夕、新年前夕、农历新年前夕，以及库列出的其他提早收市日，只有上午一段，收市 12:00 HKT，无午休。`TradingSession` 的 `opens_at` / `closes_at` 仍是当日首开与尾收（Asia/Hong_Kong，带时区）。
 - `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（按当日实际收市时间再等待 N 分钟）。模块函数以 `hk_` 前缀从 `openbars.calendars` 导出。
-- **覆盖范围**：库内默认会话区间有上下限（`exchange-calendars` 4.13.x 约为 2006-11-13 至 2027-11-11，以 `coverage()` 为准）。超出时抛 `ValueError`，**不要手写假期或未来台风/黑雨休市**。历史上库已收录的临时休市（部分台风/黑雨日出现在 `adhoc_holidays`）按库数据使用；未来天气休市需升级依赖或后续接入港交所公告，不在本模块预测。
+- **覆盖范围**：库内默认会话区间有上下限（`exchange-calendars` 4.13.x 约为 2006-11-13 至 2027-11-11，以 `coverage()` 为准）。超出时抛 `ValueError`，**不要手写假期或未来台风/黑雨休市**。历史上库已收录的临时休市（部分台风/黑雨日出现在 `adhoc_holidays`）按库数据使用。
+- **临时休市登记**（#76，`openbars.calendars.hk_closures`）：本仓库**不随包发布**台风/黑雨日期表。用户可根据港交所公告，手动或半自动调用 `register_adhoc_closure` / `load_adhoc_closures` 登记一日，**必须**同时给出 `source` 与 `reference`（公告 URL、通告编号或标题）。半自动入口只接收已经解析好的记录，openbars **不抓取**港交所网站。覆盖范围之外可以留下记录，但 `is_session` 仍拒绝编造假期表。可选 `JsonAdhocClosureStore` 把登记写到用户自己的文件，进程默认是空的内存表。规划器与 yfinance / AKShare 适配器共用模块级 `is_session`，登记生效后会自动跳过该日。
 - **规划器尚未接入**：`Market.HK` 仍产生 `no_calendar` 并跳过，在没有 provider 时不会凭空生成作业。
 
 ### 3.5 Provider 能力声明
