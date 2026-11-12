@@ -435,7 +435,7 @@ def raw_rows_from_batch(
         extra: Mapping[str, Any] = bar.extra
         ts = _utc(bar.ts_start, "ts_start")
         leftovers = leftover_extra(extra) or {}
-        if bar.interval is Interval.H1 and bar.series is not None:
+        if bar.interval in (Interval.D1, Interval.H1) and bar.series is not None:
             leftovers["_bar_series"] = {
                 f.name: getattr(bar.series, f.name) for f in fields(BarSeriesIdentity)
             }
@@ -454,7 +454,7 @@ def raw_rows_from_batch(
                 volume=bar.volume,
                 fetch_id=bar.fetch_id or batch.fetch_id,
                 feed=bar.feed or "",
-                adjustment=(hourly_adjustment(bar) if bar.interval is Interval.H1 else extra.get("adjustment") or Adjustment.RAW.value),
+                adjustment=(hourly_adjustment(bar) if bar.interval in (Interval.D1, Interval.H1) else extra.get("adjustment") or Adjustment.RAW.value),
                 instrument_id=(bar.instrument_id if bar.interval is Interval.H1 else None) or extra.get("instrument_id"),
                 price_basis=extra.get("price_basis") or UNKNOWN,
                 adjustment_scope=extra.get("adjustment_scope") or UNKNOWN,
