@@ -32,3 +32,9 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# Roundtable Work: local install record (may contain machine paths) and runtime
+.roundtable/install.json
+.roundtable/tickets/
+.roundtable/state/
+.roundtable/memory/
