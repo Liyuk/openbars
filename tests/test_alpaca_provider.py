@@ -469,8 +469,10 @@ def test_quota_exhausted_mid_pagination_returns_partial():
 # -- capabilities / registry / helpers -----------------------------------------------------------
 def test_capabilities_and_quota_policy():
     p = AlpacaProvider(env={})
-    caps = {c.feed: c for c in p.capabilities()}
+    caps = {c.feed: c for c in p.capabilities() if c.interval is Interval.D1}
     assert set(caps) == {"alpaca:sip", "alpaca:iex"}
+    hourly = {c.feed for c in p.capabilities() if c.interval is Interval.H1}
+    assert hourly == {"alpaca:sip", "alpaca:iex"}
     sip = caps["alpaca:sip"]
     assert sip.market is Market.US and sip.interval is Interval.D1
     assert sip.history_start == date(2016, 1, 1)

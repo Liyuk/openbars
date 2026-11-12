@@ -78,6 +78,9 @@ providers:
   yfinance:
     enabled: true
     quota: { per_minute: 30 }
+  twelve_data:             # 只用于美股小时线（1h，常规时段）；免费档 8 次/分、800 次/UTC 日
+    enabled: false
+    api_key: ${TWELVE_DATA_API_KEY}
   alpha_vantage:
     enabled: false
     api_key: ${ALPHA_VANTAGE_API_KEY}
