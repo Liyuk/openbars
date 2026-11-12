@@ -28,7 +28,7 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 
 ### 路线
 
-美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线；小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md)、[docs/architecture.md](docs/architecture.md) 与 [docs/upstream-switch.md](docs/upstream-switch.md)（把既有研究序列切到 openbars）。
+美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线 → 本机只读界面（v0.5）；美股小时线顺延至 v0.6。小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md)、[docs/architecture.md](docs/architecture.md) 与 [docs/upstream-switch.md](docs/upstream-switch.md)（把既有研究序列切到 openbars）。
 
 ### 快速开始
 
@@ -44,6 +44,9 @@ uv run openbars plan                 # 预览任务与请求预算（不写入�
 uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
 uv run openbars status               # 任务状态、失败/死信、断点
 uv run openbars verify               # 覆盖率与多源一致性报告（只读）
+# 可选：安装 http 额外依赖后，在本机打开只读界面（默认仅绑定 127.0.0.1；非回环 --host 会被拒绝）
+# uv sync --extra http
+# uv run openbars serve              # 打开 http://127.0.0.1:8787
 # 可选：与外部 research-daily-v2 只读 API 做影子对账（符号列表与报告都放在仓库外）
 # uv run openbars shadow --symbols-file /path/to/symbols.txt \
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
@@ -54,6 +57,11 @@ uv run openbars verify               # 覆盖率与多源一致性报告（只�
 - 示例配置里 Alpaca 与 Massive 都是 `enabled: true` 的主源：`run` 在它们缺 key 时会报错并列出变量名（如 `MASSIVE_API_KEY`），请填上 key，或把不用的源改成 `enabled: false`。`plan` 只提示缺失，不会中止（但没有任何可用源、或选了无源支持的粒度时会报错）。
 - `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
 - 再次提醒：openbars 不分发任何数据，一切由你用自己的 key（BYOK）在本地抓取，请遵守各数据源的服务条款（详见下方声明）。
+
+#### 本机只读界面
+
+`openbars serve` 在本机打开覆盖看板、质量标记和 K 线页面（中英可切换），只绑定回环地址。界面是只读的：没有抓取或写入入口。K 线默认显示按规则对齐填充后的聚合数据（canonical），也可以切换到各个渠道的原始数据；原始数据中的缺日或缺字段会在图上标出。`/api/v1` 只给这些页面内部使用，本版不承诺稳定，请不要把它当成对外数据 API。
+
 - 数据写在 `storage.path`（默认 `./data/`，已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
 - 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
 - `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。内容：预期交易日（XNYS）× 标的的覆盖率、各来源（provider / feed / 复权）汇总、两源可比较时的 OHLC 与成交量一致率（默认容差价格 0.5%、成交量 5%，可由 `reconcile.tolerances` 调整；IEX 与 SIP 等不可比的序列记为 `not_comparable`，不计入分歧）、质量标记一致率（仅当有多个 projection 时，否则 `n/a`），并附“最近 N 个交易日”分段（`--recent N`）。`--start/--end` 限定窗口，`--json reports/verify.json` 把报告写到数据目录下。
@@ -94,7 +102,7 @@ openbars is a **local-first market data warehouse framework**, not yet another d
 2. **Schedule within free quotas**: a shared quota gate, retries, resumable checkpoints, historical backfill and daily increments.
 3. **Clean and reconcile**: instrument master (stable IDs + symbol validity ranges), trading calendars, parameterized price adjustment, gap detection, multi-source arbitration and quality flags, producing one **canonical** dataset with provenance and an audit trail.
 
-Default storage is Parquet + DuckDB; Postgres is optional. Read through the Python library, with an optional HTTP API.
+Default storage is Parquet + DuckDB; Postgres is optional. Read through the Python library, or open the local read-only UI with `openbars serve` (loopback only; `/api/v1` is for that UI and is not a stable public API in this version).
 
 ### Quick start
 
@@ -110,6 +118,9 @@ uv run openbars plan                 # preview jobs and request budget (writes n
 uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
 uv run openbars status               # job states, dead jobs, checkpoints
 uv run openbars verify               # coverage and cross-source agreement report (read-only)
+# Optional: install the http extra and open the local read-only UI (loopback only; a non-loopback --host is rejected)
+# uv sync --extra http
+# uv run openbars serve              # http://127.0.0.1:8787
 # Optional: shadow-compare against an external research-daily-v2 HTTP API (read-only).
 # Keep the symbol list and the report outside this repository.
 # uv run openbars shadow --symbols-file /path/to/symbols.txt \
@@ -121,6 +132,11 @@ uv run openbars verify               # coverage and cross-source agreement repor
 - The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
 - `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.
 - Reminder: openbars distributes no data; everything is fetched locally with your own keys (BYOK), and you must follow each provider's terms (see the disclaimer below).
+
+#### Local read-only UI
+
+`openbars serve` opens a coverage dashboard, quality-flag list, and K-line page (Chinese/English) on a loopback address only. The UI is read-only: it has no fetch or write actions. Charts default to the aggregated canonical series and can switch to each provider's raw bars; missing sessions and fields are marked on the chart. `/api/v1` exists only for this local UI and is not a stable public API in this version.
+
 - Data lands in `storage.path` (default `./data/`, git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
 - Non-daily intervals imply a large request budget and need an explicit `--accept-budget`.
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It shows coverage of expected XNYS sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory.
