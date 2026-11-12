@@ -248,6 +248,7 @@ class CorporateActionKind(str, Enum):
     DIVIDEND = "dividend"
     SPINOFF = "spinoff"
     SYMBOL_CHANGE = "symbol_change"
+    RIGHTS = "rights"  # 供股: recorded only, never applied to prices
 
 
 def _exact_decimal(value: object, name: str) -> Decimal | None:
@@ -284,9 +285,15 @@ class CorporateAction:
     source: str
     ratio: Decimal | None = None
     amount: Decimal | None = None
+    currency: str | None = None  # ISO 4217 of ``amount``; None = same currency as the bars
 
     def __post_init__(self) -> None:
         _set(self, "ratio", _exact_decimal(self.ratio, "ratio"))
         _set(self, "amount", _exact_decimal(self.amount, "amount"))
         if self.kind is CorporateActionKind.SPLIT and self.ratio is not None and self.ratio <= 0:
             raise ValueError(f"split ratio must be positive, got {self.ratio}")
+        if self.currency is not None:
+            cur = self.currency.strip() if isinstance(self.currency, str) else ""
+            if len(cur) != 3 or not cur.isalpha():
+                raise ValueError(f"currency must be a 3-letter code or None, got {self.currency!r}")
+            _set(self, "currency", cur.upper())

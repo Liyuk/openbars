@@ -49,6 +49,8 @@ MASSIVE_EOD_SPLIT = SourceIdentity("massive", "eod", "split")
 ALPACA_SIP_SPLIT = SourceIdentity("alpaca", "sip", "split")
 ALPACA_IEX_SPLIT = SourceIdentity("alpaca", "iex", "split")
 YFINANCE_YAHOO_SPLIT = SourceIdentity("yfinance", "yahoo", "split")
+# HK daily (auto_adjust=False). Not in KNOWN_SOURCES (that tuple is the US list).
+YFINANCE_YAHOO_RAW = SourceIdentity("yfinance", "yahoo", "raw")
 TWELVE_DATA_DAILY_SPLIT = SourceIdentity("twelve_data", "daily", "split")
 ALPHA_VANTAGE_DAILY_RAW = SourceIdentity("alpha_vantage", "daily", "raw")
 # Crypto spot (UTC-day klines). Deliberately NOT in KNOWN_SOURCES: that tuple is the US
@@ -61,6 +63,8 @@ BINANCE_ARCHIVE_RAW = SourceIdentity("binance", "archive", "raw")
 COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 # BaoStock A-share daily, unadjusted (adjustflag=3), CN regular session. Not US, not in KNOWN_SOURCES.
 BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
+# AKShare HK daily, unadjusted Eastmoney bars. Not US, not in KNOWN_SOURCES.
+AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -178,6 +182,21 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         session_semantics=SessionSemantics.REGULAR,
         volume_basis=VolumeBasis.AS_TRADED,
     ),
+    # Unadjusted HK daily (``Asia/Hong_Kong`` regular / half-day session), volume as traded.
+    (YFINANCE_YAHOO_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
+    (AKSHARE_EASTMONEY_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="HKD",
+    ),
     # Volume handling is provider-dependent, so it stays unknown.
     (TWELVE_DATA_DAILY_SPLIT, Interval.D1): dict(**_SPLIT_ADJUSTED, volume_basis=VolumeBasis.UNKNOWN),
     # Usable for inspection; not treated as proven-compatible.
@@ -190,6 +209,9 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
 }
 
 
+_CURRENCY_UNSET = object()
+
+
 class BarSeriesCatalog:
     """Single place that maps a source identity to its series semantics."""
 
@@ -198,16 +220,19 @@ class BarSeriesCatalog:
         source: SourceIdentity,
         *,
         interval: Interval = Interval.D1,
-        currency: str | None = "USD",
+        currency: str | None | object = _CURRENCY_UNSET,
     ) -> BarSeriesIdentity:
-        semantics = _CATALOG.get((source, interval), {})
+        semantics = dict(_CATALOG.get((source, interval), {}))
+        catalog_currency = semantics.pop("currency", "USD")
+        if currency is _CURRENCY_UNSET:
+            currency = catalog_currency
         return BarSeriesIdentity(
             provider=source.provider,
             feed=source.feed,
             legacy_adjustment=source.adjustment,
             interval=interval,
-            currency=currency,
-            **semantics,  # type: ignore[arg-type]
+            currency=currency,  # type: ignore[arg-type]
+            **semantics,
         )
 
 
@@ -267,6 +292,7 @@ class CanonicalDailyRow:
     capabilities: tuple[str, ...]
     source_fingerprint: str
     generated_at: datetime
+    currency: str | None = None  # ISO 4217 of the bar prices; None when unknown
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "policy_version", "provider", "feed", "adjustment"):
@@ -298,6 +324,11 @@ class CanonicalDailyRow:
             raise TypeError("source_fingerprint must be str")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at must be timezone-aware")
+        if self.currency is not None:
+            cur = self.currency.strip() if isinstance(self.currency, str) else ""
+            if len(cur) != 3 or not cur.isalpha():
+                raise ValueError(f"currency must be a 3-letter code or None: {self.currency!r}")
+            object.__setattr__(self, "currency", cur.upper())
 
     @property
     def unique_key(self) -> tuple[str, date, str]:

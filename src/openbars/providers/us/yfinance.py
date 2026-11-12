@@ -1,4 +1,6 @@
-"""Optional yfinance adapter for US and Hong Kong daily bars (source identity ``yfinance/yahoo/split``).
+"""Optional yfinance adapter for US and Hong Kong daily bars.
+
+US source identity is ``yfinance/yahoo/split``. HK is ``yfinance/yahoo/raw`` (``auto_adjust=False``).
 
 Yahoo publishes no official API or quota; this provider is a conservative, best-effort
 source. For US it is the fallback for history before 2016-01-01 and for gaps the
@@ -32,7 +34,7 @@ from openbars.core.models import (
     RawBar,
 )
 from openbars.core.ohlcv import PRICE_SCALE, VOLUME_SCALE
-from openbars.core.series import BarSeriesCatalog, SourceIdentity
+from openbars.core.series import BarSeriesCatalog, YFINANCE_YAHOO_RAW, YFINANCE_YAHOO_SPLIT
 from openbars.normalize.hk_instruments import from_yahoo_hk_ticker, to_yahoo_hk_ticker
 from openbars.providers.adapter import NullQuotaGate
 from openbars.providers.base import (
@@ -61,6 +63,7 @@ __all__ = [
 PROVIDER_ID = "yfinance"
 FEED = "yahoo"
 ADJUSTMENT = "split"
+HK_ADJUSTMENT = "raw"
 TERMS_URL = "https://policies.yahoo.com/us/en/yahoo/terms/index.htm"
 MAX_SYMBOLS_PER_REQUEST = 50
 REQUESTS_PER_MINUTE = 30
@@ -277,7 +280,6 @@ class YFinanceProvider:
             "history_start": None,  # since listing
             "batch": BatchShape.MULTI_SYMBOL,
             "max_symbols_per_request": MAX_SYMBOLS_PER_REQUEST,
-            "adjusted_modes": frozenset({Adjustment.SPLIT}),
             "feed": FEED,
         }
         return (
@@ -286,6 +288,7 @@ class YFinanceProvider:
                 terms=_terms(
                     "Unofficial Yahoo data; default fallback for pre-2016 history and primary gaps."
                 ),
+                adjusted_modes=frozenset({Adjustment.SPLIT}),
                 **shared,
             ),
             SourceCapability(
@@ -293,6 +296,7 @@ class YFinanceProvider:
                 terms=_terms(
                     "Unofficial Yahoo .HK data; not a licensed HKEX vendor feed. Personal use only."
                 ),
+                adjusted_modes=frozenset({Adjustment.RAW}),
                 **shared,
             ),
         )
@@ -340,13 +344,14 @@ class YFinanceProvider:
             raise ProviderError(
                 "invalid_request", f"unsupported feed {feed!r}", retryable=False
             )
-        adjustment = request.adjustment or ADJUSTMENT
+        default_adj = HK_ADJUSTMENT if request.market is Market.HK else ADJUSTMENT
+        adjustment = request.adjustment or default_adj
         adjustment = (
             (adjustment.value if isinstance(adjustment, Adjustment) else adjustment)
             .strip()
             .lower()
         )
-        if adjustment != ADJUSTMENT:
+        if adjustment != default_adj:
             raise ProviderError(
                 "invalid_request",
                 f"unsupported adjustment {adjustment!r}",
@@ -370,7 +375,10 @@ class YFinanceProvider:
         first = self._decode_cursor(request.cursor, len(symbols))
 
         download = self._download or _yfinance_download
-        series = BarSeriesCatalog.resolve(SourceIdentity(PROVIDER_ID, FEED, ADJUSTMENT))
+        if request.market is Market.HK:
+            series = BarSeriesCatalog.resolve(YFINANCE_YAHOO_RAW, currency="HKD")
+        else:
+            series = BarSeriesCatalog.resolve(YFINANCE_YAHOO_SPLIT)
         fetch_id = self._fetch_id()
         window = request.window
         session_ok = self._hk_session_ok if request.market is Market.HK else None

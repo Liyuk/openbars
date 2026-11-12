@@ -61,7 +61,8 @@ def test_capabilities_include_hk():
     cap = caps[Market.HK]
     assert cap.provider == "yfinance" and cap.feed == "yahoo"
     assert cap.interval is Interval.D1
-    assert Adjustment.SPLIT in cap.adjusted_modes
+    assert Adjustment.RAW in cap.adjusted_modes
+    assert Adjustment.SPLIT not in cap.adjusted_modes
     assert cap.terms.personal_only and not cap.terms.redistribution_allowed
     assert "HKEX" in (cap.terms.notes or "")
 
@@ -78,7 +79,8 @@ def test_maps_five_digit_and_instrument_id_to_yahoo_ticker():
         "2026-03-03",
     ]
     assert all(
-        b.series.source == SourceIdentity("yfinance", "yahoo", "split")
+        b.series.source == SourceIdentity("yfinance", "yahoo", "raw")
+        and b.series.currency == "HKD"
         for b in batch.bars
     )
     assert batch.bars[0].close == Decimal("10.40")
@@ -139,8 +141,10 @@ def test_window_outside_coverage_raises():
 
 def test_unsupported_market_or_adjustment():
     p = provider(FakeDownload({"0700.HK": [_row("2026-03-02")]}))
+    batch = p.fetch_bars(hk_req(adjustment="raw"))
+    assert batch.bars and batch.bars[0].series.source.key == "yfinance/yahoo/raw"
     with pytest.raises(ProviderError) as exc:
-        p.fetch_bars(hk_req(adjustment="raw"))
+        p.fetch_bars(hk_req(adjustment="split"))
     assert exc.value.code == "invalid_request"
     with pytest.raises(ProviderError) as exc:
         p.fetch_bars(

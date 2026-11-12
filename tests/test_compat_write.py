@@ -81,8 +81,13 @@ def test_action_helpers_and_split_fraction():
     assert action_type_for(CorporateActionKind.DIVIDEND, amount=Decimal("0.2")) == "cash_dividend"
     assert action_type_for(CorporateActionKind.DIVIDEND, ratio=Decimal("1.1")) == "stock_dividend"
     assert action_type_for(CorporateActionKind.SPINOFF) == "spin_off"
+    assert action_type_for(CorporateActionKind.RIGHTS) == "rights"
     details = action_details(CorporateActionKind.SPLIT, ratio=Decimal("4"))
     assert details == {"new_shares_numerator": 4, "old_shares_denominator": 1}
+    cash = action_details(CorporateActionKind.DIVIDEND, amount=Decimal("0.25"), currency="hkd")
+    assert cash == {"cash_amount": "0.25", "currency": "HKD"}
+    rights = action_details(CorporateActionKind.RIGHTS, ratio=Decimal("1.1"), amount=Decimal("10"), currency="HKD")
+    assert rights == {"ratio": "1.1", "amount": "10", "currency": "HKD"}
     assert action_event_key("split", 42, date(2024, 1, 2)) == "openbars:split:42:2024-01-02"
 
 
@@ -91,6 +96,7 @@ def test_revision_maps_back_to_corporate_actions():
     assert kind_from_action_type("cash_dividend") is CorporateActionKind.DIVIDEND
     assert kind_from_action_type("stock_dividend") is CorporateActionKind.DIVIDEND
     assert kind_from_action_type("spin_off") is CorporateActionKind.SPINOFF
+    assert kind_from_action_type("rights") is CorporateActionKind.RIGHTS
     assert kind_from_action_type("nope") is None
     ratio, amount = ratio_amount_from_details("split", {"new_shares_numerator": 4, "old_shares_denominator": 1})
     assert ratio == Decimal("4") and amount is None
@@ -106,6 +112,23 @@ def test_revision_maps_back_to_corporate_actions():
     assert len(actions) == 1
     assert actions[0].instrument_id == "42" and actions[0].kind is CorporateActionKind.SPLIT
     assert actions[0].ratio == Decimal("4") and actions[0].source == "prov_a"
+    dividends = actions_from_revision(
+        action_type="cash_dividend",
+        ex_date=date(2024, 3, 1),
+        instrument_ids=[42],
+        details={"cash_amount": "0.25", "currency": "USD"},
+        source="prov_a",
+    )
+    assert dividends[0].amount == Decimal("0.25") and dividends[0].currency == "USD"
+    rights = actions_from_revision(
+        action_type="rights",
+        ex_date=date(2024, 3, 1),
+        instrument_ids=[42],
+        details={"ratio": "1.1", "currency": "HKD"},
+        source="prov_a",
+    )
+    assert rights[0].kind is CorporateActionKind.RIGHTS
+    assert rights[0].ratio == Decimal("1.1") and rights[0].currency == "HKD"
 
 
 def test_select_mappings_keeps_wildcard_and_exact_provider():
@@ -425,11 +448,12 @@ def test_live_upstream_compat_writes_corporate_actions(pg_dsn, tmp_path):
             kind=CorporateActionKind.DIVIDEND,
             source="prov_a",
             amount=Decimal("0.25"),
+            currency="USD",
         )
         backend.instruments.upsert_corporate_actions([dividend])
-        kinds = {(a.kind, a.ex_date, a.amount or a.ratio) for a in backend.instruments.corporate_actions(["42"])}
-        assert (CorporateActionKind.SPLIT, date(2024, 3, 1), Decimal("4")) in kinds
-        assert (CorporateActionKind.DIVIDEND, date(2024, 6, 1), Decimal("0.25")) in kinds
+        kinds = {(a.kind, a.ex_date, a.amount or a.ratio, a.currency) for a in backend.instruments.corporate_actions(["42"])}
+        assert (CorporateActionKind.SPLIT, date(2024, 3, 1), Decimal("4"), None) in kinds
+        assert (CorporateActionKind.DIVIDEND, date(2024, 6, 1), Decimal("0.25"), "USD") in kinds
         assert backend.instruments.corporate_actions(["99"]) == []
     finally:
         with psycopg.connect(pg_dsn, autocommit=True) as admin:

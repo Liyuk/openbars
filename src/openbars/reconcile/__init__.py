@@ -5,9 +5,11 @@ from openbars.reconcile.compatibility import SeriesCompatibility, compare_series
 from openbars.reconcile.crypto import (
     CRYPTO_DAILY_V1,
     POLICY_VERSION_CN_DAILY_V1,
+    POLICY_VERSION_HK_DAILY_V1,
     policy_version_for_market,
     reconcile_crypto,
 )
+from openbars.reconcile.hk import HK_DAILY_V1, reconcile_hk
 from openbars.reconcile.gaps import BackfillJob, GapReport, KnownGap, detect_gaps
 from openbars.reconcile.overrides import SelectionOverride
 from openbars.reconcile.policy import DEFAULT_POLICY, ReconcilePolicy
@@ -25,6 +27,7 @@ __all__ = [
     "AuditRecord",
     "BackfillJob",
     "CRYPTO_DAILY_V1",
+    "HK_DAILY_V1",
     "CanonicalSelection",
     "DEFAULT_POLICY",
     "GapReport",
@@ -32,6 +35,7 @@ __all__ = [
     "KnownGap",
     "MemoryReconciler",
     "POLICY_VERSION_CN_DAILY_V1",
+    "POLICY_VERSION_HK_DAILY_V1",
     "ReconcilePolicy",
     "ReconcileResult",
     "SelectionOverride",
@@ -43,5 +47,6 @@ __all__ = [
     "policy_version_for_market",
     "project_canonical_bars",
     "reconcile_crypto",
+    "reconcile_hk",
     "source_fingerprint",
 ]

@@ -4,8 +4,9 @@ Merge (``merge_corporate_actions``)
 -----------------------------------
 Observations are append-only: every source reports its own ``CorporateAction`` rows. Rows
 with the same ``(instrument_id, ex_date, kind)`` describe the same event and *vote* on
-``ratio`` and ``amount`` (each field separately; a source that leaves a field ``None``
-abstains on it). Values are compared at the stored precision (8 fractional digits).
+``ratio``, ``amount`` and ``currency`` (each field separately; a source that leaves a field
+``None`` abstains on it). Numeric values are compared at the stored precision (8 fractional
+digits).
 
 * Unanimous (all voting sources agree on every field): one canonical row, ``disputed=False``.
 * Disagreement on a field: the value with the most votes wins; a tie goes to the best-ranked
@@ -57,9 +58,9 @@ def _q(value: Decimal | None) -> Decimal | None:
 class ActionConflict:
     """Sources disagreed on one field of one event."""
 
-    field: str  # "ratio" | "amount"
-    votes: Mapping[str, Decimal]  # source -> reported value
-    chosen: Decimal
+    field: str  # "ratio" | "amount" | "currency"
+    votes: Mapping[str, Decimal | str]  # source -> reported value
+    chosen: Decimal | str
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,17 @@ def merge_corporate_actions(
             if len(tally) > 1:
                 conflicts.append(ActionConflict(name, dict(votes), chosen[name]))
         first = by_source[ordered[0]]
+        currency_votes = {
+            s: by_source[s].currency for s in ordered if by_source[s].currency is not None
+        }
+        currency = None
+        if currency_votes:
+            tally_c: dict[str, list[str]] = defaultdict(list)
+            for s, cur in currency_votes.items():
+                tally_c[str(cur)].append(s)
+            currency = min(tally_c, key=lambda v: (-len(tally_c[v]), source_rank(tally_c[v][0])))
+            if len(tally_c) > 1:
+                conflicts.append(ActionConflict("currency", dict(currency_votes), currency))
         merged.append(
             MergedAction(
                 CorporateAction(
@@ -127,6 +139,7 @@ def merge_corporate_actions(
                     ordered[0],
                     ratio=chosen["ratio"],
                     amount=chosen["amount"],
+                    currency=currency,
                 ),
                 tuple(ordered),
                 tuple(conflicts),

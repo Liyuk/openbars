@@ -15,6 +15,7 @@ from openbars.normalize.hk_adjust import (
     hk_bonus,
     hk_cash_dividend,
     hk_consolidation,
+    hk_rights,
     hk_split,
     share_ratio,
 )
@@ -24,9 +25,9 @@ EX = date(2024, 6, 3)
 PRE, POST = date(2024, 5, 31), date(2024, 6, 4)
 
 
-def bar(day, close, *, volume="4000000", stored=Adjustment.SPLIT):
+def bar(day, close, *, volume="4000000", stored=Adjustment.SPLIT, currency=None):
     c = D(close)
-    return Bar(
+    out = Bar(
         instrument_id=IID,
         interval=Interval.D1,
         ts_start=utc(day),
@@ -40,6 +41,9 @@ def bar(day, close, *, volume="4000000", stored=Adjustment.SPLIT):
         source="yfinance",
         adjustment=stored,
     )
+    if currency is not None:
+        object.__setattr__(out, "currency", currency)
+    return out
 
 
 def series():
@@ -135,3 +139,50 @@ def test_cash_dividend_uses_same_factor_as_us():
     assert [b.close for b in out] == [D("76.8"), D("80"), D("101")]
     assert out[0].volume == D("4000000")
     assert hk_adjust_rows(bars, [act], Adjustment.SPLIT).rows[0].close == D("96")
+
+
+def test_rights_are_recorded_and_never_applied():
+    act = hk_rights(IID, EX, "yfinance", ratio="1.1", amount="10", currency="HKD")
+    assert act.kind is CorporateActionKind.RIGHTS
+    assert act.ratio == D("1.1") and act.amount == D(10) and act.currency == "HKD"
+    bars = series()
+    out = hk_adjust_rows(bars, [act], Adjustment.RAW)
+    assert [b.close for b in out.rows] == [D("125"), D("130"), D("131")]
+    assert [s.reason for s in out.skipped] == ["rights_not_adjusted"]
+    # even under ALL / with a ratio, prices stay as stored
+    also = hk_adjust_rows(bars, [act], Adjustment.ALL)
+    assert [b.close for b in also.rows] == [D("125"), D("130"), D("131")]
+
+
+def test_cash_dividend_defaults_to_hkd():
+    act = hk_cash_dividend(IID, date(2024, 3, 5), "25", "yfinance")
+    assert act.currency == "HKD"
+
+
+def test_usd_dividend_is_not_applied_to_hkd_bars():
+    days = [date(2024, 3, 1), date(2024, 3, 4), date(2024, 3, 5)]
+    bars = [
+        bar(d, close, currency="HKD") for d, close in zip(days, ("96", "100", "101"))
+    ]
+    usd = hk_cash_dividend(IID, date(2024, 3, 5), "25", "yfinance", currency="USD")
+    out = hk_adjust_rows(bars, [usd], Adjustment.SPLIT_DIVIDEND)
+    assert [b.close for b in out.rows] == [D("96"), D("100"), D("101")]
+    assert [s.reason for s in out.skipped] == ["currency_mismatch"]
+    hkd = hk_cash_dividend(IID, date(2024, 3, 5), "25", "yfinance", currency="HKD")
+    applied = hk_adjust_rows(bars, [hkd], Adjustment.SPLIT_DIVIDEND)
+    assert [b.close for b in applied.rows] == [D("76.8"), D("80"), D("101")]
+    assert not applied.skipped
+
+
+def test_stored_raw_split_is_derived_at_query_time():
+    # Canonical HK rows are stored RAW; default SPLIT read multiplies pre-ex prices.
+    bars = [
+        bar(PRE, "250", stored=Adjustment.RAW),
+        bar(POST, "130", stored=Adjustment.RAW),
+    ]
+    act = hk_split(IID, EX, 2, 1, "yfinance")
+    out = hk_adjust_rows(bars, [act], Adjustment.SPLIT)
+    assert out.rows[0].close == D("125") and out.rows[0].volume == D("8000000")
+    assert out.rows[1].close == D("130")
+    raw = hk_adjust_rows(bars, [act], Adjustment.RAW)
+    assert [b.close for b in raw.rows] == [D("250"), D("130")]

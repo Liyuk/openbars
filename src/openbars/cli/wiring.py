@@ -71,8 +71,8 @@ def build_providers(settings: Settings, gate: QuotaGate | None = None) -> dict[s
 
 
 def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN201
-    """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``), crypto (``crypto-daily-v1``)
-    and A-share (``cn-daily-v1``: RAW, suspensions dropped, limit flags, adjust factors).
+    """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``), crypto (``crypto-daily-v1``),
+    A-share (``cn-daily-v1``) and Hong Kong (``hk-daily-v1``: RAW, yfinance primary, AKShare corroboration).
 
     ``backend`` is a ``ParquetDuckDbBackend`` (``raw``, ``canonical``, ``instruments``). Drop-in
     for the sink ``run`` builds inline: ``LocalNode(..., sink=make_sink(backend, providers))``.
@@ -81,6 +81,7 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
         CnCanonicalSink,
         CryptoReconcilingSink,
         DispatchingSink,
+        HkCanonicalSink,
         ReconcilingSink,
         parquet_canonical_writer,
     )
@@ -99,6 +100,12 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
             backend.canonical.upsert_rows,  # type: ignore[attr-defined]
             providers=providers,
             factor_store=backend.instruments,  # type: ignore[attr-defined]
+        ),
+        hk=HkCanonicalSink(
+            backend.instruments,  # type: ignore[attr-defined]
+            writer,
+            raw=raw,
+            other_providers=others,
         ),
     )
 

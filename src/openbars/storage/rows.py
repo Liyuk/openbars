@@ -470,6 +470,7 @@ class CanonicalBarRow:
     volume_source: str | None = None
     sources_seen: tuple[str, ...] = ()
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    currency: str | None = None  # ISO 4217 of the bar prices; not a schema column (see capabilities)
 
     def __post_init__(self) -> None:
         if not self.instrument_id or not self.policy_version or not self.provider:
@@ -492,6 +493,18 @@ class CanonicalBarRow:
             if flag not in QualityFlag.__members__ or flag == "NONE":
                 raise InvalidBarError(f"flags: unknown quality flag {flag!r}")
         _set(self, "generated_at", _utc(self.generated_at, "generated_at"))
+        if self.currency is None:
+            for cap in self.capabilities:
+                if isinstance(cap, str) and cap.lower().startswith("currency:"):
+                    token = cap.split(":", 1)[1]
+                    if len(token) == 3 and token.isalpha():
+                        _set(self, "currency", token.upper())
+                        break
+        if self.currency is not None:
+            cur = str(self.currency).upper()
+            if len(cur) != 3 or not cur.isalpha():
+                raise InvalidBarError(f"currency: {self.currency!r} is not a 3-letter code")
+            _set(self, "currency", cur)
         if not self.source_fingerprint:
             _set(self, "source_fingerprint", self._fingerprint())
 

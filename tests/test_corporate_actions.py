@@ -150,3 +150,13 @@ def test_stale_with_canonical_bar_models():
               D("1"), D("2"), D("1"), D("2"), D("1"), "prov_a", adjustment=Adjustment.SPLIT,
               ingested_at=at(date(2020, 8, 29)))
     assert stale_instruments([bar], [act("a", D("4"))]) == {"us:eq:T1"}
+
+
+def test_currency_is_optional_iso_code():
+    a = CorporateAction("hk:eq:xhkg:00000", EX, DIV, "s", amount="0.25", currency="hkd")
+    assert a.currency == "HKD"
+    assert CorporateAction("us:eq:T1", EX, DIV, "s", amount="0.25").currency is None
+    with pytest.raises(ValueError, match="3-letter"):
+        CorporateAction("us:eq:T1", EX, DIV, "s", amount="0.25", currency="US")
+    with pytest.raises(ValueError, match="3-letter"):
+        CorporateAction("us:eq:T1", EX, DIV, "s", amount="0.25", currency="123")
