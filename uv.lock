@@ -48,6 +48,18 @@ wheels = [
 ]
 
 [[package]]
+name = "baostock"
+version = "0.9.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/61/8ad575eb83d4b22852a922e669bc13c9723675343e885b0040ab11a6a321/baostock-0.9.4.tar.gz", hash = "sha256:54dd26ec53100da02dcd47a21fc487ed5b2e12a4124af7961143d8ca0bc682e9", size = 28131, upload-time = "2026-09-21T09:52:05.831Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/df/6984deaa036cc3467f85411d01a48018eb86ed7477e74f33aa5b012ace05/baostock-0.9.4-py3-none-any.whl", hash = "sha256:0bf71c6069ab5890ff3596632f9c3f8f1fbc6bfcac582c2f9d6a5c11ab2cfaf8", size = 52424, upload-time = "2026-09-21T09:52:04.263Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -808,6 +820,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+baostock = [
+    { name = "baostock" },
+]
 dev = [
     { name = "pyarrow" },
     { name = "pytest" },
@@ -829,6 +844,7 @@ yfinance = [
 
 [package.metadata]
 requires-dist = [
+    { name = "baostock", marker = "extra == 'baostock'", specifier = ">=0.8" },
     { name = "duckdb", marker = "extra == 'parquet'", specifier = ">=1.0" },
     { name = "exchange-calendars", specifier = ">=4.9,<5" },
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.110" },
@@ -841,7 +857,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.29" },
     { name = "yfinance", marker = "extra == 'yfinance'", specifier = ">=0.2" },
 ]
-provides-extras = ["parquet", "postgres", "http", "yfinance", "dev"]
+provides-extras = ["parquet", "postgres", "http", "yfinance", "baostock", "dev"]
 
 [[package]]
 name = "opentelemetry-api"

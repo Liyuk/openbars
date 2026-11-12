@@ -25,6 +25,7 @@ parquet = ["pyarrow>=15", "duckdb>=1.0"]
 postgres = ["psycopg[binary]>=3.1"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
 yfinance = ["yfinance>=0.2"]
+baostock = ["baostock>=0.8"]
 dev = [
     "pyarrow>=15",
     "pytest>=8",
@@ -44,6 +45,7 @@ massive = "openbars.providers.us.massive:MassiveProvider"
 yfinance = "openbars.providers.us.yfinance:YFinanceProvider"
 binance = "openbars.providers.crypto.binance:BinanceProvider"
 coinbase = "openbars.providers.crypto.coinbase:CoinbaseProvider"
+baostock = "openbars.providers.cn.baostock:BaoStockProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]

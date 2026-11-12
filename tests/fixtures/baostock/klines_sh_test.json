@@ -1,0 +1,5 @@
+[
+  {"date": "2024-01-02", "code": "sh.600000", "open": "10.0000", "high": "10.5000", "low": "9.8000", "close": "10.2000", "preclose": "10.0000", "volume": "1000000", "amount": "10150000.0000", "adjustflag": "3", "turn": "0.350000", "tradestatus": "1", "pctChg": "2.000000", "isST": "0"},
+  {"date": "2024-01-03", "code": "sh.600000", "open": "10.2000", "high": "10.2000", "low": "10.2000", "close": "10.2000", "preclose": "10.2000", "volume": "0", "amount": "0.0000", "adjustflag": "3", "turn": "0.000000", "tradestatus": "0", "pctChg": "0.000000", "isST": "1"},
+  {"date": "2024-01-04", "code": "sh.600000", "open": "10.2000", "high": "10.9000", "low": "10.1000", "close": "10.8000", "preclose": "10.2000", "volume": "2500000", "amount": "26800000.0000", "adjustflag": "3", "turn": "0.870000", "tradestatus": "1", "pctChg": "5.882353", "isST": "1"}
+]

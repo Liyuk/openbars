@@ -81,6 +81,10 @@ providers:
   coinbase:                # Coinbase Exchange 公开 candles
     enabled: false
     base_url: https://api.exchange.coinbase.com
+  # A 股日线（BaoStock，无需 token）。默认关闭；需安装可选依赖 `pip install openbars[baostock]`。
+  # 存不复权价（adjustflag=3），并取复权因子与停牌字段；限额无官方数字，默认保守。仅限个人本地使用。
+  baostock:
+    enabled: false
 
 # 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
 reconcile:
