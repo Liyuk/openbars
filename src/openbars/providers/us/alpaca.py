@@ -8,6 +8,7 @@ Credentials come from constructor arguments or the ``ALPACA_API_KEY_ID`` /
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -66,6 +67,8 @@ from openbars.quota.policy import QuotaPolicy, RateLimit
 
 __all__ = ["AlpacaProvider", "CorporateActionsResult", "historical_end_parameter", "parse_assets"]
 
+logger = logging.getLogger(__name__)
+
 PROVIDER_ID = "alpaca"
 BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
 CORPORATE_ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
@@ -80,6 +83,9 @@ TERMS_URL = "https://alpaca.markets/disclosures"
 
 MAX_SYMBOLS_PER_REQUEST = 200
 MAX_BARS_PER_REQUEST = 10000
+# Empirical estimate: multi-symbol pages carry far fewer bars than the request limit.
+# This affects estimates only; request parameters remain unchanged.
+ESTIMATED_BARS_PER_PAGE = 1000
 CORPORATE_ACTIONS_LIMIT = 1000
 HISTORY_START = date(2016, 1, 1)
 # 1h is built from 30-minute bars so session_open (09:30) slots can be cut exactly.
@@ -428,12 +434,14 @@ class AlpacaProvider(HttpProviderAdapter):
                     container = payload["bars"]
                     by_symbol = {} if container is None else require_object(container, "bars")
                     for symbol, items in by_symbol.items():
-                        if symbol not in allowed:
-                            raise _invalid("response contains a symbol that was not requested")
                         if not isinstance(items, list):
                             raise _invalid("bars for a symbol are not an array")
-                        for item in items:
-                            subs.setdefault(symbol, []).append(self._sub_bar(item))
+                        parsed = [self._sub_bar(item) for item in items]
+                        if symbol not in allowed:
+                            skipped["unrequested_symbol"] = skipped.get("unrequested_symbol", 0) + len(items)
+                            logger.warning("Skipped %d bars for an unrequested symbol", len(items))
+                            continue
+                        subs.setdefault(symbol, []).extend(parsed)
                     following = payload.get("next_page_token")
                     if following is None:
                         break
@@ -510,12 +518,13 @@ class AlpacaProvider(HttpProviderAdapter):
         allowed = set(requested)
         out: list[RawBar] = []
         for symbol, items in by_symbol.items():
-            if symbol not in allowed:
-                raise _invalid("response contains a symbol that was not requested")
             if not isinstance(items, list):
                 raise _invalid("bars for a symbol are not an array")
-            for item in items:
-                out.append(self._parse_bar(symbol, item, request, feed, fetch_id, series))
+            parsed = [self._parse_bar(symbol, item, request, feed, fetch_id, series) for item in items]
+            if symbol not in allowed:
+                logger.warning("Skipped %d bars for an unrequested symbol", len(items))
+                continue
+            out.extend(parsed)
         return out
 
     @staticmethod
