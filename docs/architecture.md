@@ -205,6 +205,17 @@ QuotaPolicy
 
 能力与额度**由 provider 插件声明默认值**，用户配置只能收紧不能放宽（除非显式 `override: true`，例如付费档）。
 
+#### 3.5.1 Binance 现货日线（`openbars.providers.crypto.binance`）
+
+- 公开 spot klines（`/api/v3/klines`，`interval=1d`），**无需 API key**，`secret_values()` 为空；来源标识 `binance/spot/raw`（不属于美股 `KNOWN_SOURCES`）。
+- **默认 base URL 为 `https://data-api.binance.vision`**（只读行情镜像）。`api.binance.com` 对部分地区（含美国 IP）返回 451，因此不作默认；构造时可用 `base_url` 覆盖。451 映射为不可重试的 `provider_rejected_request`，消息提示该地区不可用。`https://data.binance.vision` 的批量归档是后续可选来源，本版不实现。
+- **UTC 00:00 切日**：`ts_start` 必须恰为当日 `00:00:00 UTC`，`session_date` = 其 UTC 日期，与 §3.4.2 一致；`openTime` 不在 UTC 零点的行视为切日口径不符，整批以 `invalid_payload` 拒收。请求窗口按 UTC 毫秒取闭区间（起日 `00:00:00.000` 至止日 `23:59:59.999`）。
+- 价格、成交量按字符串解析为 `Decimal`（不经 float）；`volume` 为基础资产成交量，成交额与成交笔数放 `extra`。口径 `price_basis=raw`、`volume_basis=as_traded`，`currency=None`（计价资产如 USDT 不是 ISO 货币）。
+- 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
+- **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
+- `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`）；不生成 `instrument_id`（交易对主表见 #33）。无公司行动。
+- 目前**尚未接入编排器**（计划、配置入口随后续 issue 加入）。
+
 ### 3.6 Job / Checkpoint
 
 ```text
@@ -532,7 +543,7 @@ src/openbars/
   cli/           main.py
   orchestrator/  jobs.py · planner.py · runner.py · nodes.py
   quota/         policy.py · gate.py
-  providers/     base.py · registry.py · (us/alpaca … 实现随 issue 加入)
+  providers/     base.py · registry.py · (us/alpaca … · crypto/binance 实现随 issue 加入)
   raw/           store.py · archive.py
   normalize/     instruments.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py
