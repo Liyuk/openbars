@@ -21,6 +21,8 @@ from openbars.cli.wiring import (
     check_ready,
     data_dir,
     effective_policies,
+    ingest_crypto_listings,
+    make_sink,
     skipped_providers,
 )
 from openbars.config.display import format_settings
@@ -196,8 +198,30 @@ def _open_backend(path: Path) -> Any:
     return open_backend(path)
 
 
-def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, now: datetime) -> Plan:
-    planner = DefaultPlanner(policies=effective_policies(settings, providers))
+def _crypto_master(settings: Settings, backend: Any) -> Any:
+    """The pair master for planning: only when crypto is selected and it already holds pairs
+    (otherwise the planner keeps its symbol heuristic). Read-only."""
+    from openbars.core.models import Market
+
+    if Market.CRYPTO not in settings.selection.markets:
+        return None
+    master = backend.instruments
+    return master if any(m.instrument_id.startswith("crypto:") for m in master.mappings()) else None
+
+
+def _ingest_pairs(settings: Settings, providers: Mapping[str, Any], backend: Any, now: datetime,
+                  notes: list[str], out: _Out) -> None:  # fmt: skip
+    """Write paths only (``run``, ``plan --submit``): list + ingest crypto pairs before planning."""
+    summary = ingest_crypto_listings(
+        backend, providers, as_of=now.date(), notes=notes, markets=settings.selection.markets
+    )
+    if summary:
+        out.line(summary)
+
+
+def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, now: datetime,
+               master: Any = None) -> Plan:  # fmt: skip
+    planner = DefaultPlanner(policies=effective_policies(settings, providers), instruments=master)
     return planner.plan(
         settings.selection,
         RawStoreCoverage(backend.raw),
@@ -247,13 +271,15 @@ def _plan(args: argparse.Namespace, settings: Settings, out: _Out, factory: Prov
     db = root / "state.db"
     if not args.submit:  # dry run: read-only apart from creating empty storage folders
         state = SqliteStateStore(db) if db.exists() else None
-        plan = _make_plan(settings, providers, backend, clock())
+        plan = _make_plan(settings, providers, backend, clock(), _crypto_master(settings, backend))
         _print_plan(out, plan, state, notes)
         out.line("dry run: nothing written (use --submit to queue these jobs)")
         return EXIT_OK
     state = SqliteStateStore(db)
     with SchedulerLock(scheduler_lock_path(db)):  # singleton: do not plan under a running scheduler
-        plan = _make_plan(settings, providers, backend, clock())
+        now = clock()
+        _ingest_pairs(settings, providers, backend, now, notes, out)
+        plan = _make_plan(settings, providers, backend, now, _crypto_master(settings, backend))
         _print_plan(out, plan, state, notes)
         if _budget_blocked(plan.budget, args.accept_budget, out):
             return EXIT_BUDGET
@@ -266,10 +292,8 @@ def _plan(args: argparse.Namespace, settings: Settings, out: _Out, factory: Prov
 
 def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: ProviderFactory,
          clock: Callable[[], datetime]) -> int:  # fmt: skip
-    from openbars.orchestrator.finalize import ReconcilingSink, parquet_canonical_writer
     from openbars.orchestrator.nodes import DEFAULT_FEEDS, LocalNode
     from openbars.quota.persistent import SqliteQuotaGate
-    from openbars.reconcile.reconciler import MemoryReconciler
 
     root = data_dir(settings, args.data)
     # The gate needs the providers' policies; build once without it to read them.
@@ -287,10 +311,7 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
         providers,
         store=state,
         raw=backend.raw,
-        sink=ReconcilingSink(
-            MemoryReconciler(), parquet_canonical_writer(backend.canonical),
-            raw=backend.raw, other_providers=tuple(providers),
-        ),  # fmt: skip
+        sink=make_sink(backend, providers),
         gate=gate,
         feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
         clock=clock,
@@ -307,7 +328,9 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
         redact=out._scrub,
     )
     with orch:
-        plan = _make_plan(settings, providers, backend, clock())
+        now = clock()
+        _ingest_pairs(settings, providers, backend, now, notes, out)
+        plan = _make_plan(settings, providers, backend, now, _crypto_master(settings, backend))
         _print_plan(out, plan, state, notes)
         if _budget_blocked(plan.budget, args.accept_budget, out):
             return EXIT_BUDGET

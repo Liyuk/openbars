@@ -40,6 +40,7 @@ from typing import Any, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
 import duckdb
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from openbars.core.atomic import ProcessLock, atomic_write, cleanup_stale_tmp
@@ -63,6 +64,7 @@ from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _R
 from openbars.orchestrator.jobs import Checkpoint, Job
 from openbars.providers.base import RawBatch
 from openbars.raw.archive import RawArchive
+from openbars.reconcile.crypto import policy_version_for_market
 from openbars.storage.errors import SchemaVersionError, StorageError
 from openbars.storage.rows import (
     CanonicalBarRow,
@@ -76,6 +78,7 @@ from openbars.storage.rows import (
     to_decimal,
 )
 from openbars.storage.schema import (
+    AUTO_POLICY_VERSION,
     CANONICAL_BARS_SCHEMA,
     CANONICAL_KEY_SQL,
     CANONICAL_LINEAGE_COLUMNS,
@@ -855,6 +858,9 @@ class _StaleProbe(NamedTuple):
     generated_at: datetime
 
 
+_CRYPTO = Market.CRYPTO.value
+
+
 class DuckDbBarReader:
     """``BarReader`` over the DuckDB catalog views; returns ``pyarrow.Table`` (exact decimals).
 
@@ -874,7 +880,14 @@ class DuckDbBarReader:
     A ticker expands into one ``(instrument_id, from, to)`` segment per holder whose mapping
     window overlaps ``[start, end]`` (generic ``"*"`` mappings, same market/ambiguity/
     unique-history rules as ``resolve``), so a recycled ticker yields each company's bars
-    only on the days it held the ticker and nothing on days it pointed elsewhere.
+    only on the days it held the ticker and nothing on days it pointed elsewhere. Crypto pairs
+    have no generic mapping, so for the crypto market a ticker also resolves through each
+    provider-specific mapping it has (``binance`` ``TESTUSDT``, ``coinbase`` ``TEST-USDT``);
+    the same text on two venues returns both venue instruments (never merged).
+
+    **Policy.** ``policy_version`` defaults to ``"auto"``: ``market=CRYPTO`` or ``crypto:`` ids
+    read ``crypto-daily-v1``, everything else ``research-daily-v2`` (without ``market``, each
+    requested id gets its own). An explicit version always wins.
 
     **Missing corporate actions.** Deriving a basis other than the stored one for an
     instrument with no corporate-action rows cannot be done honestly (no rows is not "never
@@ -897,14 +910,22 @@ class DuckDbBarReader:
         self, items: Sequence[str], start: date | None, end: date | None, market: Market | None
     ) -> list[tuple[str, date | None, date | None]]:
         master = self.backend.instruments
-        symbols = {m.symbol for m in master.mappings()}
+        providers_of: dict[str, set[str]] = defaultdict(set)
+        for m in master.mappings():
+            providers_of[m.symbol].add(m.provider)
         out: list[tuple[str, date | None, date | None]] = []
         for item in items:
-            if master.get(item) is not None or item not in symbols:
+            if master.get(item) is not None or item not in providers_of:
                 out.append((item, None, None))  # an instrument id (possibly without bars)
                 continue
             for m in [Market(market)] if market is not None else list(Market):
                 out += master.resolve_windows(item, start=start, end=end, provider="*", market=m)
+                if m is Market.CRYPTO:
+                    # crypto pairs only have provider-specific mappings (never a generic "*")
+                    for provider in sorted(providers_of[item] - {"*"}):
+                        out += master.resolve_windows(
+                            item, start=start, end=end, provider=provider, market=m
+                        )
         return list(dict.fromkeys(out))
 
     @staticmethod
@@ -932,7 +953,7 @@ class DuckDbBarReader:
         adjustment: Adjustment | None = Adjustment.SPLIT,
         as_of: date | None = None,
         market: Market | None = None,
-        policy_version: str = DEFAULT_POLICY_VERSION,
+        policy_version: str = AUTO_POLICY_VERSION,
         stored_adjustment: Adjustment = Adjustment.SPLIT,
         on_missing_actions: str = "raise",
     ) -> pa.Table:
@@ -943,25 +964,38 @@ class DuckDbBarReader:
         # ex-date after it), so those modes load past ``end`` and trim afterwards.
         past_end = mode in (Adjustment.SPLIT_DIVIDEND, Adjustment.ALL) and derive
 
-        where = ['"interval" = ?', "policy_version = ?"]
-        params: list[Any] = [Interval(interval).value, policy_version]
+        auto = policy_version == AUTO_POLICY_VERSION
+        segments: list[tuple[str, date | None, date | None]] = []
+        if symbols_or_ids:
+            segments = self._segments(symbols_or_ids, start, end, market)
+        # auto: crypto market / crypto ids -> crypto-daily-v1, else research-daily-v2. Without a
+        # market, each requested id gets its own policy (a mixed US + crypto read works).
+        per_id = auto and market is None and bool(segments)
+        where = ['"interval" = ?']
+        params: list[Any] = [Interval(interval).value]
+        if not per_id:
+            where.append("policy_version = ?")
+            params.append(policy_version_for_market(market, None if auto else policy_version))
         if mode is not None and not derive:
-            where.append("adjustment = ?")
+            where.append(f"(adjustment = ? OR market = '{_CRYPTO}')")  # crypto has no adjustment basis
             params.append(mode.value)
         if market is not None:
             where.append("market = ?")
             params.append(Market(market).value)
-        segments: list[tuple[str, date | None, date | None]] = []
+        # dividend modes load past ``end`` (US only); crypto rows are never adjusted and keep the bound
+        upper = f"(market <> '{_CRYPTO}' OR session_date <= ?)" if past_end else "session_date <= ?"
         if symbols_or_ids:
-            segments = self._segments(symbols_or_ids, start, end, market)
             clauses = []
             for iid, lo, hi in segments:
                 parts, ps = ["instrument_id = ?"], [iid]
+                if per_id:
+                    parts.append("policy_version = ?")
+                    ps.append(policy_version_for_market(None, instrument_ids=[iid]))
                 if lo is not None:
                     parts.append("session_date >= ?")
                     ps.append(lo)
-                if hi is not None and not past_end:
-                    parts.append("session_date <= ?")
+                if hi is not None:
+                    parts.append(upper)
                     ps.append(hi)
                 clauses.append("(" + " AND ".join(parts) + ")")
                 params.extend(ps)
@@ -969,8 +1003,8 @@ class DuckDbBarReader:
         if start is not None:
             where.append("session_date >= ?")
             params.append(start)
-        if end is not None and not past_end:
-            where.append("session_date <= ?")
+        if end is not None:
+            where.append(upper)
             params.append(end)
         if as_of is not None:
             where.append("CAST(generated_at AS DATE) <= ?")
@@ -982,7 +1016,33 @@ class DuckDbBarReader:
         table = self.backend.query(sql, params)
         if table.num_rows == 0:
             return table
+        # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they
+        # bypass derivation / stale handling and are merged back after the US rows are adjusted.
+        is_crypto = pc.equal(table.column("market"), _CRYPTO)
+        if not pc.any(is_crypto).as_py():
+            return self._adjust(table, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
+        crypto = table.filter(is_crypto)
+        rest = table.filter(pc.invert(is_crypto))
+        if rest.num_rows == 0:
+            return crypto
+        rest = self._adjust(rest, mode, stored, derive, past_end, as_of, end, segments, on_missing_actions)
+        if rest.num_rows == 0:
+            return crypto
+        merged = pa.concat_tables([crypto, rest.cast(crypto.schema)])
+        return merged.sort_by([("session_date", "ascending"), ("instrument_id", "ascending"), ("ts_start", "ascending")])
 
+    def _adjust(
+        self,
+        table: pa.Table,
+        mode: Adjustment | None,
+        stored: Adjustment,
+        derive: bool,
+        past_end: bool,
+        as_of: date | None,
+        end: date | None,
+        segments: Sequence[tuple[str, date | None, date | None]],
+        on_missing_actions: str,
+    ) -> pa.Table:
         ids = sorted(set(table.column("instrument_id").to_pylist()))
         must_derive = derive or (mode is Adjustment.SPLIT and as_of is not None)
         actions = self.backend.instruments.corporate_actions(ids)

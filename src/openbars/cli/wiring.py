@@ -6,6 +6,7 @@ Nothing here talks to the network: real providers only open connections on ``fet
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import date
 from pathlib import Path
 
 from openbars.config.schema import ProviderConfig, Settings
@@ -89,6 +90,51 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
         crypto=CryptoReconcilingSink(
             backend.instruments, writer, raw=raw, other_providers=others  # type: ignore[attr-defined]
         ),
+    )
+
+
+def ingest_crypto_listings(
+    backend: object,
+    providers: Mapping[str, Provider],
+    *,
+    as_of: date,
+    notes: list[str],
+    markets: frozenset[Market] | set[Market] | None = None,
+) -> str | None:
+    """List crypto pairs and upsert them into ``backend.instruments`` (write paths only).
+
+    Runs only when ``markets`` contains ``Market.CRYPTO``; calls ``list_instruments(CRYPTO)`` on
+    enabled providers that declare a CRYPTO capability, never on any other provider. A listing
+    failure or an unusable row is noted / counted and never raised. Returns a one-line summary
+    (``None`` when nothing applies).
+    """
+    from openbars.normalize.crypto_pairs import ingest_crypto_pairs, listing_from_provider_instrument
+
+    if markets is not None and Market.CRYPTO not in markets:
+        return None
+    listings = []
+    skipped = 0
+    listed_from = []
+    for name, provider in providers.items():
+        if not any(cap.market is Market.CRYPTO for cap in provider.capabilities()):
+            continue
+        try:
+            rows = list(provider.list_instruments(Market.CRYPTO))
+        except Exception as exc:  # noqa: BLE001 - a venue outage must not fail the run
+            notes.append(f"crypto pair listing failed for {name}: {type(exc).__name__}")
+            continue
+        listed_from.append(name)
+        for row in rows:
+            try:
+                listings.append(listing_from_provider_instrument(row, provider=name, venue=name))
+            except ValueError:
+                skipped += 1
+    if not listed_from:
+        return None
+    summary = ingest_crypto_pairs(backend.instruments, listings, as_of=as_of)  # type: ignore[attr-defined]
+    return (
+        f"crypto pairs ({', '.join(listed_from)}): {summary.created} created, "
+        f"{summary.reused} reused, {summary.unresolved + skipped} unresolved"
     )
 
 

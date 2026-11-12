@@ -23,6 +23,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from openbars.calendars.crypto import CryptoCalendar
+from openbars.core.models import Market
 from openbars.core.series import (
     BINANCE_ARCHIVE_RAW,
     BINANCE_SPOT_RAW,
@@ -36,6 +37,7 @@ from openbars.reconcile.reconciler import MemoryReconciler, ReconcileResult
 from openbars.reconcile.store import CanonicalRowStore
 
 POLICY_VERSION_CRYPTO_DAILY_V1 = "crypto-daily-v1"
+DEFAULT_POLICY_VERSION = "research-daily-v2"  # US default; same value as ``storage.schema``
 
 CRYPTO_PRICE_TOLERANCE_PCT = Decimal("1")
 CRYPTO_VOLUME_TOLERANCE_PCT = Decimal("10")
@@ -71,6 +73,26 @@ def instrument_venue(instrument_id: str | None) -> str | None:
 def source_venue(identity: SourceIdentity) -> str | None:
     """Venue a source belongs to (``binance/*`` -> ``binance``); ``None`` if not attachable."""
     return identity.provider if identity.provider in _VENUE_SOURCES else None
+
+
+def policy_version_for_market(
+    market: Market | str | None = None,
+    override: str | None = None,
+    *,
+    instrument_ids: Iterable[str] = (),
+) -> str:
+    """The canonical ``policy_version`` a read should use.
+
+    ``override`` always wins. Otherwise ``Market.CRYPTO`` (or any ``crypto:`` instrument id)
+    -> ``crypto-daily-v1``; everything else (US, unknown) -> ``research-daily-v2``.
+    """
+    if override:
+        return override
+    if market is not None and Market(market) is Market.CRYPTO:
+        return POLICY_VERSION_CRYPTO_DAILY_V1
+    if any(instrument_venue(i) is not None for i in instrument_ids):
+        return POLICY_VERSION_CRYPTO_DAILY_V1
+    return DEFAULT_POLICY_VERSION
 
 
 def policy_for_instrument(instrument_id: str) -> ReconcilePolicy:
@@ -165,6 +187,7 @@ __all__ = [
     "RejectedCryptoObservation",
     "instrument_venue",
     "policy_for_instrument",
+    "policy_version_for_market",
     "reconcile_crypto",
     "reject_cross_venue",
     "source_venue",

@@ -42,6 +42,9 @@ METADATA_VERSION_KEY = b"openbars.schema_version"
 METADATA_LAYER_KEY = b"openbars.layer"
 
 DEFAULT_POLICY_VERSION = "research-daily-v2"
+# ``DuckDbBarReader.bars`` default: pick the policy from market / instrument ids (see
+# ``reconcile.crypto.policy_version_for_market``). An explicit policy string always wins.
+AUTO_POLICY_VERSION = "auto"
 UNKNOWN = "unknown"
 
 

@@ -190,7 +190,7 @@ def listing_from_provider_instrument(
 
     ``base_asset`` / ``quote_asset`` are required (``ValueError`` otherwise). ``venue`` defaults to
     ``row.exchange``; one of the two must be given. Codes are not validated here: ingest queues
-    invalid rows. Not called by the orchestrator.
+    invalid rows. Used by the CLI write paths (``cli.wiring.ingest_crypto_listings``).
     """
     base = (row.base_asset or "").strip()
     quote = (row.quote_asset or "").strip()
