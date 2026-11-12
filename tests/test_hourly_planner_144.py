@@ -59,3 +59,63 @@ def test_daily_planning_ignores_hourly_attempt_history(tmp_path):
     actual = DefaultPlanner().plan(selection, RawStoreCoverage(MemoryRawStore(), state=SqliteStateStore(tmp_path / 'state.db')), **kwargs)
     assert actual.jobs == expected.jobs
     assert actual.budget == expected.budget
+
+
+def test_attempt_index_matches_brute_force():
+    from types import SimpleNamespace
+    from openbars.calendars import xnys
+    from openbars.orchestrator.jobs import Job, JobKind, JobState
+    from openbars.orchestrator.planner import NEW_YORK
+
+    window = DateRange(date(2026, 3, 2), date(2026, 3, 6))
+    states = [JobState.PENDING, JobState.LEASED, JobState.RUNNING, JobState.DONE, JobState.DEAD]
+    jobs = [Job(str(i), JobKind.BACKFILL, 'alpaca' if i % 2 else 'other', Market.US, Interval.H1,
+                ('TEST1', 'TEST2') if i % 3 else ('TEST2',), window, state=state)
+            for i, state in enumerate(states)]
+    fetches = [SimpleNamespace(job_id='3', status=status, started_at=started, window=span)
+               for status, started, span in [
+                   ('ok', datetime(2026, 3, 4, 3, tzinfo=UTC), window),
+                   ('empty', datetime(2026, 3, 7, tzinfo=UTC), DateRange(date(2026, 3, 5), date(2026, 3, 5))),
+                   ('error', datetime(2026, 3, 8, tzinfo=UTC), window),
+                   ('ok', None, window),
+               ]]
+    state = SimpleNamespace(list_jobs=lambda: jobs, list_fetches=lambda **kwargs: fetches)
+    coverage = RawStoreCoverage(MemoryRawStore(), state=state)
+    for provider in ('alpaca', 'other', 'missing'):
+        for symbol in ('TEST1', 'TEST2', 'missing'):
+            for query in (window, DateRange(date(2026, 3, 3), date(2026, 3, 5))):
+                expected = set()
+                for job in jobs:
+                    if job.provider != provider or symbol not in job.instruments:
+                        continue
+                    for day in xnys.sessions(max(query.start, job.window.start), min(query.end, job.window.end)):
+                        if job.state in {JobState.PENDING, JobState.LEASED, JobState.RUNNING} or (
+                            job.state is JobState.DONE and any(
+                                f.job_id == job.job_id and f.status in {'ok', 'empty'} and f.started_at is not None
+                                and f.window.start <= day <= f.window.end
+                                and f.started_at.astimezone(NEW_YORK).date() > day for f in fetches
+                            )
+                        ):
+                            expected.add(day)
+                assert coverage.covered(provider, Market.US, Interval.H1, query, symbol=symbol) == expected
+
+
+def test_attempt_index_avoids_per_symbol_job_scans():
+    from types import SimpleNamespace
+    from openbars.orchestrator.jobs import Job, JobKind, JobState
+
+    class Instruments(tuple):
+        checks = 0
+
+        def __contains__(self, item):
+            type(self).checks += 1
+            return super().__contains__(item)
+
+    window = DateRange(date(2026, 3, 2), date(2026, 3, 2))
+    jobs = [Job(str(i), JobKind.BACKFILL, 'alpaca', Market.US, Interval.H1,
+                Instruments((f'TEST{i}',)), window, state=JobState.PENDING) for i in range(2000)]
+    state = SimpleNamespace(list_jobs=lambda: jobs, list_fetches=lambda **kwargs: [])
+    coverage = RawStoreCoverage(MemoryRawStore(), state=state)
+    for i in range(2000):
+        assert coverage.covered('alpaca', Market.US, Interval.H1, window, symbol=f'TEST{i}') == {window.start}
+    assert Instruments.checks < 4000

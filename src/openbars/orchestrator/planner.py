@@ -176,30 +176,40 @@ class RawStoreCoverage:
         if self._hourly_history is None:
             jobs = self.state.list_jobs()
             fetches = self.state.list_fetches(market=Market.US, interval=Interval.H1)
-            successful = defaultdict(list)
+            successful: dict[str, set[date]] = defaultdict(set)
+            sessions: dict[tuple[date, date], set[date]] = {}
+
+            def session_days(start, end):
+                if start > end:
+                    return set()
+                key = (start, end)
+                if key not in sessions:
+                    sessions[key] = set(xnys.sessions(start, end))
+                return sessions[key]
+
             for fetch in fetches:
                 if fetch.status in {"ok", "empty"} and fetch.started_at is not None:
-                    successful[fetch.job_id].append(fetch)
-            self._hourly_history = (jobs, successful)
-        jobs, successful = self._hourly_history
-        result = set()
-        for job in jobs:
-            if job.provider != provider or job.market is not Market.US or job.interval is not Interval.H1 or symbol not in job.instruments:
-                continue
-            start, end = max(window.start, job.window.start), min(window.end, job.window.end)
-            if start > end:
-                continue
-            for day in xnys.sessions(start, end):
-                # Failed/dead jobs (including yfinance empty-result errors) do not cover;
-                # a colliding job ID still follows the existing submit behavior.
+                    last_day = fetch.started_at.astimezone(NEW_YORK).date() - timedelta(days=1)
+                    successful[fetch.job_id].update(
+                        session_days(fetch.window.start, min(fetch.window.end, last_day))
+                    )
+
+            index: dict[tuple[str, str], set[date]] = defaultdict(set)
+            for job in jobs:
+                if job.market is not Market.US or job.interval is not Interval.H1:
+                    continue
                 if job.state in {JobState.PENDING, JobState.LEASED, JobState.RUNNING}:
-                    result.add(day)  # Existing work reserves its cells and avoids duplicate jobs.
-                elif job.state is JobState.DONE and any(
-                    f.window.start <= day <= f.window.end and f.started_at.astimezone(NEW_YORK).date() > day
-                    for f in successful.get(job.job_id, ())
-                ):
-                    result.add(day)
-        return result
+                    days = session_days(job.window.start, job.window.end)
+                elif job.state is JobState.DONE:
+                    days = session_days(job.window.start, job.window.end) & successful.get(job.job_id, set())
+                else:
+                    continue
+                if days:
+                    for instrument in job.instruments:
+                        index[(job.provider, instrument)].update(days)
+            self._hourly_history = index
+        return {day for day in self._hourly_history.get((provider, symbol), ())
+                if window.start <= day <= window.end}
 
 
 # --- plan / budget ------------------------------------------------------------------------
