@@ -19,6 +19,7 @@ class BarReader(Protocol):
         adjustment: Adjustment = Adjustment.SPLIT,
         as_of: date | None = None,
         available_by: datetime | None = None,
+        id_kind: str = "auto",
     ) -> Any:
         """Return a columnar table (pyarrow.Table when the parquet extra is installed).
 
@@ -36,5 +37,9 @@ class BarReader(Protocol):
         stored row of each key whose ``available_at <= available_by`` is returned; a row with a
         null ``available_at`` is treated as not available. An older revision that a newer row
         replaced is never returned. ``None`` (default) = no filter.
+
+        ``id_kind="upstream"`` (#155): ``symbols_or_ids`` are upstream integer ids (``"42"`` or
+        ``42``) matched to ``instrument_id`` verbatim: no symbol mapping, no instrument-master
+        record needed, identity is the upstream's. Default ``"auto"`` = ids or tickers as above.
         """
         ...
