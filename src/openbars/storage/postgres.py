@@ -92,6 +92,7 @@ from openbars.storage.schema import (
 from openbars.storage.state import SqliteStateStore, SqlStateStore
 from openbars.storage.compat_side import CompatSideStore
 from openbars.storage.compat_write import (
+    AmbiguousInstrumentError,
     CompatIdentity,
     action_details,
     action_event_key,
@@ -1116,6 +1117,21 @@ _RESEARCH_BAR_UPSERT = (
 )
 
 
+def _finish_skipped_ambiguous(skipped: list[AmbiguousInstrumentError], written: int, what: str) -> None:
+    """Warn about rows skipped as ambiguous; re-raise the first one if nothing was written."""
+    if not skipped:
+        return
+    if written == 0:
+        raise skipped[0]
+    symbols = sorted({e.symbol for e in skipped})
+    dates = sorted({e.on.isoformat() for e in skipped})
+    _LOG.warning(
+        "%s skipped %d ambiguous row(s) (%d written): symbols=%s session_dates=%s",
+        what, len(skipped), written, ",".join(symbols[:50]) + (",..." if len(symbols) > 50 else ""),
+        ",".join(dates),
+    )
+
+
 class PgCompatRawStore(_Guard):
     """View of upstream ``daily_bar`` (US daily bars). Writes require ``write=True``."""
 
@@ -1142,18 +1158,23 @@ class PgCompatRawStore(_Guard):
             check_rows(rows, "raw")
         if not rows:
             return 0
+        skipped: list[AmbiguousInstrumentError] = []
         with self._session() as conn:
             written = 0
             for row in rows:
                 _require_us_daily(row.market, row.interval, what="raw append")
                 _require_volume(row.volume, what="raw append")
-                iid = self._identity.resolve(
-                    conn,
-                    row.instrument_id,
-                    symbol=row.symbol_as_returned,
-                    on=row.session_date,
-                    exchange="UNKNOWN",
-                )
+                try:
+                    iid = self._identity.resolve(
+                        conn,
+                        row.instrument_id,
+                        symbol=row.symbol_as_returned,
+                        on=row.session_date,
+                        exchange="UNKNOWN",
+                    )
+                except AmbiguousInstrumentError as exc:
+                    skipped.append(exc)
+                    continue
                 artifact_id = parse_optional_int_ref(row.source_artifact_ref)
                 run_id = parse_optional_int_ref(row.ingest_run_id)
                 conn.execute(
@@ -1167,6 +1188,7 @@ class PgCompatRawStore(_Guard):
                     ],
                 )
                 written += 1
+            _finish_skipped_ambiguous(skipped, written, "compat raw append")
             return written
 
     def scan_rows(self, provider: str | None, market: Market, interval: Interval, window: DateRange, *,
@@ -1239,17 +1261,23 @@ class PgCompatCanonicalStore(_Guard):
             fingerprint_or_raise(row)
             grouped.setdefault((row.policy_version, row.session_date), []).append(row)
         written = 0
+        skipped: list[AmbiguousInstrumentError] = []
         with self._session() as conn:
             for policy_version, session_date in sorted(grouped):
                 conn.execute(
                     "SELECT pg_advisory_xact_lock(?)",
                     [advisory_lock_key(policy_version, session_date)],
                 )
+                group_written = 0
                 for row in grouped[(policy_version, session_date)]:
                     symbol = row.instrument_id if parse_int_id(row.instrument_id) is None else None
-                    iid = self._identity.resolve(
-                        conn, row.instrument_id, symbol=symbol, on=row.session_date,
-                    )
+                    try:
+                        iid = self._identity.resolve(
+                            conn, row.instrument_id, symbol=symbol, on=row.session_date,
+                        )
+                    except AmbiguousInstrumentError as exc:
+                        skipped.append(exc)
+                        continue
                     source_id = _ensure_source_bar_id(conn, iid, row)
                     conn.execute(
                         _RESEARCH_BAR_UPSERT,
@@ -1262,7 +1290,10 @@ class PgCompatCanonicalStore(_Guard):
                         ],
                     )
                     written += 1
-                _bump_watermarks(conn, policy_version, {session_date})
+                    group_written += 1
+                if group_written:
+                    _bump_watermarks(conn, policy_version, {session_date})
+            _finish_skipped_ambiguous(skipped, written, "compat canonical upsert")
         return written
 
     def scan_rows(self, instrument_ids: Sequence[str] | None, interval: Interval, window: DateRange, *,

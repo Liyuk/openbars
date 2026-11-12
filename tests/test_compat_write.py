@@ -282,6 +282,59 @@ def test_live_upstream_compat_ticker_reuse_is_ambiguous(pg_dsn, tmp_path):
 
 
 @pytest.mark.postgres_live
+def test_live_compat_batch_skips_ambiguous_rows(pg_dsn, tmp_path, caplog):
+    import logging
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    ddl = (Path(__file__).parent / "compat" / "upstream_schema.sql").read_text()
+    # Live upstream has no default on instrument.created_at.
+    ddl = ddl.replace("created_at TIMESTAMPTZ NOT NULL DEFAULT now()", "created_at TIMESTAMPTZ NOT NULL", 1)
+    schema = f"openbars_compat_s_{datetime.now(UTC):%H%M%S%f}"
+    with psycopg.connect(pg_dsn, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True, options=f"-c search_path={schema}") as conn:
+            conn.execute(ddl)
+            conn.execute(
+                "INSERT INTO instrument (id, asset_class, security_type, created_at) "
+                "VALUES (10, 'equity', 'common_stock', now()), (11, 'equity', 'common_stock', now())"
+            )
+            conn.execute(
+                "INSERT INTO symbol_alias (instrument_id, symbol, exchange, valid_from, valid_from_basis, verification_status) "
+                "VALUES (10, 'ZZZB', 'TESTX', '2010-01-01', 'listing', 'verified'), "
+                "(11, 'ZZZB', 'TESTX', '2020-01-01', 'listing', 'verified')"
+            )
+        backend = PostgresBackend(
+            pg_dsn, mode="upstream_compat", write=True, schema=schema, state_path=tmp_path / "state.db"
+        )
+        with caplog.at_level(logging.WARNING, logger="openbars.storage.compat"):
+            assert backend.raw.append_rows([
+                _raw(instrument_id="ZZZA", symbol_as_returned="ZZZA"),
+                _raw(instrument_id="ZZZB", symbol_as_returned="ZZZB", fetch_id="fetch-b"),
+            ]) == 1
+            assert backend.canonical.upsert_rows([_canon(instrument_id="ZZZA"), _canon(instrument_id="ZZZB")]) == 1
+        warned = [r.getMessage() for r in caplog.records if r.name == "openbars.storage.compat"]
+        assert len(warned) == 2
+        assert all("ZZZB" in m and "2024-01-02" in m for m in warned)
+        with psycopg.connect(pg_dsn, row_factory=dict_row, options=f"-c search_path={schema}") as conn:
+            for table in ("daily_bar", "research_daily_bar"):
+                ids = [r["instrument_id"] for r in conn.execute(f"SELECT instrument_id FROM {table}").fetchall()]
+                assert len(ids) == 1 and ids[0] not in (10, 11)
+            aliases = conn.execute("SELECT count(*) AS n FROM symbol_alias WHERE symbol = 'ZZZB'").fetchone()["n"]
+            assert aliases == 2
+            created = conn.execute("SELECT created_at FROM instrument WHERE id NOT IN (10, 11)").fetchall()
+            assert len(created) == 1 and created[0]["created_at"] is not None
+        # Canonical-only batch where every row is ambiguous still raises.
+        with pytest.raises(AmbiguousInstrumentError):
+            backend.canonical.upsert_rows([_canon(instrument_id="ZZZB", session_date=date(2024, 1, 3), ts_start=datetime(2024, 1, 3, tzinfo=UTC))])
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
+@pytest.mark.postgres_live
 def test_live_canonical_only_fills_selected_source_bar_id(pg_dsn, tmp_path):
     import psycopg
     from psycopg.rows import dict_row

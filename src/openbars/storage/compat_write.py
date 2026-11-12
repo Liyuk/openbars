@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -368,8 +368,8 @@ class CompatIdentity:
         existing = conn.execute("SELECT id FROM instrument WHERE id = ?", [iid]).fetchone()
         if existing is None:
             conn.execute(
-                "INSERT INTO instrument (id, asset_class, security_type) VALUES (?, ?, ?)",
-                [iid, asset_class, security_type],
+                "INSERT INTO instrument (id, asset_class, security_type, created_at) VALUES (?, ?, ?, ?)",
+                [iid, asset_class, security_type, datetime.now(UTC)],
             )
         return iid
 
@@ -390,8 +390,8 @@ class CompatIdentity:
         if len(ids) == 1:
             return next(iter(ids))
         created = conn.execute(
-            "INSERT INTO instrument (asset_class, security_type) VALUES (?, ?) RETURNING id",
-            [asset_class, security_type],
+            "INSERT INTO instrument (asset_class, security_type, created_at) VALUES (?, ?, ?) RETURNING id",
+            [asset_class, security_type, datetime.now(UTC)],
         ).fetchone()
         if not created or created.get("id") is None:
             raise StorageError("failed to allocate an instrument id")
