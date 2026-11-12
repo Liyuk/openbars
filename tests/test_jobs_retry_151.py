@@ -109,3 +109,47 @@ def test_postgres_state_store_retry(pg_dsn):
         assert [j.job_id for j in store.retry_jobs(error_contains="OFF", dry_run=True)] == ["b"]
         assert sorted(j.job_id for j in store.retry_jobs(now=NOW)) == ["a", "b"]
         assert store.count_jobs()[JobState.PENDING] == 2 and store.count_jobs()[JobState.DONE] == 1
+
+
+def test_postgres_cli_opens_the_backend_writable_only_for_a_real_retry(tmp_path, monkeypatch, capsys):
+    """Review fix: a read-only PG backend cannot run the UPDATE, so only ``--dry-run`` opens it
+    read-only; a real retry honours the configured write flag (``write=None``)."""
+    import argparse
+    from types import SimpleNamespace
+
+    import openbars.cli.main as main_mod
+    from openbars.cli.jobs import run_jobs
+
+    store = SqliteStateStore(tmp_path / "state.db")
+    store.save_job(_job("a"))
+    seen = []
+
+    def fake_open(settings, root, *, write=None):
+        seen.append(write)
+        return SimpleNamespace(state=store)
+
+    monkeypatch.setattr(main_mod, "_open_backend", fake_open)
+    monkeypatch.setattr("openbars.cli.wiring.data_dir", lambda settings, data: tmp_path)
+    settings = SimpleNamespace(storage_backend="postgres")
+    base = dict(jobs_action="retry", data=None, dead=False, failed=False, provider=None, market=None,
+                interval=None, error=None)  # fmt: skip
+    out = SimpleNamespace(line=lambda *a: None, err=lambda *a: None)
+    assert run_jobs(argparse.Namespace(**base, dry_run=True), settings, out, lambda: NOW) == 0
+    assert run_jobs(argparse.Namespace(**base, dry_run=False), settings, out, lambda: NOW) == 0
+    assert seen == [False, None]
+    assert store.list_jobs()[0].state is JobState.PENDING
+
+
+@pytest.mark.postgres_live
+def test_postgres_read_only_state_lists_but_refuses_a_real_retry(pg_dsn):
+    from pg_helpers import throwaway_schema
+
+    from openbars.storage.errors import ReadOnlyError
+    from openbars.storage.postgres import PostgresBackend
+
+    with throwaway_schema(pg_dsn) as schema:
+        PostgresBackend(pg_dsn, mode="native", write=True, schema=schema).state.save_job(_job("a"))
+        ro = PostgresBackend(pg_dsn, mode="native", write=False, schema=schema).state
+        assert [j.job_id for j in ro.retry_jobs(dry_run=True)] == ["a"]
+        with pytest.raises(ReadOnlyError):
+            ro.retry_jobs(now=NOW)

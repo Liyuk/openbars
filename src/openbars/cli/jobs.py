@@ -45,7 +45,9 @@ def run_jobs(args: argparse.Namespace, settings: Settings, out: Any, clock: Call
     root = data_dir(settings, args.data)
     db = root / "state.db"
     if settings.storage_backend == "postgres":
-        state = _job_state(_open_backend(settings, root, write=False), db)
+        # a real retry writes the PG job table: honour the configured write flag (like
+        # ``plan --submit``); ``--dry-run`` stays read-only
+        state = _job_state(_open_backend(settings, root, write=False if args.dry_run else None), db)
     elif not db.exists():
         out.err(f"error: no state database at {db} (nothing planned yet)")
         return EXIT_ERROR

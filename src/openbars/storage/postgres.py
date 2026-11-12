@@ -1080,6 +1080,12 @@ class PgStateStore(SqlStateStore, _Guard):
         self.require_write()
         super().finish_fetch(*args, **kwargs)
 
+    def retry_jobs(self, **kwargs: Any) -> list[Any]:
+        """#151: a real retry writes; ``dry_run`` only lists (allowed read-only)."""
+        if not kwargs.get("dry_run"):
+            self.require_write()
+        return super().retry_jobs(**kwargs)
+
 
 # --- upstream_compat (read/write mapping) -------------------------------------------------
 
