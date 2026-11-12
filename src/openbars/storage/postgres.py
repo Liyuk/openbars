@@ -643,8 +643,8 @@ class PgInstrumentMaster(_Guard):
         return [
             CorporateAction(
                 r["instrument_id"], r["ex_date"], CorporateActionKind(r["kind"]), r["source"],
-                None if r["ratio"] is None else float(r["ratio"]),
-                None if r["amount"] is None else float(r["amount"]),
+                None if r["ratio"] is None else r["ratio"],
+                None if r["amount"] is None else r["amount"],
             )
             for r in records
         ]

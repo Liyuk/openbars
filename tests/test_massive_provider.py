@@ -539,9 +539,9 @@ def test_splits_map_and_paginate():
     )
     actions = result.actions
     assert [(a.instrument_id, a.kind, a.ratio) for a in actions] == [
-        ("TEST1", CorporateActionKind.SPLIT, 4.0),
-        ("ZZZA", CorporateActionKind.SPLIT, 0.1),
-        ("TEST1", CorporateActionKind.DIVIDEND, 1.05),
+        ("TEST1", CorporateActionKind.SPLIT, Decimal("4")),
+        ("ZZZA", CorporateActionKind.SPLIT, Decimal("0.1")),
+        ("TEST1", CorporateActionKind.DIVIDEND, Decimal("1.05")),
     ]
     assert actions[0].ex_date == date(2024, 1, 3) and actions[0].source == "massive"
     assert dict(result.skipped) == {"something_else:unsupported_type": 1}

@@ -11,7 +11,8 @@ Numbers: prices are ``decimal128(20,8)`` and volumes ``decimal128(28,8)`` everyw
 Schema versioning: ``SCHEMA_VERSION`` is stamped into every Parquet file's key-value
 metadata (``openbars.schema_version``) and into ``state.db`` (``schema_meta``). v1 is the
 first on-disk version; any change to column names, types, keys or partitioning bumps
-it and ships a documented migration (architecture.md section 10.6).
+it and ships a documented migration (architecture.md section 10.6). Readers refuse files
+stamped with a version newer than ``SCHEMA_VERSION`` (``SchemaVersionError``).
 """
 
 from __future__ import annotations

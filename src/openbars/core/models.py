@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum, Flag, auto
 from typing import TYPE_CHECKING, Mapping
 
@@ -62,7 +62,17 @@ class Session(str, Enum):
 
 
 class Adjustment(str, Enum):
-    """Read-time adjustment. Storage always holds RAW + corporate actions."""
+    """Price basis of a bar series.
+
+    v0.1 / ``research-daily-v2``: storage holds bars **split-adjusted as delivered** by the
+    source (backward-adjusted to the latest split, no dividend adjustment), so the stored
+    column is ``SPLIT`` and the default read (``SPLIT``) is the stored value. ``RAW``,
+    ``SPLIT_DIVIDEND``, ``ALL`` and ``SPLIT`` at an earlier ``as_of`` are derived at query
+    time by ``openbars.normalize.adjust`` from the stored bars + corporate actions.
+
+    A later, optional profile may store ``RAW`` bars and derive every other basis; the
+    adjuster handles a stored ``RAW`` series as well (see ``normalize.adjust``).
+    """
 
     RAW = "raw"
     SPLIT = "split"
@@ -228,11 +238,43 @@ class CorporateActionKind(str, Enum):
     SYMBOL_CHANGE = "symbol_change"
 
 
+def _exact_decimal(value: object, name: str) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(f"{name} must be Decimal, int or str, not {type(value).__name__}")
+    if isinstance(value, Decimal):
+        result = value
+    elif isinstance(value, (int, str)):
+        try:
+            result = Decimal(value.strip() if isinstance(value, str) else value)
+        except InvalidOperation:
+            raise ValueError(f"{name} is not a valid decimal: {value!r}") from None
+    else:
+        raise TypeError(f"{name} must be Decimal, int or str, not {type(value).__name__}")
+    if not result.is_finite():
+        raise ValueError(f"{name} must be finite, got {result}")
+    return result
+
+
 @dataclass(frozen=True)
 class CorporateAction:
+    """One corporate action as one source reported it.
+
+    ``ratio`` is new shares / old shares (4-for-1 -> ``Decimal("4")``, 1-for-4 reverse ->
+    ``Decimal("0.25")``); ``amount`` is a cash amount per share. Both are exact ``Decimal``
+    (never ``float``). A split must have a positive ratio (``None`` = the source gave none).
+    """
+
     instrument_id: str
     ex_date: date
     kind: CorporateActionKind
     source: str
-    ratio: float | None = None
-    amount: float | None = None
+    ratio: Decimal | None = None
+    amount: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        _set(self, "ratio", _exact_decimal(self.ratio, "ratio"))
+        _set(self, "amount", _exact_decimal(self.amount, "amount"))
+        if self.kind is CorporateActionKind.SPLIT and self.ratio is not None and self.ratio <= 0:
+            raise ValueError(f"split ratio must be positive, got {self.ratio}")

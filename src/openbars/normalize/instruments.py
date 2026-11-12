@@ -32,7 +32,7 @@ import secrets
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 from openbars.core.models import Instrument, Market, RawBar, SymbolMapping
@@ -49,6 +49,7 @@ __all__ = [
     "figi_instrument_id",
     "new_instrument_id",
     "resolve_symbol",
+    "resolve_symbol_windows",
 ]
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -196,6 +197,50 @@ def resolve_symbol(
     return SymbolResolution(None, OUTSIDE_MAPPING_WINDOW)
 
 
+def resolve_symbol_windows(
+    mappings: Sequence[SymbolMapping],
+    market_of: Callable[[str], Market | None],
+    *,
+    start: date | None,
+    end: date | None,
+    provider: str,
+    market: Market,
+) -> list[tuple[str, date | None, date | None]]:
+    """Which instrument a symbol meant on each day of ``[start, end]`` (``None`` = unbounded).
+
+    Returns ``(instrument_id, from, to)`` segments, inclusive, clipped to the query window
+    (a ``None`` bound stays ``None`` only where the request itself was unbounded). Days on
+    which ``resolve_symbol`` would be unresolved (gap between holders, ambiguity, after a
+    delisting with reuse ...) belong to no segment. The result is exactly
+    ``resolve_symbol(..., on=d)`` evaluated for every day, computed per interval between the
+    dates where the answer can change (window edges), so the unique-history fallback and the
+    reuse rules are the same as for a single-day ``resolve``.
+    """
+    lo, hi = start or date.min, end or date.max
+    if lo > hi:
+        return []
+    cuts = {lo}
+    for m in mappings:
+        for d in (m.valid_from, None if m.valid_to is None else m.valid_to + timedelta(days=1)):
+            if d is not None and lo < d <= hi:
+                cuts.add(d)
+    points = sorted(cuts)
+    out: list[tuple[str, date, date]] = []
+    for i, first in enumerate(points):
+        last = points[i + 1] - timedelta(days=1) if i + 1 < len(points) else hi
+        found = resolve_symbol(mappings, market_of, on=first, provider=provider, market=market).instrument_id
+        if found is None:
+            continue
+        if out and out[-1][0] == found and out[-1][2] + timedelta(days=1) == first:
+            out[-1] = (found, out[-1][1], last)
+        else:
+            out.append((found, first, last))
+    return [
+        (iid, None if start is None and a == date.min else a, None if end is None and b == date.max else b)
+        for iid, a, b in out
+    ]
+
+
 class _ResolveMixin:
     """Shared ``resolve`` over a ``(instruments, mappings-by-symbol)`` view."""
 
@@ -218,6 +263,26 @@ class _ResolveMixin:
     def resolve(self, symbol: str, *, on: date, provider: str, market: Market) -> str | None:
         """Instrument a symbol meant on ``on`` (``valid_to`` inclusive), else ``None``."""
         return self.resolve_detailed(symbol, on=on, provider=provider, market=market).instrument_id
+
+    def resolve_windows(
+        self,
+        symbol: str,
+        *,
+        start: date | None,
+        end: date | None,
+        provider: str = "*",
+        market: Market,
+    ) -> list[tuple[str, date | None, date | None]]:
+        """Point-in-time ``resolve`` across a window: ``(instrument_id, from, to)`` segments."""
+        instruments, by_symbol = self._resolution_view()
+        return resolve_symbol_windows(
+            by_symbol.get(symbol, ()),
+            lambda iid: instruments[iid].market if iid in instruments else None,
+            start=start,
+            end=end,
+            provider=provider,
+            market=market,
+        )
 
 
 # --- in-memory store --------------------------------------------------------------------------
