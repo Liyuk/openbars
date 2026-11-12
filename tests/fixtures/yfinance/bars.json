@@ -1,0 +1,19 @@
+{
+  "TEST1": [
+    {"Date": "2024-01-02", "Open": "10.10", "High": "10.50", "Low": "10.00", "Close": "10.40", "Adj Close": "10.39", "Volume": 1000},
+    {"Date": "2024-01-03", "Open": 10.4, "High": 10.9, "Low": 10.3, "Close": 10.8, "Adj Close": 10.79, "Volume": 1200},
+    {"Date": "2024-01-04", "Open": "NaN", "High": "NaN", "Low": "NaN", "Close": "NaN", "Volume": "NaN"},
+    {"Date": "2024-01-05", "Open": 10.8, "High": 11.2, "Low": 10.7, "Close": 11.0, "Volume": 900},
+    {"Date": "2024-01-06", "Open": 11.0, "High": 11.5, "Low": 10.9, "Close": 11.4, "Volume": 800}
+  ],
+  "ZZZ-A": [
+    {"Date": "2024-01-02", "Open": 5.0, "High": 5.5, "Low": 4.9, "Close": 5.2, "Volume": 50},
+    {"Date": "2024-01-03", "Open": 5.2, "High": 5.1, "Low": 5.0, "Close": 5.1, "Volume": 60},
+    {"Date": "2024-01-05", "Open": 5.1, "High": 5.6, "Low": 5.0, "Close": 5.5, "Volume": 70}
+  ],
+  "ZZZA": [
+    {"Date": "2023-12-29", "Open": 1.0, "High": 1.2, "Low": 0.9, "Close": 1.1, "Volume": 10},
+    {"Date": "2024-01-02", "Open": 1.1, "High": 1.3, "Low": 1.0, "Close": 1.2, "Volume": 20}
+  ],
+  "EMPTY": []
+}

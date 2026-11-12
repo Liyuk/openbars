@@ -23,6 +23,7 @@ dependencies = [
 parquet = ["pyarrow>=15", "duckdb>=1.0"]
 postgres = ["psycopg[binary]>=3.1"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
+yfinance = ["yfinance>=0.2"]
 dev = [
     "pyarrow>=15",
     "pytest>=8",
@@ -36,6 +37,7 @@ xnys = "openbars.calendars.xnys:XNYSCalendar"
 
 [project.entry-points."openbars.providers"]
 alpaca = "openbars.providers.us.alpaca:AlpacaProvider"
+yfinance = "openbars.providers.us.yfinance:YFinanceProvider"
 
 [build-system]
 requires = ["hatchling>=1.26"]
