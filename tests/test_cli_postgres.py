@@ -134,6 +134,15 @@ def test_live_cli_run_prints_symbol_ambiguity_report(pg_dsn, tmp_path, capsys):
                 "VALUES (10, 'TEST1', 'TESTX', '2010-01-01', 'listing', 'verified'), "
                 "(11, 'TEST1', 'TESTX', '2020-01-01', 'listing', 'verified')"
             )
+            # The fake whole-market provider also returns ZZZA; make every row ambiguous so the
+            # batch writes nothing (a batch with at least one writable row now commits instead).
+            conn.execute("INSERT INTO instrument (id, asset_class, security_type) VALUES (12, 'equity', 'common_stock')")
+            conn.execute("INSERT INTO instrument (id, asset_class, security_type) VALUES (13, 'equity', 'common_stock')")
+            conn.execute(
+                "INSERT INTO symbol_alias (instrument_id, symbol, exchange, valid_from, valid_from_basis, verification_status) "
+                "VALUES (12, 'ZZZA', 'TESTX', '2010-01-01', 'listing', 'verified'), "
+                "(13, 'ZZZA', 'TESTX', '2020-01-01', 'listing', 'verified')"
+            )
         code = _cli(["run"], tmp_path, schema, dsn=pg_dsn, symbols="[TEST1]")
         captured = capsys.readouterr()
         assert code == 0  # jobs are marked dead; the scheduler itself succeeds
