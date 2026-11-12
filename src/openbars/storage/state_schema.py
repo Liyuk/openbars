@@ -1,6 +1,6 @@
 """State-table specs (jobs, checkpoints, fetch_log) and DDL generation.
 
-Kept free of pyarrow so the SQLite state store works without the ``parquet`` extra.
+This module does not depend on pyarrow, including when used by the SQLite state store.
 """
 
 from __future__ import annotations

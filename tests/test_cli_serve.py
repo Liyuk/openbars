@@ -143,6 +143,23 @@ def test_missing_http_extra_has_install_hint(tmp_path, capsys, monkeypatch):
     assert "parquet" not in err
 
 
+def test_missing_fastapi_during_app_creation_has_http_install_hint(tmp_path, capsys, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "fastapi" or name.startswith("fastapi."):
+            raise ModuleNotFoundError("No module named 'fastapi'", name="fastapi")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert main(["--config", str(_config(tmp_path)), "serve"], env={}) == 2
+    err = capsys.readouterr().err
+    assert HTTP_EXTRA_HINT in err
+    assert "parquet" not in err
+
+
 def test_serve_output_redacts_secrets(tmp_path, capsys, monkeypatch):
     import sys, types
 

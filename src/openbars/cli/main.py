@@ -229,7 +229,7 @@ def main(
         out.err(f"error: {exc}")
         return EXIT_ERROR
     except ImportError as exc:
-        out.err(f"error: missing optional dependency ({exc.name}); install openbars[parquet]")
+        out.err(f"error: {exc}")
         return EXIT_USAGE
 
 

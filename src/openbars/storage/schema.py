@@ -24,7 +24,7 @@ try:
     import pyarrow as pa
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
-        "openbars.storage.schema needs pyarrow: pip install 'openbars[parquet]'"
+        "openbars.storage.schema needs pyarrow; reinstall openbars"
     ) from exc
 
 from openbars.storage.state_schema import (  # noqa: F401  (re-exported)

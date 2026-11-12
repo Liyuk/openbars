@@ -21,7 +21,7 @@ class BarReader(Protocol):
         available_by: datetime | None = None,
         id_kind: str = "auto",
     ) -> Any:
-        """Return a columnar table (pyarrow.Table when the parquet extra is installed).
+        """Return a columnar table (pyarrow.Table for the Parquet reader).
 
         ``adjustment=SPLIT`` (default) is the stored ``research-daily-v2`` series (split-adjusted as
         delivered, no dividends); other modes, or ``SPLIT`` at an earlier ``as_of``, are derived at

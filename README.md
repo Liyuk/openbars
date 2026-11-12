@@ -22,6 +22,8 @@ openbars 是一个**本地运行的行情仓库框架**，不是又一个数据�
 
 默认存储为 Parquet + DuckDB，Postgres 可选。读取方式是 Python 库，HTTP 接口可选。
 
+Parquet 与 DuckDB 是核心依赖，普通安装即可使用默认存储；`parquet` extra 为兼容旧安装命令保留，不再额外安装依赖。
+
 ### 为什么
 
 GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查询接口（OpenBB），但几乎没有项目同时做到：**免费额度下的多源调度 + 可审计的多源合并成唯一源 + 跨市场统一口径**。openbars 只做这一块。
@@ -35,7 +37,7 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 需要 Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)。以下以美股日线为例：
 
 ```bash
-uv sync --all-extras                 # 安装（含 Parquet / DuckDB）
+uv sync                               # 安装核心依赖（含 Parquet / DuckDB）
 uv run openbars init                 # 在当前目录生成 config.yaml 和 .env（已被 .gitignore；绝不覆盖已有文件）
 # 编辑 .env 填入你自己的 key（或用 OPENBARS_ENV_FILE / --env-file 指向你已有的 dotenv）
 uv run openbars config               # 查看生效配置（所有 key 脱敏为 set/missing）
@@ -152,14 +154,14 @@ openbars is a **local-first market data warehouse framework**, not yet another d
 2. **Schedule within free quotas**: a shared quota gate, retries, resumable checkpoints, historical backfill and daily increments.
 3. **Clean and reconcile**: instrument master (stable IDs + symbol validity ranges), trading calendars, parameterized price adjustment, gap detection, multi-source arbitration and quality flags, producing one **canonical** dataset with provenance and an audit trail.
 
-Default storage is Parquet + DuckDB; Postgres is optional. Read through the Python library, or open the local read-only UI with `openbars serve` (loopback only; `/api/v1` is for that UI and is not a stable public API in this version).
+Default storage is Parquet + DuckDB; both are core dependencies available with a standard install. The `parquet` extra remains as an empty compatibility extra. Postgres is optional. Read through the Python library, or open the local read-only UI with `openbars serve` (loopback only; `/api/v1` is for that UI and is not a stable public API in this version).
 
 ### Quick start
 
 Needs Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). US daily bars as the example:
 
 ```bash
-uv sync --all-extras                 # install (includes Parquet / DuckDB)
+uv sync                               # install core dependencies (includes Parquet / DuckDB)
 uv run openbars init                 # write config.yaml and .env here (git-ignored; never overwrites)
 # fill in .env with your own keys (or point OPENBARS_ENV_FILE / --env-file at a dotenv you already have)
 uv run openbars config               # print effective settings (secrets redacted as set/missing)
