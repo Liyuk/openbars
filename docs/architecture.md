@@ -156,6 +156,7 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **美股 ADR 关联**：港股正股与美股 ADR 是两个 instrument。正股的 `external_ids["us_adr"]` 指向美股 ADR 的 id；ADR 的 `external_ids["hk_ordinary"]` 指向港股正股 id（`hk_adr_external_ids` / `us_hk_ordinary_external_ids`）。不把 ADR ticker 写进港股 id。
 - **yfinance `.HK` 映射**（#71）：`to_yahoo_hk_ticker` 把 5 位代码 / `hk:eq:xhkg:00700` 写成 Yahoo 常见的 `0700.HK`（去掉一位前导 0）。适配器落库仍用 `yfinance/yahoo/split`，`auto_adjust=False`，按 XHKG 丢弃非交易日行；不把 Yahoo 复权序列当规范层。规划器接入见 #77。
 - **复权口径**（#75）：与美股相同，落库存拆股调整后的序列（或源给出的因子 / 公司行动），查询时由 `openbars.normalize.adjust` 派生。拆股 `hk_split`、合股 `hk_consolidation` 都是 `kind=SPLIT`（ratio = 新/旧，合股 < 1）。红股 `hk_bonus` 编码为带 `ratio` 的股票股利，**默认不按拆股套用**（与美股 `include_stock_dividends=False` 一致），需显式 `include_bonus=True`。供股与分红币种等未决事项见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)，本步不自行拍板。
+- **AKShare 港股备源**（#72）：`openbars.providers.hk.akshare`，入口 `stock_hk_hist`，代码用 5 位（`00700`）。只请求不复权（`adjust=""`），按 XHKG 丢弃非交易日；源身份 `akshare/eastmoney/raw`。库为 MIT，**不转授**东财等上游数据权；官方声明偏学术研究；[东财法律声明](https://about.eastmoney.com/home/disclaimer) 禁止未经交易所书面同意复制传播行情。openbars 只在用户本机落库。默认低频限流（4 次/分钟、80 次/24h），按代码逐只请求，不在默认配置里鼓励批量爬取。规划器接入见 #77。
 
 ### 3.3 Bar
 
