@@ -52,7 +52,7 @@ uv run openbars verify               # 各市场的覆盖率与多源一致性�
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
 ```
 
-- `init [目录]` 把 `config.example.yaml`、`.env.example` 复制为 `config.yaml`、`.env`；任一目标已存在就报错退出（退出码 2），什么都不写。
+- `init [目录]` 在终端启动向导；非终端或 `--yes` 复制示例配置。参见[数据源密钥申请与额度指南](docs/provider-keys.md)。任一目标已存在就报错退出（退出码 2），什么都不写。
 - **密钥优先级（高 → 低）**：① 进程环境变量；② dotenv 文件：`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`，都没有时自动读取 **`config.yaml` 同目录的 `.env`**（不存在也不报错）；③ `config.yaml` 里 `${VAR:-default}` 的默认值。也接受 `ALPACA_API_KEY` / `ALPACA_API_SECRET` 作为 `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` 的别名（仅当规范名未设置时）。
 - 示例配置里 Alpaca 与 Massive 都是 `enabled: true` 的主源：`run` 在它们缺 key 时会报错并列出变量名（如 `MASSIVE_API_KEY`），请填上 key，或把不用的源改成 `enabled: false`。`plan` 只提示缺失，不会中止（但没有任何可用源、或选了无源支持的粒度时会报错）。
 - `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
@@ -83,6 +83,8 @@ conventions:
   us_hourly_alignment: session_open
   include_extended_hours: false
 ```
+
+类似 `ON` 或数字的代码请加引号，例如 `"ON"`、`"0001"`。
 
 启用所需 provider 并配置自己的凭据；所有美股 1h 来源都需要显式 `universe.us.symbols`，包括 Massive。`session_open` 按纽约时间 9:30 开盘对齐；也可选 `clock_hour`，但规划器会跳过只支持 `session_open` 的 yfinance 和 Twelve Data。默认只存常规时段；Twelve Data 不支持盘前盘后。Massive 和 Alpaca 将 30 分钟数据合成为网格上的 1 小时数据。
 
@@ -116,7 +118,7 @@ uv run openbars plan && uv run openbars run
 
 ### 港股日线
 
-- 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `00700` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
+- 配置 `markets: [hk]`、启用 `providers.yfinance`（AKShare 作佐证），`universe.hk.symbols` 写 `"00700"` / `0700.HK`；`plan` / `run` 使用 XHKG 日历。落库的是 RAW 序列（`hk-daily-v1`，HKD），仅拆股调整在读取时派生。
 - `verify`（港股）：按 XHKG 日历、`hk-daily-v1`，评分落库的 RAW 序列，不评分读取时派生的调整结果。
 
 ### 数据条款声明（重要）
@@ -163,7 +165,7 @@ uv run openbars verify               # per-market coverage and cross-source agre
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
 ```
 
-- `init [directory]` copies `config.example.yaml` and `.env.example` to `config.yaml` and `.env`. If either target already exists it prints an error, writes nothing and exits 2.
+- `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
 - **Key priority (highest first):** (1) the process environment; (2) a dotenv file: `--env-file`, else `OPENBARS_ENV_FILE`, else `env_file` in `config.yaml`, and when none of those is set, **`.env` next to `config.yaml`** is loaded automatically (no error if it is absent); (3) `${VAR:-default}` in `config.yaml`. `ALPACA_API_KEY` / `ALPACA_API_SECRET` are accepted as aliases for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` when the canonical name is unset.
 - The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
 - `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.
@@ -193,6 +195,8 @@ conventions:
   us_hourly_alignment: session_open
   include_extended_hours: false
 ```
+
+Quote tickers like `ON` or numeric codes, for example `"ON"` and `"0001"`.
 
 Enable the providers you need and configure your own credentials. Every US 1h source, including Massive, needs explicit `universe.us.symbols`. `session_open` aligns to the 9:30 New York open; `clock_hour` is also available, but the planner skips yfinance and Twelve Data, which require `session_open`. Only regular hours are stored by default; Twelve Data does not support extended hours. Massive and Alpaca aggregate 30-minute bars onto the hourly grid.
 
@@ -226,7 +230,7 @@ uv run openbars plan && uv run openbars run
 
 ### Hong Kong daily
 
-- Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `00700` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
+- Set `markets: [hk]`, enable `providers.yfinance` (AKShare corroborates), and list `universe.hk.symbols` as `"00700"` / `0700.HK`; `plan` / `run` use the XHKG calendar. The stored series is RAW (`hk-daily-v1`, HKD); only split adjustment is derived at read time.
 - `verify` (Hong Kong): XHKG calendar, `hk-daily-v1`, scores the stored RAW series, not the read-time adjusted view.
 
 ### Data terms disclaimer

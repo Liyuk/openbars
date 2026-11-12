@@ -97,8 +97,9 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--data", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         p.add_argument("--env-file", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
-    init = sub.add_parser("init", help="write config.yaml and .env from the examples (never overwrites)")
-    init.add_argument("directory", nargs="?", default=".", help="target directory (default .)")
+    init = sub.add_parser("init", help="配置向导 / setup wizard (never overwrites / 绝不覆盖)")
+    init.add_argument("directory", nargs="?", default=".", help="目标目录 / target directory (default .)")
+    init.add_argument("--yes", "-y", action="store_true", help="复制模板 / copy templates without prompts")
 
     verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars, per configured market (us, crypto, cn, hk)")
     common(verify)
@@ -176,7 +177,7 @@ def main(
         if args.config != DEFAULT_CONFIG:
             print("error: init takes a directory argument; --config is not used", file=sys.stderr)
             return EXIT_USAGE
-        return init_project(args.directory, _Out(), exit_usage=EXIT_USAGE)
+        return init_project(args.directory, _Out(), exit_usage=EXIT_USAGE, yes=args.yes)
 
     out = _Out()
     try:

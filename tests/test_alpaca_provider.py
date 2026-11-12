@@ -129,6 +129,36 @@ def test_sip_split_page_parses_to_raw_bars():
     }
 
 
+def test_alpaca_request_estimate_accounts_for_small_hourly_pages():
+    from openbars.orchestrator.jobs import Job, JobKind
+    from openbars.orchestrator.planner import estimate_requests
+
+    symbols = tuple(f"TEST{i}" for i in range(200))
+    def job(interval, end):
+        return Job("estimate", JobKind.BACKFILL, "alpaca", Market.US, interval, symbols,
+                   DateRange(date(2024, 1, 2), end))
+    cap = next(c for c in provider(Server()).capabilities() if c.interval is Interval.D1)
+    assert estimate_requests(job(Interval.H1, date(2024, 1, 2)), cap) == 3  # 2,600 / 1,000
+    assert estimate_requests(job(Interval.H1, date(2024, 1, 3)), cap) == 6  # 5,200 / 1,000
+    assert estimate_requests(job(Interval.D1, date(2024, 1, 2)), cap) == 1
+
+
+def test_daily_skips_unrequested_bars_and_reports_count(caplog):
+    row = {"t": "2024-01-02T05:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10, "v": 100}
+    payload = {"bars": {"TEST1": [row], "ZZZX": [row, row]}}
+    batch = provider(Server(httpx.Response(200, json=payload))).fetch_bars(request_for())
+    assert [bar.symbol_as_returned for bar in batch.bars] == ["TEST1"]
+    assert "2" in caplog.text and "ZZZX" not in caplog.text
+
+
+@pytest.mark.parametrize("items", [None, [{"t": "invalid"}]])
+def test_daily_rejects_malformed_unrequested_bars(items):
+    response = httpx.Response(200, json={"bars": {"ZZZX": items}})
+    with pytest.raises(ProviderError) as info:
+        provider(Server(response)).fetch_bars(request_for())
+    assert info.value.code == "invalid_payload"
+
+
 def test_zero_vwap_is_none():
     batch = provider(Server(ok("bars_sip_split.json"))).fetch_bars(request_for("TEST1", "ZZZA"))
     zzza = [b for b in batch.bars if b.symbol_as_returned == "ZZZA"][0]
@@ -254,7 +284,6 @@ def test_malformed_payloads():
             200,
             text='{"bars": {"TEST1": [{"t": "2024-01-02T05:00:00Z", "o": "x", "h": 1, "l": 1, "c": 1, "v": 1}]}}',
         ),
-        "unrequested symbol": ok("bars_unrequested_symbol.json"),
         "outside window": ok("bars_out_of_window.json"),
     }
     for label, response in cases.items():

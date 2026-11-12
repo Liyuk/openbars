@@ -62,6 +62,21 @@ def test_env_expansion_and_mapping(tmp_path):
     assert s.schedule["timezone"] == "America/New_York"
 
 
+@pytest.mark.parametrize("scalar, parsed", [("ON", "True"), ("NO", "False"), ("NULL", "None"),
+                                             ("0001", "1"), ("1.0e+3", "1000.0")])
+def test_non_string_universe_symbols_are_rejected(tmp_path, scalar, parsed):
+    yaml = f"markets: [us]\nuniverse: {{us: {{symbols: [TEST1, {scalar}]}}}}\n"
+    with pytest.raises(ConfigError) as info:
+        load_settings(write(tmp_path, yaml), env={})
+    assert parsed in str(info.value)
+    assert "quote" in str(info.value).lower()
+
+
+def test_quoted_and_yaml_string_numeric_symbols_load_unchanged(tmp_path):
+    yaml = 'markets: [us]\nuniverse: {us: {symbols: ["ON", 1e3]}}\n'
+    assert load_settings(write(tmp_path, yaml), env={}).universe[Market.US] == ("1e3", "ON")
+
+
 def test_expand_env_rules():
     env = {"A": "x", "EMPTY": ""}
     assert expand_env("${A}-${NOPE}-${NOPE:-d}-${EMPTY:-e}", env) == "x--d-e"
