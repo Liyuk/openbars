@@ -54,6 +54,8 @@ ALPHA_VANTAGE_DAILY_RAW = SourceIdentity("alpha_vantage", "daily", "raw")
 # Crypto spot (UTC-day klines). Deliberately NOT in KNOWN_SOURCES: that tuple is the US
 # research-daily-v2 source list.
 BINANCE_SPOT_RAW = SourceIdentity("binance", "spot", "raw")
+# Coinbase Exchange (not Advanced Trade) public candles, also UTC-day and not US.
+COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 
 KNOWN_SOURCES: tuple[SourceIdentity, ...] = (
     MASSIVE_EOD_SPLIT,
@@ -145,6 +147,13 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
     ),
     # Spot klines are as-traded and cut at UTC 00:00 (``UTC_DAY``).
     (BINANCE_SPOT_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.UTC_DAY,
+        volume_basis=VolumeBasis.AS_TRADED,
+    ),
+    # Exchange candles are as-traded and cut at UTC 00:00 (``granularity=86400``).
+    (COINBASE_EXCHANGE_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.UTC_DAY,
