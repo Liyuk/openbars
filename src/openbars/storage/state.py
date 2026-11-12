@@ -12,10 +12,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator, Sequence
 
 from openbars.core.models import DateRange, Interval, Market
 from openbars.orchestrator.jobs import Checkpoint, Job, JobKind, JobState
@@ -136,6 +136,187 @@ class SqlStateStore:
         sql += " ORDER BY priority, created_at, job_id"
         with self._connect() as con:
             return [_job(r) for r in con.execute(sql, params).fetchall()]
+
+    # --- scheduling: submit / lease / transition -------------------------------------
+    # ``updated_at`` doubles as the lease heartbeat of leased/running rows; ``retry_at`` is
+    # only the earliest next attempt. Every lease write takes the caller's ``now`` so a
+    # test clock and the stored timestamps agree.
+
+    def _begin_write(self, con: Any) -> None:
+        """Hook: take the write lock before a read-then-write sequence (SQLite)."""
+
+    def _insert_job_sql(self) -> str:
+        return """
+            INSERT INTO jobs (job_id, kind, provider, market, "interval", instruments,
+              window_start, window_end, priority, node, state, attempts, retry_at,
+              last_error, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id) DO NOTHING
+            """
+
+    def _job_params(self, job: Job, now: str | None) -> tuple[Any, ...]:
+        return (
+            job.job_id,
+            JobKind(job.kind).value,
+            job.provider,
+            Market(job.market).value,
+            Interval(job.interval).value,
+            json.dumps(list(job.instruments)),
+            self._enc_date(job.window.start),
+            self._enc_date(job.window.end),
+            job.priority,
+            job.node,
+            JobState(job.state).value,
+            job.attempts,
+            self._enc_ts(job.retry_at),
+            job.last_error,
+            now,
+            now,
+        )
+
+    def submit_jobs(self, jobs: Iterable[Job]) -> int:
+        """Insert jobs that do not exist yet; existing rows (any state) are left untouched.
+
+        Returns the number of newly inserted jobs.
+        """
+        now = self._enc_ts(_now())
+        inserted = 0
+        with self._connect() as con:
+            self._begin_write(con)
+            for job in jobs:
+                cur = con.execute(self._insert_job_sql(), self._job_params(job, now))
+                inserted += 1 if cur.rowcount == 1 else 0
+        return inserted
+
+    def submit_job(self, job: Job) -> bool:
+        return self.submit_jobs([job]) == 1
+
+    def claim_job(
+        self,
+        *,
+        now: datetime,
+        exclude_providers: Sequence[str] = (),
+        providers: Sequence[str] | None = None,
+    ) -> Job | None:
+        """Atomically lease the best runnable job (pending, or failed with ``retry_at`` due).
+
+        Order is ``priority, created_at, job_id``. The row becomes ``leased`` with
+        ``updated_at = now``; the conditional UPDATE guarantees two workers never claim the
+        same job, even where ``_begin_write`` is a no-op.
+        """
+        stamp = self._enc_ts(now)
+        sql = "SELECT * FROM jobs WHERE state IN ('pending','failed') AND (retry_at IS NULL OR retry_at <= ?)"
+        params: list[Any] = [stamp]
+        if exclude_providers:
+            sql += f" AND provider NOT IN ({', '.join('?' for _ in exclude_providers)})"
+            params.extend(exclude_providers)
+        if providers is not None:
+            sql += f" AND provider IN ({', '.join('?' for _ in providers) or 'NULL'})"
+            params.extend(providers)
+        sql += " ORDER BY priority, created_at, job_id LIMIT 1"
+        with self._connect() as con:
+            self._begin_write(con)
+            row = con.execute(sql, params).fetchone()
+            if row is None:
+                return None
+            cur = con.execute(
+                "UPDATE jobs SET state='leased', updated_at=? "
+                "WHERE job_id=? AND state IN ('pending','failed')",
+                (stamp, row["job_id"]),
+            )
+            if cur.rowcount != 1:
+                return None
+        return replace(_job(row), state=JobState.LEASED)
+
+    def start_job(self, job_id: str, *, now: datetime) -> bool:
+        """leased -> running (also refreshes the heartbeat)."""
+        with self._connect() as con:
+            cur = con.execute(
+                "UPDATE jobs SET state='running', updated_at=? WHERE job_id=? AND state IN ('leased','running')",
+                (self._enc_ts(now), job_id),
+            )
+            return cur.rowcount == 1
+
+    def touch_job(self, job_id: str, *, now: datetime) -> bool:
+        """Heartbeat for a leased/running job."""
+        with self._connect() as con:
+            cur = con.execute(
+                "UPDATE jobs SET updated_at=? WHERE job_id=? AND state IN ('leased','running')",
+                (self._enc_ts(now), job_id),
+            )
+            return cur.rowcount == 1
+
+    def finish_job(
+        self,
+        job_id: str,
+        state: JobState,
+        *,
+        now: datetime,
+        attempts: int,
+        retry_at: datetime | None = None,
+        last_error: str | None = None,
+    ) -> bool:
+        """Leave leased/running for ``done`` / ``failed`` / ``dead`` (or back to ``pending``).
+
+        A no-op returning False when the lease was lost (e.g. reaped) in the meantime.
+        """
+        with self._connect() as con:
+            cur = con.execute(
+                "UPDATE jobs SET state=?, attempts=?, retry_at=?, last_error=?, updated_at=? "
+                "WHERE job_id=? AND state IN ('leased','running')",
+                (
+                    JobState(state).value,
+                    attempts,
+                    self._enc_ts(retry_at),
+                    last_error,
+                    self._enc_ts(now),
+                    job_id,
+                ),
+            )
+            return cur.rowcount == 1
+
+    def reap_expired_leases(
+        self, *, now: datetime, ttl: timedelta = timedelta(seconds=60), max_attempts: int | None = None
+    ) -> int:
+        """Recover leased/running rows whose heartbeat is older than ``ttl``.
+
+        They return to ``pending`` with ``attempts + 1`` (a crashed worker counts as an
+        attempt so a poison job cannot loop forever); once that reaches ``max_attempts``
+        the job becomes ``dead``. Returns the number of recovered rows.
+        """
+        cutoff = self._enc_ts(now - ttl)
+        limit = max_attempts if max_attempts is not None else 2**31 - 1
+        with self._connect() as con:
+            self._begin_write(con)
+            cur = con.execute(
+                """
+                UPDATE jobs SET
+                  state = CASE WHEN attempts + 1 >= ? THEN 'dead' ELSE 'pending' END,
+                  attempts = attempts + 1,
+                  retry_at = NULL,
+                  last_error = 'lease expired (worker lost)',
+                  updated_at = ?
+                WHERE state IN ('leased','running') AND updated_at < ?
+                """,
+                (limit, self._enc_ts(now), cutoff),
+            )
+            return cur.rowcount
+
+    def count_jobs(self) -> dict[JobState, int]:
+        with self._connect() as con:
+            rows = con.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state").fetchall()
+        counts = {state: 0 for state in JobState}
+        for row in rows:
+            counts[JobState(row["state"])] = row["n"]
+        return counts
+
+    def list_checkpoints(self) -> list[Checkpoint]:
+        with self._connect() as con:
+            rows = con.execute("SELECT * FROM checkpoints ORDER BY job_id").fetchall()
+        return [
+            Checkpoint(job_id=r["job_id"], cursor=r["cursor"], updated_at=_parse_ts(r["updated_at"]))
+            for r in rows
+        ]
 
     # --- checkpoints ---
 
@@ -309,6 +490,10 @@ class SqliteStateStore(SqlStateStore):
                 "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _begin_write(self, con: sqlite3.Connection) -> None:
+        # Take the write lock up front so read-then-write claims cannot interleave.
+        con.execute("BEGIN IMMEDIATE")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

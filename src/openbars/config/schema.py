@@ -44,3 +44,28 @@ class Settings:
     storage_path: str = "./data"
     default_adjustment: Adjustment = Adjustment.SPLIT
     nodes: tuple[NodeConfig, ...] = (NodeConfig(name="local"),)
+    # Explicit symbols per market (InstrumentMaster-based universes come later).
+    universe: Mapping[Market, tuple[str, ...]] = field(default_factory=dict)
+    reconcile: Mapping[str, object] = field(default_factory=dict)  # raw ``reconcile:`` section
+    schedule: Mapping[str, object] = field(default_factory=dict)  # raw ``schedule:`` section
+
+    def secret_values(self, min_length: int = 8) -> tuple[str, ...]:
+        """Resolved credential values (for output scrubbing only; never log them)."""
+        return tuple(
+            sorted(
+                {
+                    v
+                    for p in self.providers.values()
+                    for k, v in p.options.items()
+                    if isinstance(v, str) and len(v) >= min_length and _is_secret_key(k)
+                }
+            )
+        )
+
+
+_SECRET_KEY_PARTS = ("key", "secret", "token", "password", "dsn")
+
+
+def _is_secret_key(name: str) -> bool:
+    lowered = name.lower()
+    return any(part in lowered for part in _SECRET_KEY_PARTS)

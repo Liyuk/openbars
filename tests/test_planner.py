@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
+from fakes import FakeProvider, MemoryRawStore
+
+from openbars.config.schema import Selection
+from openbars.core.models import DateRange, Interval, Market
+from openbars.orchestrator.jobs import WHOLE_MARKET, JobKind, JobState, make_job_id
+from openbars.orchestrator.planner import (
+    DefaultPlanner,
+    EmptyCoverage,
+    RawStoreCoverage,
+    StaticCoverage,
+    split_windows,
+)
+from openbars.providers.base import BatchShape
+from openbars.storage.state import SqliteStateStore
+
+pytestmark = pytest.mark.usefixtures("no_network")
+
+# Tuesday 2026-03-10 11:00 America/New_York; the latest ready session is Monday 2026-03-09.
+NOW = datetime(2026, 3, 10, 15, 0, tzinfo=UTC)
+LATEST = date(2026, 3, 9)
+
+
+def massive(**kw) -> FakeProvider:
+    return FakeProvider(
+        "massive", batch=BatchShape.WHOLE_MARKET_PER_DAY, rolling_window=timedelta(days=730), max_symbols=10**6, **kw
+    )
+
+
+def alpaca(**kw) -> FakeProvider:
+    return FakeProvider("alpaca", history_start=date(2016, 1, 1), max_symbols=200, **kw)
+
+
+def yfinance(**kw) -> FakeProvider:
+    return FakeProvider("yfinance", max_symbols=50, **kw)
+
+
+def sel(start: date, end: date | None = None, intervals=frozenset({Interval.D1})) -> Selection:
+    return Selection(frozenset({Market.US}), intervals, start, end)
+
+
+def plan(selection, providers, coverage=None, universe=("TEST1", "ZZZA"), now=NOW):
+    return DefaultPlanner().plan(
+        selection, coverage or EmptyCoverage(), now=now, universe=universe,
+        providers={p.id: p for p in providers},
+    )  # fmt: skip
+
+
+def by(p, provider):
+    return [j for j in p.jobs if j.provider == provider]
+
+
+def test_massive_one_job_per_session_not_per_symbol():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 31)), [massive()], universe=["TEST1", "ZZZA", "TEST2"])
+    jobs = by(p, "massive")
+    assert sorted(j.window.start for j in jobs) == [date(2026, 3, d) for d in (2, 3, 4, 5, 6, 9)]
+    assert all(j.window.start == j.window.end for j in jobs)
+    assert all(j.instruments == WHOLE_MARKET for j in jobs)
+    daily = [j for j in jobs if j.kind is JobKind.DAILY]
+    assert [j.window.start for j in daily] == [LATEST]  # end clipped to the last ready session
+    assert daily[0].priority < min(j.priority for j in jobs if j.kind is JobKind.BACKFILL)
+    assert p.budget.providers["massive"].requests == 6
+
+
+def test_weekend_and_holiday_sessions_skipped():
+    # Jan 17-18 weekend, Jan 19 market holiday.
+    p = plan(sel(date(2026, 1, 15), date(2026, 1, 21)), [massive()])
+    assert sorted(j.window.start for j in p.jobs) == [date(2026, 1, d) for d in (15, 16, 20, 21)]
+
+
+def test_dates_outside_massive_rolling_window_not_planned():
+    p = plan(sel(date(2020, 1, 2), date(2026, 3, 9)), [massive()])
+    floor = NOW.date() - timedelta(days=730)
+    assert p.jobs and min(j.window.start for j in p.jobs) >= floor
+    old = plan(sel(date(2020, 1, 2), date(2020, 1, 10)), [massive()])
+    assert len(old) == 0
+
+
+def test_massive_session_not_ready_is_not_planned():
+    # 15:00 UTC on the session day itself: still before 00:00 ET of D+1.
+    p = plan(sel(date(2026, 3, 9), date(2026, 3, 10)), [massive()], now=datetime(2026, 3, 10, 3, 30, tzinfo=UTC))
+    assert len(p) == 0  # 2026-03-09 23:30 ET: Monday is not ready yet
+
+
+def test_alpaca_jobs_are_symbol_batched():
+    symbols = [f"S{i:03d}" for i in range(450)]
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [alpaca()], universe=symbols)
+    jobs = by(p, "alpaca")
+    assert sorted(len(j.instruments) for j in jobs) == [50, 50, 200, 200, 200, 200]
+    daily = [j for j in jobs if j.kind is JobKind.DAILY]
+    backfill = [j for j in jobs if j.kind is JobKind.BACKFILL]
+    assert len(daily) == 3 and all(j.window == DateRange(LATEST, LATEST) for j in daily)
+    assert len(backfill) == 3 and all(j.window == DateRange(date(2026, 3, 2), date(2026, 3, 6)) for j in backfill)
+    assert {s for j in jobs for s in j.instruments} == set(symbols)
+
+
+def test_alpaca_history_windows_bounded_and_not_before_2016():
+    p = plan(sel(date(2015, 6, 1), date(2018, 12, 31)), [alpaca()])
+    jobs = by(p, "alpaca")
+    assert min(j.window.start for j in jobs) >= date(2016, 1, 1)
+    assert all((j.window.end - j.window.start).days < 366 for j in jobs)
+    assert len(jobs) == 3  # 2016, 2017, 2018 (symbols fit in one batch)
+
+
+def test_symbol_providers_need_a_universe_but_massive_still_plans():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [massive(), alpaca(), yfinance()], universe=None)
+    assert {j.provider for j in p.jobs} == {"massive"}
+    assert any(n.code == "no_universe" for n in p.notes)
+
+
+def test_massive_takes_precedence_over_alpaca():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [massive(), alpaca()])
+    assert {j.provider for j in p.jobs} == {"massive"}
+
+
+def test_alpaca_covers_sessions_massive_cannot():
+    p = plan(sel(date(2023, 1, 3), date(2023, 1, 6)), [massive(), alpaca()])
+    assert {j.provider for j in p.jobs} == {"alpaca"}
+
+
+def test_yfinance_only_pre_2016_with_primaries_enabled():
+    syms = [f"S{i:03d}" for i in range(120)]
+    p = plan(sel(date(2015, 12, 28), date(2016, 1, 6)), [massive(), alpaca(), yfinance()], universe=syms)
+    yf = by(p, "yfinance")
+    assert sorted(len(j.instruments) for j in yf) == [20, 50, 50]
+    assert {j.window for j in yf} == {DateRange(date(2015, 12, 28), date(2015, 12, 31))}
+    assert min(j.priority for j in yf) >= 60
+    assert all(j.window.start >= date(2016, 1, 4) for j in by(p, "alpaca"))  # Jan 1 is a holiday
+
+
+def test_yfinance_fills_gaps_no_primary_can_cover():
+    # Alpaca disabled; Massive's window cannot reach 2020.
+    p = plan(sel(date(2020, 1, 2), date(2020, 1, 10)), [massive(), yfinance()])
+    yf = by(p, "yfinance")
+    assert len(yf) == 1 and yf[0].window == DateRange(date(2020, 1, 2), date(2020, 1, 10))
+    assert yf[0].instruments == ("TEST1", "ZZZA") and yf[0].kind is JobKind.BACKFILL
+    # ... but not for sessions the planned primary covers.
+    recent = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [massive(), yfinance()])
+    assert {j.provider for j in recent.jobs} == {"massive"}
+
+
+def test_no_capable_provider_is_a_note_not_a_crash():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9), intervals=frozenset({Interval.H1})), [massive(), alpaca()])
+    assert len(p) == 0 and p.notes[0].code == "no_provider"
+    crypto = DefaultPlanner().plan(
+        Selection(frozenset({Market.CRYPTO}), history_start=date(2026, 3, 2)), EmptyCoverage(), now=NOW,
+        providers={"massive": massive()},
+    )  # fmt: skip
+    assert len(crypto) == 0 and crypto.notes
+
+
+def test_planning_twice_yields_identical_job_ids_and_submit_is_idempotent(tmp_path):
+    args = (sel(date(2026, 3, 2), date(2026, 3, 9)), [massive(), alpaca()])
+    a, b = plan(*args), plan(*args)
+    assert [j.job_id for j in a] == [j.job_id for j in b]
+    store = SqliteStateStore(tmp_path / "state.db")
+    assert store.submit_jobs(a.jobs) == len(a)
+    assert store.submit_jobs(b.jobs) == 0
+    assert len(store.list_jobs()) == len(a)
+
+
+def test_submit_does_not_reset_done_dead_or_failed_jobs(tmp_path):
+    from dataclasses import replace
+
+    store = SqliteStateStore(tmp_path / "state.db")
+    jobs = plan(sel(date(2026, 3, 2), date(2026, 3, 4)), [massive()]).jobs
+    store.submit_jobs(jobs)
+    for job, state in zip(jobs, (JobState.DONE, JobState.DEAD, JobState.FAILED)):
+        store.save_job(replace(job, state=state, attempts=2, last_error="x"))
+    assert store.submit_jobs(jobs) == 0
+    states = {j.job_id: (j.state, j.attempts) for j in store.list_jobs()}
+    assert states[jobs[0].job_id] == (JobState.DONE, 2)
+    assert states[jobs[1].job_id] == (JobState.DEAD, 2)
+    assert states[jobs[2].job_id] == (JobState.FAILED, 2)
+
+
+def test_job_id_is_stable_and_field_sensitive():
+    base = (JobKind.DAILY, "massive", Market.US, Interval.D1, WHOLE_MARKET, DateRange(LATEST, LATEST))
+    assert make_job_id(*base) == make_job_id(*base)
+    assert len(make_job_id(*base)) >= 16
+    assert make_job_id(JobKind.BACKFILL, *base[1:]) != make_job_id(*base)
+    assert make_job_id(*base[:1], "alpaca", *base[2:]) != make_job_id(*base)
+    assert make_job_id(*base[:4], ("A",), base[5]) != make_job_id(*base[:4], ("B",), base[5])
+
+
+def test_static_coverage_drops_covered_sessions():
+    covered = StaticCoverage([("massive", date(2026, 3, 2)), ("massive", date(2026, 3, 9))])
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [massive()], coverage=covered)
+    assert sorted(j.window.start for j in p.jobs) == [date(2026, 3, d) for d in (3, 4, 5, 6)]
+    assert all(j.kind is JobKind.BACKFILL for j in p.jobs)  # the latest session is covered
+
+
+def test_static_coverage_per_symbol_for_alpaca():
+    days = [date(2026, 1, d) for d in (5, 6, 7, 8, 9)]
+    covered = StaticCoverage([("alpaca", d, "TEST1") for d in days])
+    p = plan(sel(date(2026, 1, 5), date(2026, 1, 9)), [alpaca()], coverage=covered)
+    assert [j.instruments for j in p.jobs] == [("ZZZA",)]
+
+
+def test_raw_store_coverage_drops_what_was_fetched():
+    raw = MemoryRawStore()
+    fake = massive()
+    from openbars.providers.base import FetchRequest, RawBatch
+
+    req = FetchRequest(Market.US, Interval.D1, (), DateRange(date(2026, 3, 3), date(2026, 3, 4)))
+    raw.append(RawBatch("massive", "f1", req, tuple(fake.fetch_bars(req).bars)))
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 5)), [massive()], coverage=RawStoreCoverage(raw))
+    assert sorted(j.window.start for j in p.jobs) == [date(2026, 3, 2), date(2026, 3, 5)]
+
+
+def test_budget_estimates_requests_and_duration():
+    p = plan(sel(date(2026, 3, 2), date(2026, 3, 9)), [massive(limit_per_minute=4)])
+    b = p.budget.providers["massive"]
+    assert (b.jobs, b.requests) == (6, 6)
+    assert b.min_duration >= timedelta(minutes=1)  # 6 requests at an effective 3/min
+    assert not p.budget.requires_acceptance()  # daily only
+
+
+def test_non_daily_budget_requires_acceptance_when_large():
+    h1 = FakeProvider("hourly", interval=Interval.H1, max_symbols=200, limit_per_minute=2)
+    p = plan(
+        sel(date(2026, 1, 5), date(2026, 3, 9), intervals=frozenset({Interval.H1})),
+        [h1], universe=[f"S{i:03d}" for i in range(200)],
+    )  # fmt: skip
+    assert p.budget.non_daily and p.budget.min_duration > timedelta(0)
+    assert p.budget.requires_acceptance(threshold=timedelta(seconds=1))
+    assert not p.budget.requires_acceptance(threshold=timedelta(days=365))
+
+
+def test_split_windows():
+    days = [date(2024, 1, 1) + timedelta(days=i) for i in range(0, 800, 40)]
+    windows = split_windows(days, 366)
+    assert windows[0].start == days[0] and windows[-1].end == days[-1]
+    assert all((w.end - w.start).days < 366 for w in windows)
