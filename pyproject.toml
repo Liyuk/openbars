@@ -63,7 +63,6 @@ packages = ["src/openbars"]
 [tool.hatch.build.targets.wheel.force-include]
 "config.example.yaml" = "openbars/_templates/config.example.yaml"
 ".env.example" = "openbars/_templates/.env.example"
-"src/openbars/web/static" = "openbars/web/static"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

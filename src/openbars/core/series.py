@@ -316,6 +316,9 @@ class CanonicalDailyRow:
     source_fingerprint: str
     generated_at: datetime
     currency: str | None = None  # ISO 4217 of the bar prices; None when unknown
+    # #154: earliest moment the bar may be used for research (the selected source's raw
+    # ``ingested_at``); None when the producer does not know it.
+    available_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument_id", "policy_version", "provider", "feed", "adjustment"):
@@ -347,6 +350,10 @@ class CanonicalDailyRow:
             raise TypeError("source_fingerprint must be str")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at must be timezone-aware")
+        if self.available_at is not None and (
+            self.available_at.tzinfo is None or self.available_at.utcoffset() is None
+        ):
+            raise ValueError("available_at must be timezone-aware")
         if self.currency is not None:
             cur = self.currency.strip() if isinstance(self.currency, str) else ""
             if len(cur) != 3 or not cur.isalpha():
