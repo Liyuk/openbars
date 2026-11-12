@@ -29,6 +29,10 @@ def pytest_configure(config):
         "markers",
         "postgres_live: needs a reachable Postgres (set OPENBARS_TEST_PG_DSN); skipped otherwise",
     )
+    config.addinivalue_line(
+        "markers",
+        "network: hits the public internet; skipped unless OPENBARS_YF_LIVE=1",
+    )
 
 
 @pytest.fixture

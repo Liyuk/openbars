@@ -28,10 +28,12 @@ __all__ = [
     "HK_VENUES",
     "US_HK_ORDINARY_KEY",
     "HKInstrumentId",
+    "from_yahoo_hk_ticker",
     "hk_adr_external_ids",
     "hk_instrument_id",
     "normalize_hk_symbol",
     "parse_hk_instrument_id",
+    "to_yahoo_hk_ticker",
     "us_hk_ordinary_external_ids",
 ]
 
@@ -165,3 +167,20 @@ def us_hk_ordinary_external_ids(hk_id: str) -> dict[str, str]:
     """``external_ids`` fragment to put on the US ADR; ``hk_id`` must be a valid HK id."""
     parse_hk_instrument_id(hk_id)
     return {US_HK_ORDINARY_KEY: hk_id}
+
+
+def to_yahoo_hk_ticker(symbol: str) -> str:
+    """Map a 5-digit id or common spelling to Yahoo's ``0700.HK`` form.
+
+    HKEX codes are five digits. Yahoo's usual equity ticker drops one leading
+    zero (``00700`` / ``hk:eq:xhkg:00700`` → ``0700.HK``; ``09988`` → ``9988.HK``).
+    Codes that do not start with ``0`` keep all five digits (``12345`` → ``12345.HK``).
+    """
+    _venue, code = normalize_hk_symbol(symbol)
+    return f"{code[1:]}.HK" if code.startswith("0") else f"{code}.HK"
+
+
+def from_yahoo_hk_ticker(ticker: str) -> str:
+    """Return the 5-digit HKEX code for a Yahoo ticker or any accepted spelling."""
+    _venue, code = normalize_hk_symbol(ticker)
+    return code

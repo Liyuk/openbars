@@ -69,7 +69,9 @@ def provider(download=None, **kw) -> YFinanceProvider:
 # -- capabilities ---------------------------------------------------------------------------
 def test_capabilities_and_quota():
     p = provider()
-    (cap,) = p.capabilities()
+    caps = {c.market: c for c in p.capabilities()}
+    cap = caps[Market.US]
+    assert Market.HK in caps
     assert (p.id, cap.provider, cap.feed) == ("yfinance", "yfinance", "yahoo")
     assert cap.market is Market.US and cap.interval is Interval.D1
     assert cap.batch is BatchShape.MULTI_SYMBOL and cap.max_symbols_per_request == 50

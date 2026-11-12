@@ -154,6 +154,7 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **常见写法归一化**（`normalize_hk_symbol`）：`00700` / `700` / `0700.HK` / `HK.00700` / `HK00700` / `xhkg:00700` → `xhkg` + `00700`。港股只有一个交易所，裸 1–5 位数字是明确的（与 A 股不同）。
 - **代码复用与代际**：与 A 股相同，已退役 id 永不复用；再次上市为 `:g2`、`:g3` …。第 1 代无后缀，`:g1` 不是合法写法。`hk_instrument_id` / `parse_hk_instrument_id` 构造与反解。
 - **美股 ADR 关联**：港股正股与美股 ADR 是两个 instrument。正股的 `external_ids["us_adr"]` 指向美股 ADR 的 id；ADR 的 `external_ids["hk_ordinary"]` 指向港股正股 id（`hk_adr_external_ids` / `us_hk_ordinary_external_ids`）。不把 ADR ticker 写进港股 id。
+- **yfinance `.HK` 映射**（#71）：`to_yahoo_hk_ticker` 把 5 位代码 / `hk:eq:xhkg:00700` 写成 Yahoo 常见的 `0700.HK`（去掉一位前导 0）。适配器落库仍用 `yfinance/yahoo/split`，`auto_adjust=False`，按 XHKG 丢弃非交易日行；不把 Yahoo 复权序列当规范层。规划器接入见 #77。
 
 ### 3.3 Bar
 
