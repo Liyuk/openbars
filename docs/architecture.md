@@ -154,9 +154,9 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **常见写法归一化**（`normalize_hk_symbol`）：`00700` / `700` / `0700.HK` / `HK.00700` / `HK00700` / `xhkg:00700` → `xhkg` + `00700`。港股只有一个交易所，裸 1–5 位数字是明确的（与 A 股不同）。
 - **代码复用与代际**：与 A 股相同，已退役 id 永不复用；再次上市为 `:g2`、`:g3` …。第 1 代无后缀，`:g1` 不是合法写法。`hk_instrument_id` / `parse_hk_instrument_id` 构造与反解。
 - **美股 ADR 关联**：港股正股与美股 ADR 是两个 instrument。正股的 `external_ids["us_adr"]` 指向美股 ADR 的 id；ADR 的 `external_ids["hk_ordinary"]` 指向港股正股 id（`hk_adr_external_ids` / `us_hk_ordinary_external_ids`）。不把 ADR ticker 写进港股 id。
-- **yfinance `.HK` 映射**（#71）：`to_yahoo_hk_ticker` 把 5 位代码 / `hk:eq:xhkg:00700` 写成 Yahoo 常见的 `0700.HK`（去掉一位前导 0）。适配器落库仍用 `yfinance/yahoo/split`，`auto_adjust=False`，按 XHKG 丢弃非交易日行；不把 Yahoo 复权序列当规范层。规划器接入见 #77。
+- **yfinance `.HK` 映射**（#71）：`to_yahoo_hk_ticker` 把 5 位代码 / `hk:eq:xhkg:00700` 写成 Yahoo 常见的 `0700.HK`（去掉一位前导 0）。适配器落库仍用 `yfinance/yahoo/split`，`auto_adjust=False`，按 XHKG 丢弃非交易日行；不把 Yahoo 复权序列当规范层。规划器接入见 #77（只用 yfinance；AKShare 不进规划器）。
 - **复权口径**（#75）：与美股相同，落库存拆股调整后的序列（或源给出的因子 / 公司行动），查询时由 `openbars.normalize.adjust` 派生。拆股 `hk_split`、合股 `hk_consolidation` 都是 `kind=SPLIT`（ratio = 新/旧，合股 < 1）。红股 `hk_bonus` 编码为带 `ratio` 的股票股利，**默认不按拆股套用**（与美股 `include_stock_dividends=False` 一致），需显式 `include_bonus=True`。供股与分红币种等未决事项见 [discussion #68](https://github.com/Liyuk/openbars/discussions/68)，本步不自行拍板。
-- **AKShare 港股备源**（#72）：`openbars.providers.hk.akshare`，入口 `stock_hk_hist`，代码用 5 位（`00700`）。只请求不复权（`adjust=""`），按 XHKG 丢弃非交易日；源身份 `akshare/eastmoney/raw`。库为 MIT，**不转授**东财等上游数据权；官方声明偏学术研究；[东财法律声明](https://about.eastmoney.com/home/disclaimer) 禁止未经交易所书面同意复制传播行情。openbars 只在用户本机落库。默认低频限流（4 次/分钟、80 次/24h），按代码逐只请求，不在默认配置里鼓励批量爬取。规划器接入见 #77。
+- **AKShare 港股备源**（#72）：`openbars.providers.hk.akshare`，入口 `stock_hk_hist`，代码用 5 位（`00700`）。只请求不复权（`adjust=""`），按 XHKG 丢弃非交易日；源身份 `akshare/eastmoney/raw`。库为 MIT，**不转授**东财等上游数据权；官方声明偏学术研究；[东财法律声明](https://about.eastmoney.com/home/disclaimer) 禁止未经交易所书面同意复制传播行情。openbars 只在用户本机落库。默认低频限流（4 次/分钟、80 次/24h），按代码逐只请求，不在默认配置里鼓励批量爬取。规划器（#77）仍只用 yfinance，本备源不自动进 plan/run。
 
 ### 3.3 Bar
 
@@ -224,7 +224,7 @@ Bar
 - **午休**：连续竞价 09:30–11:30、13:00–15:00。`session_bounds(day)` 在交易日返回**两段** UTC `(open, close)`（11:30–13:00 上海时间为空档），非交易日返回空元组。`trading_session(s)` 的 `opens_at` / `closes_at` 为当日 09:30 与 15:00（Asia/Shanghai，带时区），不只是上午段。
 - `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（15:00 收盘后再等待 N 分钟）。`openbars.calendars` 以 `cn_` 前缀导出函数（`cn_sessions` 等），避免与 XNYS 同名函数冲突。
 - 覆盖范围：库内节假日只记录到固定年份（4.13.x 为 2026），超出时库抛 `ValueError`，不会静默当作无假日；需升级依赖来扩展。
-- **规划器已接入（#62）**：`Market.CN` 不再产生 `no_calendar`：`_sessions` 用本日历、`_today` 取 `Asia/Shanghai`、`latest_ready_session(now, CN)` = `latest_completed_session(now, 30)`（15:00 收盘后再等 30 分钟）。没有声明 `cn`/`1d` 的 provider 时仍记 `no_provider`，不会凭空生成作业；仍无日历的市场（如 HK）继续 `no_calendar`。详见 §3.5.3 与 §3.4.4。
+- **规划器已接入（#62）**：`Market.CN` 不再产生 `no_calendar`：`_sessions` 用本日历、`_today` 取 `Asia/Shanghai`、`latest_ready_session(now, CN)` = `latest_completed_session(now, 30)`（15:00 收盘后再等 30 分钟）。没有声明 `cn`/`1d` 的 provider 时仍记 `no_provider`，不会凭空生成作业。港股见 §3.4.5 与 §3.5.4。
 
 #### 3.4.4 A 股涨跌停与停牌标记（`openbars.normalize.cn_quality`，#61）
 
@@ -245,7 +245,7 @@ Bar
 - `sessions`、`is_session`、`latest_completed_session(now, wait_minutes=30)`（按当日实际收市时间再等待 N 分钟）。模块函数以 `hk_` 前缀从 `openbars.calendars` 导出。
 - **覆盖范围**：库内默认会话区间有上下限（`exchange-calendars` 4.13.x 约为 2006-11-13 至 2027-11-11，以 `coverage()` 为准）。超出时抛 `ValueError`，**不要手写假期或未来台风/黑雨休市**。历史上库已收录的临时休市（部分台风/黑雨日出现在 `adhoc_holidays`）按库数据使用。
 - **临时休市登记**（#76，`openbars.calendars.hk_closures`）：本仓库**不随包发布**台风/黑雨日期表。用户可根据港交所公告，手动或半自动调用 `register_adhoc_closure` / `load_adhoc_closures` 登记一日，**必须**同时给出 `source` 与 `reference`（公告 URL、通告编号或标题）。半自动入口只接收已经解析好的记录，openbars **不抓取**港交所网站。覆盖范围之外可以留下记录，但 `is_session` 仍拒绝编造假期表。可选 `JsonAdhocClosureStore` 把登记写到用户自己的文件，进程默认是空的内存表。规划器与 yfinance / AKShare 适配器共用模块级 `is_session`，登记生效后会自动跳过该日。
-- **规划器尚未接入**：`Market.HK` 仍产生 `no_calendar` 并跳过，在没有 provider 时不会凭空生成作业。
+- **规划器已接入（#77）**：`Market.HK` 不再产生 `no_calendar`：`_sessions` 用本日历、`_today` 取 `Asia/Hong_Kong`、`latest_ready_session(now, HK)` = `latest_completed_session(now, 30)`（按当日实际收市时间，16:00 或半日市 12:00，再等 30 分钟）。规划器只用已启用且声明 `hk`/`1d` 的 **yfinance**；AKShare 可本机调用，但不进入 plan/run。没有 yfinance 时记 `no_provider`，不会凭空生成作业。symbol 必须是 `normalize_hk_symbol` 认得的写法（`00700` / `0700.HK` / `hk:eq:xhkg:00700` …，同一只股票多种写法只规划一次）；无法识别的写法跳过并记 `no_symbols`。覆盖判断同时认配置写法、5 位代码、Yahoo `0700.HK` 与 instrument id。`run` 写入 raw；本版本不对港股做美股 XNYS 对账，没有独立 canonical sink（raw-only）。
 
 ### 3.5 Provider 能力声明
 
@@ -282,7 +282,7 @@ QuotaPolicy
 - 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
 - **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
 - `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`），并按 `baseAsset` / `quoteAsset`（去空白；缺失或空白为 `None`）填充 `base_asset` / `quote_asset`；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。`normalize.crypto_pairs.listing_from_provider_instrument(row, provider=…, venue=None)` 把此类行转成 `CryptoPairListing`（缺 base/quote 抛 `ValueError`，`venue` 缺省取 `row.exchange`），CLI 写路径（`run` / `plan --submit`）会自动调用并入库（见 §3.2.1）；dry-run `plan` 不调用。无公司行动。
-- **编排器接入（#44）**：`markets: [crypto]` 时 `plan` / `run` 生成并执行加密日线任务。规划器按市场分派日历：`Market.US` → XNYS，`Market.CRYPTO` → `CryptoCalendar`（`latest_ready_session(now, market=CRYPTO)` = 已收盘满 30 分钟的最近 UTC 日，周末也出任务）；`Market.CN` 见 §3.5.3（沪深日历）；其它市场仍记 `no_calendar` 并跳过。声明 `crypto`/`1d` 的已启用 provider 参与；yfinance 只是美股回退，不参与。Binance、Coinbase 均为 `PER_SYMBOL`，且**每个 symbol 只发给方言匹配的 provider**：未注入交易对主数据时按启发式——含 `-` 的是 Coinbase product id，`[A-Z0-9]+` 的是 Binance symbol；`DefaultPlanner(instruments=master)` 注入主数据后改为只在 `resolve(symbol, provider=…, market=CRYPTO)` 命中时才规划。宁可跳过一个 symbol，也不产生一个必然失败的任务。两家交易所永不合并为一个任务或一个 instrument。配置只需 `markets: [crypto]`、启用 `providers.binance` / `providers.coinbase`（无 API key）、`universe.crypto.symbols`；`openbars verify` 仍只面向美股。**写路径自动入库交易对（#51）**：`run` / `plan --submit` 先列出并入库交易对再规划，规划器因此改走 `resolve`；master 为空且列表失败时回退启发式。dry-run `plan` 不入库。
+- **编排器接入（#44）**：`markets: [crypto]` 时 `plan` / `run` 生成并执行加密日线任务。规划器按市场分派日历：`Market.US` → XNYS，`Market.CRYPTO` → `CryptoCalendar`（`latest_ready_session(now, market=CRYPTO)` = 已收盘满 30 分钟的最近 UTC 日，周末也出任务）；`Market.CN` 见 §3.5.3（沪深日历）；`Market.HK` 见 §3.5.4（XHKG 日历，只用 yfinance）。声明 `crypto`/`1d` 的已启用 provider 参与；yfinance 只是美股回退，不参与。Binance、Coinbase 均为 `PER_SYMBOL`，且**每个 symbol 只发给方言匹配的 provider**：未注入交易对主数据时按启发式——含 `-` 的是 Coinbase product id，`[A-Z0-9]+` 的是 Binance symbol；`DefaultPlanner(instruments=master)` 注入主数据后改为只在 `resolve(symbol, provider=…, market=CRYPTO)` 命中时才规划。宁可跳过一个 symbol，也不产生一个必然失败的任务。两家交易所永不合并为一个任务或一个 instrument。配置只需 `markets: [crypto]`、启用 `providers.binance` / `providers.coinbase`（无 API key）、`universe.crypto.symbols`；`openbars verify` 仍只面向美股。**写路径自动入库交易对（#51）**：`run` / `plan --submit` 先列出并入库交易对再规划，规划器因此改走 `resolve`；master 为空且列表失败时回退启发式。dry-run `plan` 不入库。
 
 #### 3.5.2 Coinbase Exchange 日线（`openbars.providers.crypto.coinbase`）
 
@@ -309,6 +309,11 @@ QuotaPolicy
 - **冒烟**：`tests/test_baostock_public_smoke.py` 仅在 `OPENBARS_BAOSTOCK_SMOKE=1` 时运行，一只股票两个交易日、只尝试一次、无重试；海外网络常连不上，此时 skip。只写 pytest `tmp_path`，不入库。
 - `config.example.yaml` 中 `providers.baostock` 默认 `enabled: false`。
 - **编排器接入（#62）**：`markets: [cn]`、启用 `providers.baostock`、`universe.cn.symbols`（如 `sh.600000`）即可 `plan` / `run`（无需 instrument 主数据）。规划器与加密一样：无整市场（Massive）路径、无 yfinance 回退，所有声明 `cn`/`1d` 的已启用 provider 参与（BaoStock 为 `PER_SYMBOL`）；日期取 `Asia/Shanghai`，只规划沪深日历（XSHG）上的交易日，`latest_ready_session` = 15:00 收盘 + 30 分钟。symbol 必须是 `normalize_cn_symbol` 认得的写法（`sh.600000` / `600000.SH` …，同一只股票的多种写法只规划一次）；裸 6 位代码等无法识别的写法跳过并记 `no_symbols` 备注，不规划任务。覆盖判断同时认配置写法与 BaoStock 原生写法（`sh.600000`），换一种写法不会重复拉取。
+
+#### 3.5.4 yfinance 港股日线编排器（#77）
+
+配置 `markets: [hk]`、启用 `providers.yfinance`（`openbars[yfinance]`）、`universe.hk.symbols`（如 `00700` / `0700.HK`）即可 `plan` / `run`。日历为 XHKG（§3.4.5），日期取 `Asia/Hong_Kong`，只规划交易所交易日，`latest_ready_session` = 当日实际收市 + 30 分钟。规划器没有整市场路径，也不走美股那套 yfinance 回退窗口；yfinance 是港股唯一规划源（`MULTI_SYMBOL`）。同一只股票的多种写法只规划一次；覆盖同时认配置写法、5 位代码、Yahoo ticker 与 `hk:eq:xhkg:…`。`run` 落 raw；暂无港股 canonical sink，不会误走 XNYS 对账。
+
 - **落库（`CnCanonicalSink`）**：`DispatchingSink(cn=…)` 把 `job.market = CN` 的日线交给它，**不走美股 XNYS 对账器**；没有 `cn=` 的 `DispatchingSink` 对 CN 只保留 raw。流程：用 `bar.instrument_id` / 主数据解析 / 确定性的 `cn_instrument_id(*normalize_cn_symbol(symbol))`（第 1 代 id）得到 `instrument_id`，首次出现时由 `ensure_cn_instruments`（`openbars.normalize.cn_ingest`）写入 `Instrument(market=CN, asset_class=EQUITY, currency=CNY)` 与 `baostock` 原生写法 + 通用 `sh.600000` / `600000.SH` 映射（只做首次 upsert，不复用已退役 id）；**丢弃停牌日**（不写占位，成交量为 0 但未停牌的交易日保留）；按 §3.4.4 附加 `LIMIT_UP` / `LIMIT_DOWN`；写 `adjustment=raw`、`policy_version=cn-daily-v1`、`session=regular`、`selection_reason=primary_source`（单源投影）。`observation_from_raw` 要求有成交量，所以 CN 不走它。`cli.wiring.make_sink` 已接好 `cn=`。
 - **复权因子入库**：`CnCanonicalSink` 带 `factor_store` 时，写完 canonical 后对每个 symbol 调 provider 的 `fetch_adjust_factors`，用 `normalize.cn_adjust.from_baostock` 转成 `AdjustFactor`（`source=baostock`、`method=pct_return`）并 upsert 到 `ref/adjust_factors.parquet`，这样 `run` 之后即可读 `QFQ` / `HFQ`。**窗口默认是作业窗口**（日增量作业常常取不到任何除权事件）；BaoStock 因子是自上市累计的，窗口起点太晚会漏掉更早的除权日，想要完整历史请设 `factor_start`（上市日或 `1990-01-01`，每个 symbol 每个作业多一次请求），或直接用长窗口 backfill / 自行 upsert。因子抓取失败不会让作业失败（bar 已写入），记入 `CnCanonicalSink.factor_errors`。不生成 `CorporateAction`。
 

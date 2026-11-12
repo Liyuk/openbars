@@ -15,6 +15,7 @@ version: 1
 # 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
 # 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
 # 改用 A 股：`markets: [cn]`，启用 providers.baostock，并在 universe.cn.symbols 写代码
+# 改用港股：`markets: [hk]`，启用 providers.yfinance（规划器只用这一源），并在 universe.hk.symbols 写代码
 # （如 sh.600000 / 600000.SH；裸 6 位代码会被跳过）即可 plan / run（默认仍关闭）。
 markets: [us]
 

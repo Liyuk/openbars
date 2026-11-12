@@ -25,6 +25,13 @@ takes part (BaoStock is ``PER_SYMBOL``). A CN symbol must be a spelling ``normal
 accepts (``sh.600000``, ``600000.SH``, ...); bare 6-digit codes and anything else are skipped with a
 note (never planned), and two spellings of one stock plan once. No instrument master is needed.
 
+Hong Kong (``Market.HK``) uses the XHKG calendar (``openbars.calendars.hk``): only exchange sessions
+are planned, dates are Asia/Hong_Kong, and the latest ready session is the last one whose actual
+close (16:00, or 12:00 on a half day) is at least 30 minutes past. The only planned daily source is
+yfinance; AKShare can be called locally but is not routed by the planner. A symbol must be a
+spelling ``normalize_hk_symbol`` accepts (``00700``, ``0700.HK``, ``hk:eq:xhkg:00700``, ...);
+unrecognised spellings are skipped with a note, and two spellings of one stock plan once.
+
 Priorities (lower runs first): latest-session daily jobs 0-10, other primary backfill
 20-40, fallback 60-80.
 """
@@ -42,14 +49,23 @@ from zoneinfo import ZoneInfo
 
 from openbars.calendars import cn as cn_calendar
 from openbars.calendars import crypto as crypto_calendar
+from openbars.calendars import hk as hk_calendar
 from openbars.calendars import xnys
 from openbars.config.schema import Selection
 from openbars.core.models import DateRange, Interval, Market
 from openbars.normalize.cn_instruments import normalize_cn_symbol
+from openbars.normalize.hk_instruments import (
+    hk_instrument_id,
+    normalize_hk_symbol,
+    to_yahoo_hk_ticker,
+)
 from openbars.normalize.instruments import InstrumentMaster
 from openbars.orchestrator.jobs import WHOLE_MARKET, Job, JobKind, make_job_id
 from openbars.providers.base import BatchShape, Provider, SourceCapability
-from openbars.providers.us.massive_window import ROLLING_WINDOW_DAYS, massive_grouped_sessions
+from openbars.providers.us.massive_window import (
+    ROLLING_WINDOW_DAYS,
+    massive_grouped_sessions,
+)
 from openbars.providers.us.yfinance import should_request_yfinance
 from openbars.quota.policy import QuotaPolicy
 from openbars.raw.store import RawStore
@@ -61,6 +77,7 @@ MAX_WINDOW_DAYS = 366  # bounded history window per multi-symbol job
 BUDGET_ACCEPT_THRESHOLD = timedelta(hours=1)
 REGULAR_SESSION_MINUTES = 390
 CN_COMPLETION_WAIT_MINUTES = 30  # Asia/Shanghai 15:00 close + 30
+HK_COMPLETION_WAIT_MINUTES = 30  # Asia/Hong_Kong actual close + 30
 _CN_NATIVE_PREFIX = {"xshg": "sh", "xshe": "sz"}
 
 PRIORITY_DAILY_WHOLE_MARKET = 0
@@ -176,9 +193,13 @@ class Budget:
     @property
     def min_duration(self) -> timedelta:
         """Providers run side by side, so the slowest one bounds the whole plan."""
-        return max((p.min_duration for p in self.providers.values()), default=timedelta(0))
+        return max(
+            (p.min_duration for p in self.providers.values()), default=timedelta(0)
+        )
 
-    def requires_acceptance(self, threshold: timedelta = BUDGET_ACCEPT_THRESHOLD) -> bool:
+    def requires_acceptance(
+        self, threshold: timedelta = BUDGET_ACCEPT_THRESHOLD
+    ) -> bool:
         return self.non_daily and self.min_duration > threshold
 
 
@@ -217,7 +238,9 @@ class Planner(Protocol):
 # --- helpers --------------------------------------------------------------------------------
 
 
-def split_windows(sessions: Sequence[date], max_days: int = MAX_WINDOW_DAYS) -> list[DateRange]:
+def split_windows(
+    sessions: Sequence[date], max_days: int = MAX_WINDOW_DAYS
+) -> list[DateRange]:
     """Group sorted sessions into windows spanning fewer than ``max_days`` calendar days."""
     out: list[DateRange] = []
     start = prev = None
@@ -245,7 +268,8 @@ def _normalize_universe(
     if not isinstance(universe, Mapping):
         universe = {Market.US: universe}
     return {
-        Market(m): sorted({s.strip() for s in syms if s and s.strip()}) for m, syms in universe.items()
+        Market(m): sorted({s.strip() for s in syms if s and s.strip()})
+        for m, syms in universe.items()
     }
 
 
@@ -255,13 +279,19 @@ def latest_ready_session(now: datetime, market: Market = Market.US) -> date | No
     US: latest XNYS session strictly before the New York date of ``now``. Crypto: latest UTC
     day that closed at least ``CRYPTO_COMPLETION_WAIT_MINUTES`` (30) before ``now``. CN: latest
     XSHG session whose 15:00 Shanghai close is at least ``CN_COMPLETION_WAIT_MINUTES`` (30)
-    before ``now``. Other markets have no calendar yet: ``None``.
+    before ``now``. HK: latest XHKG session whose actual close (16:00, or 12:00 on a half day)
+    is at least ``HK_COMPLETION_WAIT_MINUTES`` (30) before ``now``. Other markets have no
+    calendar yet: ``None``.
     """
     market = Market(market)
     if market is Market.CRYPTO:
-        return crypto_calendar.latest_completed_session(now, CRYPTO_COMPLETION_WAIT_MINUTES)
+        return crypto_calendar.latest_completed_session(
+            now, CRYPTO_COMPLETION_WAIT_MINUTES
+        )
     if market is Market.CN:
         return cn_calendar.latest_completed_session(now, CN_COMPLETION_WAIT_MINUTES)
+    if market is Market.HK:
+        return hk_calendar.latest_completed_session(now, HK_COMPLETION_WAIT_MINUTES)
     if market is not Market.US:
         return None
     today = now.astimezone(NEW_YORK).date()
@@ -273,21 +303,31 @@ _latest_ready_session = latest_ready_session
 
 
 def _has_calendar(market: Market) -> bool:
-    return market in (Market.US, Market.CRYPTO, Market.CN)
+    return market in (Market.US, Market.CRYPTO, Market.CN, Market.HK)
 
 
 def _sessions(market: Market, start: date, end: date) -> list[date]:
-    """Sessions of the market's own calendar (XNYS for US, every UTC day for crypto, XSHG for CN)."""
-    if Market(market) is Market.CRYPTO:
+    """Sessions of the market's own calendar (XNYS, UTC days, XSHG, or XHKG)."""
+    market = Market(market)
+    if market is Market.CRYPTO:
         return crypto_calendar.sessions(start, end)
-    if Market(market) is Market.CN:
+    if market is Market.CN:
         return cn_calendar.sessions(start, end)
+    if market is Market.HK:
+        return hk_calendar.sessions(start, end)
     return xnys.sessions(start, end)
 
 
 def _today(now: datetime, market: Market) -> date:
-    """Calendar date of ``now`` in the market's clock (UTC crypto, New York US, Shanghai CN)."""
-    zone = UTC if market is Market.CRYPTO else cn_calendar.CN_TZ if market is Market.CN else NEW_YORK
+    """Calendar date of ``now`` in the market's clock."""
+    if market is Market.CRYPTO:
+        zone = UTC
+    elif market is Market.CN:
+        zone = cn_calendar.CN_TZ
+    elif market is Market.HK:
+        zone = hk_calendar.HK_TZ
+    else:
+        zone = NEW_YORK
     return now.astimezone(zone).date()
 
 
@@ -299,13 +339,38 @@ def _cn_key(symbol: str) -> tuple[str, str] | None:
         return None
 
 
+def _hk_key(symbol: str) -> tuple[str, str] | None:
+    """``(venue, 5-digit code)`` of an HK symbol spelling, ``None`` if rejected."""
+    try:
+        return normalize_hk_symbol(symbol)
+    except ValueError:
+        return None
+
+
 def _coverage_spellings(market: Market, symbol: str) -> list[str]:
-    """Spellings under which raw rows of ``symbol`` may be stored (CN providers return their own)."""
-    key = _cn_key(symbol) if market is Market.CN else None
-    if key is None:
-        return [symbol]
-    venue, code = key
-    return list(dict.fromkeys([symbol, f"{_CN_NATIVE_PREFIX[venue]}.{code}"]))
+    """Spellings under which raw rows of ``symbol`` may be stored (CN/HK providers return their own)."""
+    if market is Market.CN:
+        key = _cn_key(symbol)
+        if key is None:
+            return [symbol]
+        venue, code = key
+        return list(dict.fromkeys([symbol, f"{_CN_NATIVE_PREFIX[venue]}.{code}"]))
+    if market is Market.HK:
+        key = _hk_key(symbol)
+        if key is None:
+            return [symbol]
+        venue, code = key
+        return list(
+            dict.fromkeys(
+                [
+                    symbol,
+                    code,
+                    to_yahoo_hk_ticker(symbol),
+                    hk_instrument_id(venue, code),
+                ]
+            )
+        )
+    return [symbol]
 
 
 _BINANCE_STYLE = re.compile(r"[A-Z0-9]+")
@@ -319,14 +384,20 @@ def crypto_symbol_for_provider(provider: str, symbol: str) -> bool:
     skipped everywhere: a skipped symbol is better than a failed job.
     """
     if provider == "coinbase":
-        return "-" in symbol and symbol.replace("-", "").isalnum() and symbol == symbol.upper()
+        return (
+            "-" in symbol
+            and symbol.replace("-", "").isalnum()
+            and symbol == symbol.upper()
+        )
     return bool(_BINANCE_STYLE.fullmatch(symbol))
 
 
 def _bars_per_session(interval: Interval) -> int:
     if not interval.is_intraday:
         return 1
-    return max(1, math.ceil(REGULAR_SESSION_MINUTES / (interval.duration.total_seconds() / 60)))
+    return max(
+        1, math.ceil(REGULAR_SESSION_MINUTES / (interval.duration.total_seconds() / 60))
+    )
 
 
 def estimate_requests(job: Job, cap: SourceCapability | None) -> int:
@@ -344,7 +415,10 @@ def min_duration(policy: QuotaPolicy, requests: int) -> timedelta:
     """Lower bound: the slowest quota window needs ``requests / limit`` of its span."""
     seconds = 0.0
     for limit in policy.limits:
-        seconds = max(seconds, requests / policy.effective_limit(limit) * limit.per.total_seconds())
+        seconds = max(
+            seconds,
+            requests / policy.effective_limit(limit) * limit.per.total_seconds(),
+        )
     return timedelta(seconds=seconds)
 
 
@@ -383,7 +457,9 @@ class DefaultPlanner:
             raise ValueError("now must be timezone-aware")
         coverage = coverage if coverage is not None else EmptyCoverage()
         providers = providers if providers is not None else (self.providers or {})
-        symbols_by_market = _normalize_universe(universe if universe is not None else self.universe)
+        symbols_by_market = _normalize_universe(
+            universe if universe is not None else self.universe
+        )
         jobs: dict[str, Job] = {}
         caps_by_job: dict[str, SourceCapability] = {}
         notes: list[PlanNote] = []
@@ -395,7 +471,9 @@ class DefaultPlanner:
                     symbols_by_market.get(market, []), jobs, caps_by_job, notes,
                 )  # fmt: skip
 
-        ordered = tuple(sorted(jobs.values(), key=lambda j: (j.priority, j.provider, j.job_id)))
+        ordered = tuple(
+            sorted(jobs.values(), key=lambda j: (j.priority, j.provider, j.job_id))
+        )
         budget = self._budget(ordered, caps_by_job, providers, selection)
         return Plan(ordered, budget, tuple(notes))
 
@@ -420,10 +498,30 @@ class DefaultPlanner:
                 if cap.market == market and cap.interval == interval:
                     capable.setdefault(name, cap)
         if not capable:
-            notes.append(PlanNote("no_provider", f"{label}: no enabled provider declares this market/interval; skipped"))
+            notes.append(
+                PlanNote(
+                    "no_provider",
+                    f"{label}: no enabled provider declares this market/interval; skipped",
+                )
+            )
             return
+        if market is Market.HK:
+            capable = {n: c for n, c in capable.items() if n == "yfinance"}
+            if not capable:
+                notes.append(
+                    PlanNote(
+                        "no_provider",
+                        f"{label}: yfinance is the only planned HK daily source; skipped",
+                    )
+                )
+                return
         if not _has_calendar(market):
-            notes.append(PlanNote("no_calendar", f"{label}: no trading calendar available yet; skipped"))
+            notes.append(
+                PlanNote(
+                    "no_calendar",
+                    f"{label}: no trading calendar available yet; skipped",
+                )
+            )
             return
 
         is_us = market is Market.US
@@ -440,16 +538,24 @@ class DefaultPlanner:
         all_sessions = _sessions(market, start, end)
 
         def emit(
-            kind: JobKind, provider: str, instruments: tuple[str, ...], win: DateRange, priority: int
+            kind: JobKind,
+            provider: str,
+            instruments: tuple[str, ...],
+            win: DateRange,
+            priority: int,
         ) -> None:
             job_id = make_job_id(kind, provider, market, interval, instruments, win)
             if job_id not in jobs:
-                jobs[job_id] = Job(job_id, kind, provider, market, interval, instruments, win, priority)
+                jobs[job_id] = Job(
+                    job_id, kind, provider, market, interval, instruments, win, priority
+                )
                 caps_by_job[job_id] = capable[provider]
 
         # 1. whole-market grouped providers -------------------------------------------------
         whole_done: set[date] = set()  # covered or planned for every symbol
-        whole = [n for n, c in capable.items() if c.batch is BatchShape.WHOLE_MARKET_PER_DAY]
+        whole = [
+            n for n, c in capable.items() if c.batch is BatchShape.WHOLE_MARKET_PER_DAY
+        ]
         if whole and is_us:
             name = whole[0]
             have = coverage.covered(name, market, interval, window)
@@ -493,14 +599,21 @@ class DefaultPlanner:
             groups: dict[tuple[date, date, JobKind], list[str]] = defaultdict(list)
             for sym in self._symbols_for(name, symbols, market, end, label, notes):
                 have = set().union(
-                    *(coverage.covered(name, market, interval, span, symbol=s) for s in _coverage_spellings(market, sym))
+                    *(
+                        coverage.covered(name, market, interval, span, symbol=s)
+                        for s in _coverage_spellings(market, sym)
+                    )
                 )
                 missing = [d for d in eligible if d not in have]
-                primary_covered[sym] |= have | set(missing)  # covered now or by this plan
+                primary_covered[sym] |= have | set(
+                    missing
+                )  # covered now or by this plan
                 for win, kind in self._windows(missing, latest):
                     groups[(win.start, win.end, kind)].append(sym)
             size = self._batch_size(name, cap)
-            for (w_start, w_end, kind), syms in sorted(groups.items(), key=lambda kv: kv[0], reverse=True):
+            for (w_start, w_end, kind), syms in sorted(
+                groups.items(), key=lambda kv: kv[0], reverse=True
+            ):
                 for chunk in _chunks(syms, size):
                     emit(
                         kind, name, chunk, DateRange(w_start, w_end),
@@ -527,10 +640,40 @@ class DefaultPlanner:
                     )  # fmt: skip
 
     def _symbols_for(
-        self, name: str, symbols: list[str], market: Market, on: date, label: str, notes: list[PlanNote]
+        self,
+        name: str,
+        symbols: list[str],
+        market: Market,
+        on: date,
+        label: str,
+        notes: list[PlanNote],
     ) -> list[str]:
-        """Symbols ``name`` can serve. US: all. Crypto: only its own symbol dialect. CN: the
-        spellings ``normalize_cn_symbol`` accepts, one per stock (bare codes are skipped)."""
+        """Symbols ``name`` can serve. US: all. Crypto: only its own symbol dialect. CN/HK:
+        spellings the market normalizer accepts, one per stock (unrecognised forms are skipped)."""
+        if market is Market.HK:
+            keys: dict[tuple[str, str], str] = {}
+            for s in symbols:
+                key = _hk_key(s)
+                if key is not None:
+                    keys.setdefault(key, s)
+            ok = sorted(keys.values())
+            bad = [s for s in symbols if _hk_key(s) is None]
+            if bad:
+                note = PlanNote(
+                    "no_symbols",
+                    f"{label}: not a valid HK symbol (use 00700 / 0700.HK / hk:eq:xhkg:00700); "
+                    f"skipped: {', '.join(bad)}",
+                )
+                if note not in notes:
+                    notes.append(note)
+            if not ok:
+                notes.append(
+                    PlanNote(
+                        "no_symbols",
+                        f"{label}: no configured symbol fits {name}; provider skipped",
+                    )
+                )
+            return ok
         if market is Market.CN:
             keys: dict[tuple[str, str], str] = {}
             for s in symbols:
@@ -548,7 +691,12 @@ class DefaultPlanner:
                 if note not in notes:
                     notes.append(note)
             if not ok:
-                notes.append(PlanNote("no_symbols", f"{label}: no configured symbol fits {name}; provider skipped"))
+                notes.append(
+                    PlanNote(
+                        "no_symbols",
+                        f"{label}: no configured symbol fits {name}; provider skipped",
+                    )
+                )
             return ok
         if market is not Market.CRYPTO:
             return symbols
@@ -562,7 +710,10 @@ class DefaultPlanner:
         skipped = [s for s in symbols if s not in ok]
         if skipped and not ok:
             notes.append(
-                PlanNote("no_symbols", f"{label}: no configured symbol fits {name}; provider skipped")
+                PlanNote(
+                    "no_symbols",
+                    f"{label}: no configured symbol fits {name}; provider skipped",
+                )
             )
         # Skipping a symbol for one provider is routine (the other venue's symbol): no note.
         return ok
@@ -577,13 +728,17 @@ class DefaultPlanner:
                 starts.append(cap.history_start)
         return min(starts) if starts else today - timedelta(days=ROLLING_WINDOW_DAYS)
 
-    def _windows(self, missing: list[date], latest: date) -> list[tuple[DateRange, JobKind]]:
+    def _windows(
+        self, missing: list[date], latest: date
+    ) -> list[tuple[DateRange, JobKind]]:
         out: list[tuple[DateRange, JobKind]] = []
         rest = list(missing)
         if rest and rest[-1] == latest:
             rest.pop()
             out.append((DateRange(latest, latest), JobKind.DAILY))
-        out.extend((w, JobKind.BACKFILL) for w in split_windows(rest, self.max_window_days))
+        out.extend(
+            (w, JobKind.BACKFILL) for w in split_windows(rest, self.max_window_days)
+        )
         return out
 
     def _batch_size(self, name: str, cap: SourceCapability) -> int:
@@ -614,6 +769,10 @@ class DefaultPlanner:
         out: dict[str, ProviderBudget] = {}
         for name in sorted(job_counts):
             policy = self._policy(name, providers.get(name))
-            duration = min_duration(policy, requests[name]) if policy is not None else timedelta(0)
+            duration = (
+                min_duration(policy, requests[name])
+                if policy is not None
+                else timedelta(0)
+            )
             out[name] = ProviderBudget(name, job_counts[name], requests[name], duration)
         return Budget(out, non_daily=any(i.is_intraday for i in selection.intervals))
