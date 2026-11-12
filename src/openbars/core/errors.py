@@ -23,6 +23,7 @@ class ProviderError(OpenBarsError):
         status_code: int | None = None,
         retry_at: datetime | None = None,
         request_id: str | None = None,
+        raw_payload: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -30,6 +31,7 @@ class ProviderError(OpenBarsError):
         self.status_code = status_code
         self.retry_at = retry_at
         self.request_id = request_id
+        self.raw_payload = raw_payload  # redacted response body, if any
 
 
 class QuotaExhausted(OpenBarsError):

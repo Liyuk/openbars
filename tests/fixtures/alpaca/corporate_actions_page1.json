@@ -1,0 +1,11 @@
+{
+  "corporate_actions": {
+    "forward_splits": [
+      {"symbol": "TEST1", "cusip": "000000000", "new_rate": 2, "old_rate": 1, "process_date": "2024-02-01", "ex_date": "2024-02-01", "record_date": "2024-01-30", "payable_date": "2024-01-31"}
+    ],
+    "cash_dividends": [
+      {"symbol": "ZZZA", "cusip": "000000001", "rate": 0.25, "special": false, "foreign": false, "process_date": "2024-02-10", "ex_date": "2024-02-09", "record_date": "2024-02-10", "payable_date": "2024-02-20"}
+    ]
+  },
+  "next_page_token": "synthetic-ca-token-0002"
+}

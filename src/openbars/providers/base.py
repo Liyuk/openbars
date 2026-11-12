@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from enum import Enum
 from typing import Iterable, Protocol, Sequence
 
+from openbars.core.errors import ProviderError
 from openbars.core.models import (
     Adjustment,
     AssetClass,
@@ -69,6 +70,8 @@ class FetchRequest:
     symbols: tuple[str, ...]
     window: DateRange
     cursor: str | None = None
+    feed: str | None = None  # provider feed, e.g. "sip"; None = provider default
+    adjustment: str | None = None  # legacy adjustment string ("split" / "raw"); None = provider default
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class RawBatch:
     request: FetchRequest
     bars: tuple[RawBar, ...]
     next_cursor: str | None = None
+    error: ProviderError | None = None  # set on a partial batch: bars so far + why it stopped
 
 
 class Provider(Protocol):
