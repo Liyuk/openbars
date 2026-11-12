@@ -42,7 +42,7 @@ uv run openbars config               # 查看生效配置（所有 key 脱敏为
 # 可选：在 config.yaml 里设置 universe.symbols（Alpaca / yfinance 需要显式 symbols）
 uv run openbars plan                 # 预览任务与请求预算（不写入）
 uv run openbars run                  # 规划、入队并执行，直到队列空闲；可随时重跑续抓
-uv run openbars status               # 任务状态、失败/死信、断点
+uv run openbars status               # 任务状态、失败/死信、断点、raw 覆盖摘要（Parquet / Postgres）
 uv run openbars verify               # 各市场的覆盖率与多源一致性报告（只读）
 # 可选：安装 http 额外依赖后，在本机打开只读界面（默认仅绑定 127.0.0.1；非回环 --host 会被拒绝）
 # uv sync --extra http
@@ -154,7 +154,7 @@ uv run openbars config               # print effective settings (secrets redacte
 # optional: set universe.symbols in config.yaml (Alpaca / yfinance jobs need explicit symbols)
 uv run openbars plan                 # preview jobs and request budget (writes nothing)
 uv run openbars run                  # plan, queue and execute until idle; safe to re-run / resume
-uv run openbars status               # job states, dead jobs, checkpoints
+uv run openbars status               # job states, dead jobs, checkpoints, raw coverage (Parquet / Postgres)
 uv run openbars verify               # per-market coverage and cross-source agreement report (read-only)
 # Optional: install the http extra and open the local read-only UI (loopback only; a non-loopback --host is rejected)
 # uv sync --extra http

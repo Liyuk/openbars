@@ -64,6 +64,7 @@ from openbars.core.models import (
 from openbars.normalize.instruments import UnresolvedRecord, _check_upstream, _ResolveMixin, select_mappings
 from openbars.providers.base import RawBatch
 from openbars.storage.errors import (
+    CoverageTimeout,
     ReadOnlyError,
     SchemaMismatchError,
     SchemaProblem,
@@ -534,6 +535,8 @@ def _write_raw_rows(conn: "_Conn", rows: Sequence[RawBarRow]) -> int:
     return len(daily) + len(intraday)
 
 
+# ``status`` coverage aggregates are bounded by this ``statement_timeout`` (#146).
+COVERAGE_TIMEOUT_MS = 15_000
 _RAW_DAILY_SQL = _raw_upsert_sql("session_date", True)
 _RAW_INTRADAY_SQL = _raw_upsert_sql("ts_start", False)
 # #154: same source bar (same ``source_fingerprint``) keeps the earliest known ``available_at``
@@ -626,6 +629,36 @@ class PgRawStore(_Guard):
     def scan(self, provider: str, market: Market, interval: Interval, window: DateRange) -> Iterator[RawBar]:
         for row in self.scan_rows(provider, market, interval, window):
             yield row.to_raw_bar()
+
+    def coverage_summary(
+        self, provider: str, market: Market, interval: Interval, *, timeout_ms: int = COVERAGE_TIMEOUT_MS
+    ) -> tuple[date | None, date | None, int, int]:
+        """``(first, last, sessions, bars)`` like the Parquet store (#146).
+
+        One aggregate on the ``ix_raw_bars_scan`` prefix ``(provider, market, interval)``; rows
+        are unique per key in native mode, so no dedup pass. Bounded by ``statement_timeout``.
+        """
+        sql = (
+            'SELECT min(session_date) AS first, max(session_date) AS last, '
+            'count(DISTINCT session_date) AS sessions, count(*) AS bars FROM raw_bars '
+            'WHERE provider = ? AND market = ? AND "interval" = ?'
+        )
+        return _coverage(self._session, sql, [provider, Market(market).value, Interval(interval).value], timeout_ms)
+
+
+
+def _coverage(session: _Session, sql: str, params: list[Any], timeout_ms: int) -> tuple[date | None, date | None, int, int]:
+    try:
+        with session() as conn:
+            conn.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+            record = conn.execute(sql, params).fetchone()
+    except Exception as exc:  # psycopg.errors.QueryCanceled without importing psycopg here
+        if type(exc).__name__ == "QueryCanceled":
+            raise CoverageTimeout(f"coverage summary exceeded {int(timeout_ms) // 1000}s") from None
+        raise
+    if not record or not record["bars"]:
+        return None, None, 0, 0
+    return record["first"], record["last"], int(record["sessions"]), int(record["bars"])
 
 
 class PgCanonicalStore(_Guard):
@@ -1363,6 +1396,18 @@ class PgCompatRawStore(_Guard):
     def scan(self, provider: str, market: Market, interval: Interval, window: DateRange) -> Iterator[RawBar]:
         for row in self.scan_rows(provider, market, interval, window):
             yield row.to_raw_bar()
+
+    def coverage_summary(
+        self, provider: str, market: Market, interval: Interval, *, timeout_ms: int = COVERAGE_TIMEOUT_MS
+    ) -> tuple[date | None, date | None, int, int]:
+        """Upstream ``daily_bar`` holds US daily only; other markets / intervals are empty (#146)."""
+        if Market(market) is not _COMPAT_MARKET or Interval(interval) is not Interval.D1:
+            return None, None, 0, 0
+        sql = (
+            "SELECT min(session_date) AS first, max(session_date) AS last, "
+            "count(DISTINCT session_date) AS sessions, count(*) AS bars FROM daily_bar WHERE provider = ?"
+        )
+        return _coverage(self._session, sql, [provider], timeout_ms)
 
 
 class PgCompatCanonicalStore(_Guard):

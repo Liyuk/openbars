@@ -428,16 +428,26 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
 
     out.line("raw coverage (observed bar dates; not a completeness guarantee):")
     if settings.storage_backend == "postgres":
-        out.line("  coverage summary not available for this backend")
+        raw = backend.raw  # read-only; one bounded aggregate per provider/market/interval (#146)
     else:
         from types import SimpleNamespace
         from openbars.storage.parquet_duckdb import ParquetRawStore, check_parquet_versions
 
         raw = ParquetRawStore(SimpleNamespace(root=root, check_versions=check_parquet_versions))
+    summary = getattr(raw, "coverage_summary", None)
+    if summary is None:
+        out.line("  coverage summary not available for this backend")
+    else:
+        from openbars.storage.errors import CoverageTimeout
+
         for provider in sorted(settings.providers):
             for market in sorted(settings.selection.markets, key=lambda item: item.value):
                 for interval in sorted(settings.selection.intervals, key=lambda item: item.value):
-                    first, last, sessions, rows = raw.coverage_summary(provider, market, interval)
+                    try:
+                        first, last, sessions, rows = summary(provider, market, interval)
+                    except CoverageTimeout as exc:
+                        out.line(f"  {provider} {market.value}/{interval.value}: unavailable ({exc})")
+                        continue
                     coverage = f"{first}..{last} ({rows} bars, {sessions} sessions)" if rows else "none"
                     out.line(f"  {provider} {market.value}/{interval.value}: {coverage}")
     if state is None:
