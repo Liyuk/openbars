@@ -62,6 +62,8 @@ class ProviderInstrument:
     exchange: str | None = None
     active: bool = True
     native_id: str | None = None  # provider's own instrument id, when it publishes one
+    base_asset: str | None = None  # crypto pairs: base / quote asset (see normalize.crypto_pairs)
+    quote_asset: str | None = None
 
 
 @dataclass(frozen=True)

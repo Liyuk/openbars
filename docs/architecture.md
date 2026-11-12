@@ -122,6 +122,18 @@ SymbolMapping               # 代码在某段时间指向哪个 instrument
 - **`resolve` 规则**：只看同市场映射，`valid_to` 含当日；provider 专属映射优先于 `"*"`；同优先级多个 instrument → 歧义 → `None`。日期没被任何窗口覆盖时有一个**唯一历史回退**：该 symbol 历史上只绑定过一个 instrument，且日期不在其最后一个已关闭窗口之后，才返回该 instrument（应对首次观测日晚于真实上市日）；只要曾绑定过两个及以上 instrument（回收），**永远不回退**，未覆盖日期一律 unresolved。
 - **`unresolved` 队列**：映射不到、歧义、或证据冲突的 bar / 清单行写入 `ref/unresolved.parquet`（含 `kind`、`reason_code`、`symbol`、`provider`、`session_date`），`unresolved_count()` 供 `status` 展示；这些 bar 不写入 canonical。`assign_instrument` / `assign_instruments` 是纯函数式的入库助手：解析出 id 的 bar 填上 `instrument_id`，其余留空并入队。队列键 `UnresolvedRecord.key`：bar 按 `(provider, symbol, 日)`、清单行按 `(provider, symbol)`（无日期）、公司行动（`kind="corporate_action"`）按 `(provider, symbol, ex_date, 行动种类)`（`session_date` 存 ex-date，`detail` 存行动种类），重复入库同一事件不会让队列膨胀。
 
+#### 3.2.1 加密交易对主数据（`openbars.normalize.crypto_pairs`）
+
+加密现货的 instrument 是**某交易所上的某个交易对**，不走 ULID / FIGI，也不使用 `<market>:eq`：
+
+- **id 规则**：`crypto:spot:<venue>:<BASE>-<QUOTE>`，例 `crypto:spot:binance:TEST-USDT`。由 `(venue, base, quote)` 确定性导出，永不复用；同一交易对再次上架复用同一个 id，任何一段写错就是另一个 id，已有 id 不会被“修正”。`venue` 为小写 `[a-z0-9]+` slug（`BINANCE` / `Binance` → `binance`），`base` / `quote` 为大写字母数字资产代码，空值或含 `-` / `:` 一律拒绝。`market_of` 取 id 首段，自然得到 `crypto`。
+- **base / quote 分开存**：不拆单一 symbol 字符串。`Instrument.external_ids` 固定含 `base` / `quote` / `venue` 三个键（另有信息性的 `provider_symbol`）；`currency` = quote（如 `USDT`，不要求 3 位 ISO）；`exchange` = venue 的大写形式（`BINANCE`）；`asset_class=crypto_spot`。读取走 `pair_assets(instrument) -> (base, quote)`、`pair_venue(instrument)`、`CryptoPair.parse(id)`。
+- **不同交易所的交易对是不同 instrument**，即使 base/quote 相同，也不能跨所合并、不能拿来对价格。
+- 同一交易所、同一 base、不同 quote（`TEST-USDT` vs `TEST-USDC`）也是两个 instrument。
+- **映射只写 provider 专属 symbol**（`binance` + `TESTUSDT`、`coinbase` + `TEST-USDT`），不写通用 `"*"` 的 `BASE-QUOTE`：两个交易所共用这种显示形式，`"*"` 会造成歧义甚至把它们并成一个。`resolve("TESTUSDT", provider="binance", market=CRYPTO)` 因此只会命中 Binance 的交易对。
+- **入库**（`ingest_crypto_pairs(master, listings, as_of=…)`，输入 `CryptoPairListing`）：按确定性 id 查找，已存在则复用（名称更新、`listed_on` 取较早者），并确认/开启该 `(provider, symbol)` 的映射；退市（`active=False` 或带 `delisted_on`）写 `delisted_on` 并关闭该 provider symbol 的开放窗口（`valid_to` 含当日）；已退市的交易对被再次报为活跃时复用同一 id，在已关闭窗口之后开新窗口。非法 venue/base/quote、同一批内 `(provider, symbol)` 被不同交易对认领、或该 symbol 已在另一交易对上开放，均进 `unresolved`（计数并写入队列，不抛异常、不合并）。同一 master 里的美股 instrument 不受影响。
+- 不改编排器（本版未接入）；不改 instruments 表 schema / `SCHEMA_VERSION`，也不新增列。
+
 ### 3.3 Bar
 
 ```text
@@ -213,7 +225,7 @@ QuotaPolicy
 - 价格、成交量按字符串解析为 `Decimal`（不经 float）；`volume` 为基础资产成交量，成交额与成交笔数放 `extra`。口径 `price_basis=raw`、`volume_basis=as_traded`，`currency=None`（计价资产如 USDT 不是 ISO 货币）。
 - 每次请求 1 个 symbol；单页最多 1000 根，窗口更长时用“末根 `openTime` + 1ms”翻页（游标必须前进，否则报 `pagination_loop`）。无数据返回空批次而非错误。
 - **权重制额度**：spot `REQUEST_WEIGHT` 每 IP 每滚动分钟 6000（`key_scope="per_ip"`，`safety_margin=0.9`）；klines 权重 2，`exchangeInfo` 权重 20，均经 `QuotaGate.acquire(weight=…)`。429 / 418 尊重 `Retry-After` 并 `penalize`，5xx 为 `provider_unavailable`。官方限额文档见 `QuotaPolicy.official_docs_url`。
-- `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`）；不生成 `instrument_id`（交易对主表见 #33）。无公司行动。
+- `list_instruments(Market.CRYPTO)` 读 `exchangeInfo`，只返回现货 symbol（`exchange="BINANCE"`，`active` = 状态为 `TRADING`）；不生成 `instrument_id`（交易对主数据与 base/quote 见 §3.2.1）。无公司行动。
 - 目前**尚未接入编排器**（计划、配置入口随后续 issue 加入）。
 
 ### 3.6 Job / Checkpoint
@@ -349,7 +361,7 @@ data/
   raw/provider=alpaca/market=us/interval=1d/year=2024/part-*.parquet
   raw/provider=…/market=…/interval=5m/year=2024/month=03/part-*.parquet   # 日内粒度多一层 month
   canonical/market=us/interval=1d/year=2024/part-*.parquet
-  ref/instruments.parquet, symbol_mappings.parquet, corporate_actions.parquet, calendars/
+  ref/instruments.parquet, symbol_mappings.parquet, corporate_actions.parquet, calendars/   # instruments 含加密交易对（§3.2.1）
   raw-archive/provider=…/market=…/interval=…/<window>/<request_digest>-<content_digest>.json
   audit/reconcile/…, known_gaps.parquet     # 预留
   openbars.duckdb                  # 只含视图与 catalog_meta，可随时重建
@@ -545,7 +557,7 @@ src/openbars/
   quota/         policy.py · gate.py
   providers/     base.py · registry.py · (us/alpaca … · crypto/binance 实现随 issue 加入)
   raw/           store.py · archive.py
-  normalize/     instruments.py · adjust.py · actions.py · normalizer.py · …
+  normalize/     instruments.py · crypto_pairs.py · adjust.py · actions.py · normalizer.py · …
   reconcile/     policy.py · reconciler.py · audit.py
   storage/       base.py · schema.py · rows.py · state.py · parquet_duckdb.py · postgres.py
   api/           reader.py · http.py

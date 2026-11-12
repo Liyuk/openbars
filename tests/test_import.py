@@ -48,6 +48,7 @@ MODULES = [
     "openbars.providers.crypto.binance",
     "openbars.raw.store",
     "openbars.normalize.instruments",
+    "openbars.normalize.crypto_pairs",
     "openbars.normalize.normalizer",
     "openbars.normalize.adjust",
     "openbars.reconcile.policy",
