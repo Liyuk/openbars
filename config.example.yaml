@@ -16,6 +16,8 @@ history:
 
 universe:
   us:
+    # Explicit symbols (Alpaca / yfinance jobs need them; Massive plans the whole market):
+    # symbols: [TEST1, ZZZA]
     include: [common_stock, etf]   # adr, preferred, ... 可选
     exclude_otc: true
 

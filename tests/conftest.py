@@ -43,3 +43,15 @@ def pg_dsn():
         pytest.skip("OPENBARS_TEST_PG_DSN not set")
     pytest.importorskip("psycopg")
     return dsn
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail any attempt to open a network connection from the test process."""
+    import socket
+
+    def blocked(self, *args, **kwargs):
+        raise AssertionError("network access attempted in an offline test")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked)
