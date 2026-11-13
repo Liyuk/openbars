@@ -47,8 +47,6 @@ def _mapping(path: str) -> dict[str, int]:
 
 
 def _rows(source: str, mapping_file: str, table: str, since: date | None, days: int | None) -> list[tuple]:
-    if table not in _TABLES or not _IDENT.fullmatch(table):
-        raise ValueError("table must be daily_bar or research_daily_bar")
     files = sorted(Path(source).glob("**/*.parquet"))
     if not files:
         return []
@@ -95,8 +93,8 @@ def _rows(source: str, mapping_file: str, table: str, since: date | None, days: 
     return rows
 
 
-def _sql(table: str) -> str:
-    if table == "daily_bar":
+def _sql(table: str, layout: str) -> str:
+    if layout == "daily_bar":
         cols = ("instrument_id", "session_date", "provider", "feed", "adjustment", "price_basis", "adjustment_scope", "adjustment_as_of", "session_semantics", "currency", "volume_basis", "revision", "open", "high", "low", "close", "volume", "vwap", "source_artifact_id", "ingest_run_id")
         key = ("instrument_id", "session_date", "provider", "feed", "adjustment", "revision")
     else:
@@ -105,12 +103,17 @@ def _sql(table: str) -> str:
     names = ", ".join(cols)
     placeholders = ", ".join("%s::jsonb" if col == "capabilities" else "%s" for col in cols)
     updates = ", ".join(f"{col}=EXCLUDED.{col}" for col in cols if col not in key)
-    return f"INSERT INTO {table} ({names}) VALUES ({placeholders}) ON CONFLICT ({', '.join(key)}) DO UPDATE SET {updates}"
+    return f'INSERT INTO "{table}" ({names}) VALUES ({placeholders}) ON CONFLICT ({", ".join(key)}) DO UPDATE SET {updates}'
 
 
 def run(args, out) -> int:
     try:
-        rows = _rows(args.source, args.mapping, args.table, args.since, args.days)
+        if not _IDENT.fullmatch(args.table) or len(args.table) > 63:
+            raise ValueError("table must be an ASCII identifier of at most 63 characters")
+        layout = args.table_layout or (args.table if args.table in _TABLES else None)
+        if layout is None:
+            raise ValueError("custom table requires --table-layout")
+        rows = _rows(args.source, args.mapping, layout, args.since, args.days)
         out.line(f"export-postgres: {len(rows)} rows to {args.table} ({'apply' if args.apply else 'dry-run'})")
         if not args.apply:
             out.line("dry-run: nothing written")
@@ -118,7 +121,7 @@ def run(args, out) -> int:
         conn = _connect(args.dsn)
         try:
             with conn.cursor() as cur:
-                sql = _sql(args.table)
+                sql = _sql(args.table, layout)
                 cur.executemany(sql, rows)
             conn.commit()
         except Exception:

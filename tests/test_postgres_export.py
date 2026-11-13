@@ -110,3 +110,37 @@ def test_apply_without_psycopg_prints_extra_install_hint(monkeypatch, capsys):
         "--table", "daily_bar", "--mapping", "unused.csv", "--apply"])
     assert result == 1
     assert "openbars[postgres-export]" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("layout", ["daily_bar", "research_daily_bar"])
+def test_custom_table_uses_selected_layout(tmp_path, monkeypatch, layout):
+    source = tmp_path / "source"; _source(source)
+    mapping = tmp_path / "ids.csv"; mapping.write_text("instrument_id,upstream_id\nlocal:1,42\n")
+    import openbars.export_postgres as exporter
+    conn = FakeConnection()
+    monkeypatch.setattr(exporter, "_connect", lambda dsn: conn)
+    assert main(["export-postgres", "--source", str(source), "--dsn", "unused", "--table", "Custom_Bars",
+        "--table-layout", layout, "--mapping", str(mapping), "--apply"]) == 0
+    sql, row = conn.statements[0]
+    assert 'INSERT INTO "Custom_Bars"' in sql
+    if layout == "daily_bar":
+        assert "ON CONFLICT (instrument_id, session_date, provider, feed, adjustment, revision)" in sql
+        assert row[2] == "fake"
+    else:
+        assert "ON CONFLICT (instrument_id, session_date, policy_version)" in sql
+        assert row[2] == "research-daily-v2"
+
+
+@pytest.mark.parametrize("table", ["bad;drop", "schema.table", "", "a" * 64])
+def test_invalid_table_rejected_before_connecting(tmp_path, monkeypatch, capsys, table):
+    import openbars.export_postgres as exporter
+    monkeypatch.setattr(exporter, "_connect", lambda dsn: pytest.fail("unexpected connection"))
+    assert main(["export-postgres", "--source", str(tmp_path), "--dsn", "unused", "--table", table,
+        "--table-layout", "daily_bar", "--mapping", "unused.csv", "--apply"]) != 0
+    assert "table" in capsys.readouterr().err
+
+
+def test_custom_table_requires_layout(tmp_path, capsys):
+    assert main(["export-postgres", "--source", str(tmp_path), "--dsn", "unused", "--table", "custom_bars",
+        "--mapping", "unused.csv"]) != 0
+    assert "layout" in capsys.readouterr().err
