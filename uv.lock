@@ -913,6 +913,10 @@ http = [
 postgres = [
     { name = "psycopg", extra = ["binary"] },
 ]
+postgres-export = [
+    { name = "duckdb" },
+    { name = "psycopg", extra = ["binary"] },
+]
 tushare = [
     { name = "tushare" },
 ]
@@ -925,11 +929,13 @@ requires-dist = [
     { name = "akshare", marker = "extra == 'akshare'", specifier = ">=1.12" },
     { name = "baostock", marker = "extra == 'baostock'", specifier = ">=0.8" },
     { name = "duckdb", specifier = ">=1.0" },
+    { name = "duckdb", marker = "extra == 'postgres-export'", specifier = ">=1.0" },
     { name = "exchange-calendars", specifier = ">=4.9,<5" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres-export'", specifier = ">=3.1" },
     { name = "pyarrow", specifier = ">=15" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytz" },
@@ -939,7 +945,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'http'", specifier = ">=0.29" },
     { name = "yfinance", marker = "extra == 'yfinance'", specifier = ">=0.2" },
 ]
-provides-extras = ["parquet", "postgres", "http", "yfinance", "baostock", "akshare", "tushare", "dev"]
+provides-extras = ["parquet", "postgres", "postgres-export", "http", "yfinance", "baostock", "akshare", "tushare", "dev"]
 
 [[package]]
 name = "openpyxl"

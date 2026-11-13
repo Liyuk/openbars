@@ -118,3 +118,35 @@ observation / event / revision tables (`event_key` =
 迁移比对只读运行；写入验证只在一次性测试库进行，不能作为正式库日常写入或双写流程。
 compat 保留 advisory lock 与水位更新，仅供迁移 / 测试使用。生产核心写入默认走
 Parquet + DuckDB，配额走本地 SQLite；密钥和 DSN 只在运行时提供，不要入库。
+
+## 可选：导出近期窗口到调用方 Postgres
+
+核心默认写入 Parquet + DuckDB，配额使用本地 SQLite。需要主动把已生成的 canonical 日线导入调用方**已存在**的
+`daily_bar` 或 `research_daily_bar` 时，单独安装 `pip install 'openbars[postgres-export]'`，
+再运行：
+
+```bash
+openbars export-postgres --source ./data/canonical --dsn "$TARGET_PG_DSN" \
+  --table research_daily_bar --mapping ./instrument-ids.csv --days 500
+```
+
+映射 CSV 必须包含 `instrument_id,upstream_id` 两列；`upstream_id` 是调用方表使用的整数
+instrument id。例如 `us:eq:TEST1,42`。所有待导出的 instrument 都必须显式映射。可用
+`--since YYYY-MM-DD` 设含首日的日历日期下界，或 `--days N` 取本地 Parquet 最新交易日及
+其前 N-1 个日历日；二者不可同时指定。缺省窗口为全部已存日线。命令默认 dry-run，只报告
+行数；确认后附加 `--apply` 才连接 DSN 并写入。
+
+也可用 `--table custom_bars --table-layout daily_bar` 指定自定义表名和沿用的表结构；
+`--table-layout` 可选 `daily_bar` 或 `research_daily_bar`，自定义表名时必填，两个原表名
+则默认使用同名结构。表名限 63 个 ASCII 字符，以字母或下划线开头，后接字母、数字或下划线；
+不支持 schema 限定名，目标 schema 由连接的 search_path 决定。表名区分大小写。
+
+`daily_bar` 按 `(instrument_id, session_date, provider, feed, adjustment, revision)` 冲突键覆盖；
+`research_daily_bar` 按 `(instrument_id, session_date, policy_version)` 覆盖。OHLC/VWAP 使用
+`NUMERIC(20,8)`、volume 使用 `NUMERIC(28,8)`，驱动收到 Decimal 值。canonical 行没有 raw 专属
+元数据时，`daily_bar` 的 `price_basis`、`adjustment_scope`、`session_semantics`、`volume_basis`
+写为 `unknown`，raw artifact / ingest run id 留空。规范层写 `provider`、`feed`、`adjustment`、
+`revision`、OHLCV、选择原因、质量状态、能力、指纹和生成时间；源表 ID 留空。`policy_version`
+直接取 canonical 行（如 `research-daily-v2` 或 `cn-daily-v1`），不在导出器中改写。表和唯一约束必须已由
+调用方创建；导出器不执行 DDL，不写 `instrument`、`symbol_alias` 或其它身份表。调用方负责
+映射与权限、目标表结构和缓存水位维护。此插件从不进入默认依赖或 `plan` / `run` 写入路径。

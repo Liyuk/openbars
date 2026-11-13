@@ -133,6 +133,18 @@ def _build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
     common(show)
 
+    export_pg = sub.add_parser("export-postgres", help="export canonical Parquet bars to an existing PostgreSQL table (optional extra)")
+    export_pg.add_argument("--source", required=True, help="canonical Parquet directory")
+    export_pg.add_argument("--dsn", required=True, help="target PostgreSQL DSN")
+    export_pg.add_argument("--table", required=True, help="existing target table name")
+    export_pg.add_argument("--table-layout", choices=("daily_bar", "research_daily_bar"),
+                           help="target schema and conflict key; required for custom table names")
+    export_pg.add_argument("--mapping", required=True, help="CSV with instrument_id,upstream_id integer columns")
+    window = export_pg.add_mutually_exclusive_group()
+    window.add_argument("--since", type=_iso_date, help="first session date, inclusive")
+    window.add_argument("--days", type=int, help="calendar days ending on latest source session (inclusive)")
+    export_pg.add_argument("--apply", action="store_true", help="write rows; default is dry-run")
+
     shadow = sub.add_parser(
         "shadow",
         help="read-only compare of local canonical bars to a research-daily-v2 HTTP API",
@@ -180,6 +192,16 @@ def main(
     if args.command is None:
         parser.print_help()
         return EXIT_OK
+    if args.command == "export-postgres":
+        if args.days is not None and args.days < 1:
+            print("error: --days must be at least 1", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            from openbars.export_postgres import run as run_export
+        except ImportError:
+            print("error: export-postgres requires the optional dependency; install with `pip install 'openbars[postgres-export]'`.", file=sys.stderr)
+            return EXIT_USAGE
+        return run_export(args, _Out())
     if args.command == "init":
         from openbars.cli.init import init_project
 
