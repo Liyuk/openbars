@@ -17,6 +17,7 @@ zero latency as a readiness guarantee.
 | Twelve Data US 1h | No adapter-enforced availability delay | Unverified; best effort, no T+0 promise |
 | BaoStock CN daily | No adapter-enforced availability delay | Unverified; best effort, no T+0 promise |
 | AKShare CN daily backup (Eastmoney/Sina) | No adapter-enforced availability delay | Unverified; best effort, no T+0 promise |
+| Tushare CN daily (free tier, unadjusted) | No adapter-enforced availability delay | Unverified; best effort, no T+0 promise |
 | AKShare HK daily | No adapter-enforced availability delay | Unverified; best effort, no T+0 promise |
 | Futu OpenD / LongPort HK daily | No adapter-enforced availability delay; no real-account probe recorded | Unverified; best effort, no T+0 promise; planner does not route HK jobs to these sources |
 | Binance / Coinbase crypto daily | No adapter-enforced latest completed-period delay | Unverified; best effort, no T+0 promise |

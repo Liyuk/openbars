@@ -14,8 +14,8 @@ version: 1
 # 选择市场（多选）: us | crypto | cn | hk
 # 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
 # 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
-# 改用 A 股：`markets: [cn]`，启用 providers.baostock（或低频备源 providers.akshare_ashare），
-# 并在 universe.cn.symbols 写代码
+# 改用 A 股：`markets: [cn]`，启用 providers.baostock（或低频备源 providers.akshare_ashare，
+# 或有 token 时的 providers.tushare），并在 universe.cn.symbols 写代码
 # 改用港股：`markets: [hk]`，启用 providers.yfinance（规划器只用这一源），并在 universe.hk.symbols 写代码
 # （如 sh.600000 / 600000.SH；裸 6 位代码会被跳过）即可 plan / run（默认仍关闭）。
 markets: [us]
@@ -109,6 +109,14 @@ providers:
   akshare_ashare:
     enabled: false
     feed: eastmoney        # eastmoney | sina
+  # A 股日线（Tushare 免费档，需要 token）。默认关闭；需安装可选依赖 `pip install openbars[tushare]`。
+  # token 只写环境变量引用，不要写明文：在 .env / 环境中设置 TUSHARE_TOKEN。免费档约 120 积分，
+  # 每分钟 50 次、每天 8000 次，只能取非复权日线（不调用 qfq/hfq 或 adj_factor）。
+  # 条款为个人、非商业、可撤销许可；公开使用其数据须标注「数据来源：Tushare数据」。
+  # 仅本机私存、不再分发；A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+  tushare:
+    enabled: false
+    token: ${TUSHARE_TOKEN}
 
 # 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
 reconcile:
