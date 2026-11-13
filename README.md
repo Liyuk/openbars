@@ -58,6 +58,10 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 - `init [目录]` 在终端启动向导；非终端或 `--yes` 复制示例配置。参见[数据源密钥申请与额度指南](docs/provider-keys.md)。任一目标已存在就报错退出（退出码 2），什么都不写。
 - 新安装和示例配置默认写入 `parquet_duckdb`，配额使用本地 SQLite。Postgres `upstream_compat` 仅供迁移与测试；已有明确配置仍按其指定后端运行。
 - **密钥优先级（高 → 低）**：① 进程环境变量；② dotenv 文件：`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`，都没有时自动读取 **`config.yaml` 同目录的 `.env`**（不存在也不报错）；③ `config.yaml` 里 `${VAR:-default}` 的默认值。也接受 `ALPACA_API_KEY` / `ALPACA_API_SECRET` 作为 `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` 的别名（仅当规范名未设置时）。
+
+### 运行时目录
+
+运行时家目录由 `OPENBARS_HOME` 指定，默认 `~/.openbars`。未传 `--config` 或 `--env-file` 时，若当前目录有 `./config.yaml`，继续使用它且缺省数据目录仍为 `./data`；否则读取 `$OPENBARS_HOME/config/config.yaml`，未设置 `storage.path` 时写入 `$OPENBARS_HOME/data`。显式 `--config` 和配置中写明的 `storage.path` 优先于此约定。
 - 示例配置里 Alpaca 与 Massive 都是 `enabled: true` 的主源：`run` 在它们缺 key 时会报错并列出变量名（如 `MASSIVE_API_KEY`），请填上 key，或把不用的源改成 `enabled: false`。`plan` 只提示缺失，不会中止（但没有任何可用源、或选了无源支持的粒度时会报错）。
 - `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
 - 再次提醒：openbars 不分发任何数据，一切由你用自己的 key（BYOK）在本地抓取，请遵守各数据源的服务条款（详见下方声明）。
@@ -90,7 +94,7 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 
 以上是 freshness 层的代码门槛，不是数据源到货承诺；未验证来源尽力而为、不承诺。时效性与完整性不一定同时达到。看板的观察覆盖不等于完整性保证；`available_at` 是可用时间，质量标记仍表达各自的质量含义。默认读取当前可见行，正式优先；没有正式行时显示临时行并标明。
 
-- 数据写在 `storage.path`（默认 `./data/`，已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
+- 数据写在 `storage.path`（默认目录遵循上面的运行时目录规则；`./data/` 已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
 - 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
 - `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。对 `markets` 中的**每个市场**各出一份报告，按各自的日历与 `policy_version`：美股 XNYS + `research-daily-v2`；加密 `CryptoCalendar`（UTC 每天都是交易日，含周末）+ `crypto-daily-v1`；A 股 XSHG（XSHE 为别名，不含北交所）+ `cn-daily-v1`；港股 XHKG（半日市也算交易日）+ `hk-daily-v1`。窗口终点取该市场最近一个“已就绪”的交易日（可被 `history.end` / `--end` 提前）。某个已配置市场尚无落库数据时只给出提示并继续；所有市场都没有数据才报错。内容：预期交易日 × 标的的覆盖率、各来源（provider / feed / 复权）汇总、两源可比较时的 OHLC 与成交量一致率（默认容差价格 0.5%、成交量 5%，可由 `reconcile.tolerances` 调整；IEX 与 SIP 等不可比的序列记为 `not_comparable`，不计入分歧）、质量标记一致率（仅当有多个 projection 时，否则 `n/a`），并附“最近 N 个交易日”分段（`--recent N`）。`--start/--end` 限定窗口，`--json reports/verify.json` 把报告写到数据目录下：只配置一个市场时是单个报告对象（带 `market` / `calendar` 字段），配置多个市场时为 `{"markets": {"us": {…}, "cn": {…}}}`（没有数据的市场列在 `skipped`）。
 - 默认规划器把每个交易日分给最便宜的来源，所以多源重叠需要你显式抓取一部分（例如给第二个来源排审计任务）后，`verify` 才有可比较的样本。
@@ -212,6 +216,10 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 
 - `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. New installs write to `parquet_duckdb` and use a local SQLite quota gate. `upstream_compat` is for migration and tests only; explicit existing backend configuration continues to be honored. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
 - **Key priority (highest first):** (1) the process environment; (2) a dotenv file: `--env-file`, else `OPENBARS_ENV_FILE`, else `env_file` in `config.yaml`, and when none of those is set, **`.env` next to `config.yaml`** is loaded automatically (no error if it is absent); (3) `${VAR:-default}` in `config.yaml`. `ALPACA_API_KEY` / `ALPACA_API_SECRET` are accepted as aliases for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` when the canonical name is unset.
+
+### Runtime directory
+
+`OPENBARS_HOME` selects the runtime home and defaults to `~/.openbars`. When neither `--config` nor `--env-file` is supplied, an existing `./config.yaml` in the current directory keeps the legacy behavior, including the `./data` default. Otherwise, config loads from `$OPENBARS_HOME/config/config.yaml`, and an omitted `storage.path` defaults to `$OPENBARS_HOME/data`. An explicit `--config` and a configured `storage.path` take precedence.
 - The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
 - `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.
 - Reminder: openbars distributes no data; everything is fetched locally with your own keys (BYOK), and you must follow each provider's terms (see the disclaimer below).
@@ -244,7 +252,7 @@ These are timing proposals and do not configure a scheduler. **Adding an after-c
 
 These are code thresholds for the freshness tier, not source delivery promises; unverified sources are best effort with no promise. Freshness and completeness may not be reached at the same time. Observed dashboard coverage is not a completeness guarantee; `available_at` is the availability timestamp, and quality flags retain their separate meaning. Reads show the currently visible row, preferring final and otherwise showing provisional with its tier.
 
-- Data lands in `storage.path` (default `./data/`, git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
+- Data lands in `storage.path` (the default follows the runtime directory rule above; `./data/` is git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
 - Non-daily intervals imply a large request budget and need an explicit `--accept-budget`.
 - `verify` is a **report, not a gate**: it exits 0 even when agreement is below 100%. It produces one report per market in `markets`, each on its own calendar and `policy_version`: US XNYS + `research-daily-v2`; crypto `CryptoCalendar` (every UTC day is a session, weekends included) + `crypto-daily-v1`; A-shares XSHG (XSHE is an alias; Beijing is out of scope) + `cn-daily-v1`; Hong Kong XHKG (half days count as sessions) + `hk-daily-v1`. The window ends at the market's latest ready session (optionally capped by `history.end` / `--end`). A configured market with no stored bars is a note and the run continues; only when no market has bars is it an error. Each report shows coverage of expected sessions x instruments, per-source summaries (provider / feed / adjustment), OHLC and volume agreement wherever two comparable sources hold the same bar (default tolerances: price 0.5%, volume 5%, adjustable via `reconcile.tolerances`; incomparable series such as IEX vs SIP count as `not_comparable`, never as disagreement), quality-flag agreement (only when several projections exist, else `n/a`), and a "last N sessions" breakdown (`--recent N`). `--start/--end` bound the window; `--json reports/verify.json` writes the report under the data directory: one configured market gives a single report object (with `market` / `calendar` fields), several give `{"markets": {"us": {...}, "cn": {...}}}` (markets without data are listed under `skipped`).
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
