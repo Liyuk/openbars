@@ -117,6 +117,14 @@ def test_example_config_loads():
     assert Market.US in s.selection.markets and "massive" in s.providers
     assert s.us_hourly_alignment is HourlyAlignment.SESSION_OPEN
     assert s.include_extended_hours is False
+    assert s.storage_backend == "parquet_duckdb"
+    assert s.postgres_quota == "sqlite"
+
+
+def test_storage_defaults_without_legacy_configuration(tmp_path):
+    s = load_settings(write(tmp_path, "markets: [us]\n"), env={})
+    assert s.storage_backend == "parquet_duckdb"
+    assert s.postgres_quota == "sqlite"
 
 
 

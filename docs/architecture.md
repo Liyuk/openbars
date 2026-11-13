@@ -496,6 +496,8 @@ A 股/港股的部分源（东财等）对海外 IP 不可用，Binance 主站�
 
 实现：`openbars.storage.schema`（schema 定义）、`parquet_duckdb`（默认后端）、`postgres`（可选后端）、`openbars.raw.archive`（原始响应归档）。schema 版本 **`SCHEMA_VERSION = 1`**（`openbars-storage-v1`）。
 
+新安装默认将核心数据写入 Parquet + DuckDB，并将配额状态保存在本地 SQLite。Postgres 是可显式配置的可选后端；`upstream_compat` 只用于迁移与测试，不作为日常生产写入路径。显式选择它的既有配置仍保持原有读写行为。
+
 ```text
 data/
   state.db                         # SQLite：jobs、checkpoints、fetch_log（quota_* 表名预留给 QuotaGate，本层不创建）
@@ -721,17 +723,17 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
   - `upstream_compat`：直接读写 upstream 现有表（`instrument`、`symbol_alias`、`daily_bar`、`research_daily_bar`、两张水位表、`provider_request_gate` / `provider_request_usage`、`source_artifact`、`data_ingest_run`、公司行动相关表）。
 - `upstream_compat` **不执行任何迁移**，表结构归 upstream 所有；启动时做列级 introspection，缺列或类型不符即拒绝运行并报告差异。
 - 默认只读；写入需显式 `storage.postgres.write: true`，并且只写 openbars 负责的表。
-- 并行期额度共享：CLI 默认仍用本地 SQLite `QuotaGate`；把 `storage.postgres.quota` 设为 `postgres` 时，改用 `PostgresQuotaGate` 读写同一套 `provider_request_gate` / `provider_request_usage`（compat 永不迁移这些表），保证 openbars 与 upstream 共用一个 key 时不会叠加超限（或者给 openbars 配独立 key / 继续用 sqlite）。
+- 配额默认使用本地 SQLite `QuotaGate`；仅在迁移或测试确需共用现有额度表时，才显式把 `storage.postgres.quota` 设为 `postgres`。compat 永不迁移这些表。
 - 互斥：规范层重建沿用 upstream 的 PG 事务级 advisory lock 键算法，避免两边同时重建同一 policy。
 
 ### 11.4 backend 切换步骤
 
 1. **搬运 + 金标准**：按 11.1 顺序搬运；每个模块搬运时，用合成输入在 upstream 侧生成一次期望输出，冻结为 openbars 的金标准样例（§11.5）。
 2. **作为库导入**：upstream 依赖 `openbars`，把对应内部模块改为薄 shim（re-export openbars 的实现），行为由金标准保证不变。可以逐模块替换，先换纯函数层（日历、序列目录、兼容性闸门、选数），再换 provider 与额度闸门。
-3. **影子运行**：openbars 以 `upstream_compat` 只读 + 独立 `policy_version`（或独立 schema）跑完整日线管线，`openbars verify` 与 `research-daily-v2` 逐 bar 对比，指标：覆盖率、价格一致率、质量标记一致率。
-4. **切换写入**：对比稳定后，由 openbars 接管 `research-daily-v2` 的写入（`write: true`），upstream 抓取 worker 逐个下线：先兜底源，再主源。
-5. **回滚**：切换期间保留 upstream worker 代码与开关，任一指标回退时关闭 openbars 写入、恢复 upstream worker；因为口径与表结构一致，无需数据迁移。
-6. **之后**：多市场需求直接通过 openbars 配置开启；upstream 只保留业务层。
+3. **迁移比对**：仅在迁移 / 测试期间以 `upstream_compat` 只读运行，并与既有序列逐 bar 比对覆盖率、价格与质量标记；不要将 compat 配成日常写入任务。
+4. **切换核心写入**：迁移完成后，核心数据写入 Parquet + DuckDB，配额使用本地 SQLite。向外部 Postgres 回写由单独的可选导出能力处理，不属于此兼容层。
+5. **回滚**：保留迁移前配置和数据备份；回滚时恢复原系统的写入职责。已有显式 compat 配置仍可用于受控迁移 / 测试，不会被 loader 自动改写。
+6. **之后**：多市场需求直接通过 openbars 配置开启；compat 仍限迁移与测试用途。
 
 ### 11.5 兼容性测试（只用合成数据）
 
