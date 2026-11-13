@@ -96,3 +96,33 @@ test('a late response cannot overwrite the latest source and window', async () =
   assert.equal(rendered.length, 1);
   assert.equal(rendered[0][0].close, 2);
 });
+
+test('canonical quality markers only show flags while freshness remains separate', async () => {
+  const elements = Object.fromEntries(['app', 'lang-toggle', 'chart-form', 'chart-source', 'chart-start',
+    'chart-end', 'chart-q', 'interval', 'chart-note', 'chart-meta', 'chart'].map(id => [id, new Element()]));
+  elements['chart-q'].value = 'TEST1';
+  elements['chart-source'].value = 'canonical';
+  elements.interval.value = '1d';
+  let markers = [];
+  const charts = { createChart() { return { remove() {}, timeScale() { return { fitContent() {} }; },
+    addCandlestickSeries() { return { setData() {}, setMarkers(value) { markers = value; } }; } }; } };
+  const document = { documentElement: {}, getElementById: id => elements[id], querySelectorAll: () => [],
+    querySelector: () => null, createElement: () => new Element() };
+  const bar = (session_date, freshness, flags) => ({ session_date, freshness, flags,
+    available_at: '2026-01-03T00:00:00Z', open: 1, high: 2, low: 1, close: 2 });
+  const context = { document, window: { addEventListener() {}, LightweightCharts: charts }, LightweightCharts: charts,
+    navigator: { language: 'en' }, localStorage: { getItem() { return null; }, setItem() {} },
+    location: { pathname: '/chart', search: '?symbol=TEST1&interval=1d' },
+    history: { replaceState() {} }, URLSearchParams, Intl, Date,
+    fetch: async () => ({ ok: true, json: async () => ({ source: 'canonical', available_sources: [],
+      bars: [bar('2026-01-01', 'final', []), bar('2026-01-02', 'provisional', ['divergent'])],
+      missing_sessions: [], note: false }) }) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../src/openbars/web/static/assets/app.js'), 'utf8'), context);
+  await settle();
+  assert.equal(markers.length, 1);
+  assert.equal(markers[0].time, '2026-01-02');
+  assert.match(markers[0].text, /divergent/i);
+  assert.doesNotMatch(markers[0].text, /provisional|final/i);
+  assert.match(elements['chart-meta'].innerHTML, /provisional/);
+  assert.match(elements['chart-meta'].innerHTML, /2026-01-03T00:00:00Z/);
+});

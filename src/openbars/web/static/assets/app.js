@@ -22,6 +22,10 @@
       "dash.bars": "Bars",
       "dash.first": "First session",
       "dash.last": "Last session",
+      "dash.freshness": "Latest-session freshness",
+      "dash.available_at": "Latest available at",
+      "dash.coverage": "Observed latest-session coverage",
+      "dash.coverage_note": "Observed coverage is not a completeness guarantee. Freshness and completeness may differ.",
       "dash.flags": "Quality flags",
       "dash.quota": "Quota usage",
       "dash.quota_empty": "No quota database found. The server does not create one in read-only mode.",
@@ -51,6 +55,9 @@
       "chart.empty": "No bars for this selection.",
       "chart.pick": "Enter a symbol or instrument id, then load.",
       "chart.flags": "Flags on this bar",
+      "chart.freshness": "Freshness",
+      "chart.available_at": "Available at",
+      "chart.tier_note": "Provisional does not mean final; freshness is separate from quality flags and coverage.",
       "err.generic": "Unable to load data.",
       "dash.flags_empty": "No flagged bars.",
       "flag.divergent": "divergent",
@@ -86,6 +93,10 @@
       "dash.bars": "K 线条数",
       "dash.first": "首个交易日",
       "dash.last": "最近交易日",
+      "dash.freshness": "最新会话时效性",
+      "dash.available_at": "最近可用时间",
+      "dash.coverage": "最新会话观察覆盖",
+      "dash.coverage_note": "观察覆盖不保证完整性；时效性与完整性可能不同步。",
       "dash.flags": "质量标记",
       "dash.quota": "额度用量",
       "dash.quota_empty": "未找到额度数据库。只读模式下服务不会创建该文件。",
@@ -115,6 +126,9 @@
       "chart.empty": "没有符合条件的 K 线。",
       "chart.pick": "输入代码或品种 id，然后加载。",
       "chart.flags": "本根标记",
+      "chart.freshness": "时效性",
+      "chart.available_at": "可用时间",
+      "chart.tier_note": "临时不等于正式；时效性与质量标记、覆盖率分开显示。",
       "err.generic": "无法加载数据。",
       "dash.flags_empty": "没有带标记的 K 线。",
       "flag.divergent": "价格分歧",
@@ -264,6 +278,10 @@
                 '<div class="metric"><span>' + t("dash.bars") + "</span><span>" + m.bars + "</span></div>" +
                 '<div class="metric"><span>' + t("dash.first") + "</span><span>" + escapeHtml(m.first_session || "—") + "</span></div>" +
                 '<div class="metric"><span>' + t("dash.last") + "</span><span>" + escapeHtml(m.last_session || "—") + "</span></div>" +
+                '<div class="metric"><span>' + t("dash.freshness") + "</span><span>" + escapeHtml(Object.keys(m.latest_freshness || {}).map(function (k) { return k + " " + m.latest_freshness[k]; }).join(", ") || "—") + "</span></div>" +
+                '<div class="metric"><span>' + t("dash.available_at") + "</span><span>" + escapeHtml(m.latest_available_at || "—") + "</span></div>" +
+                '<div class="metric"><span>' + t("dash.coverage") + "</span><span>" + escapeHtml((m.observed_session_coverage || {}).present || 0) + " / " + escapeHtml((m.observed_session_coverage || {}).instruments || 0) + "</span></div>" +
+                '<p class="note">' + t("dash.coverage_note") + "</p>" +
                 (flagBits ? '<p class="note">' + escapeHtml(flagBits) + "</p>" : "") +
               "</article>"
             );
@@ -420,6 +438,12 @@
       var bars = body.bars || [];
       drawChart(bars, missing, isCanonical, interval);
       var bits = [];
+      var latestBar = bars.length ? bars[bars.length - 1] : null;
+      if (latestBar && isCanonical) {
+        bits.push('<div class="notice"><strong>' + t("chart.freshness") + ":</strong> " + escapeHtml(latestBar.freshness || "final") +
+          " · " + t("chart.available_at") + ": " + escapeHtml(latestBar.available_at || "—") +
+          '<p class="note">' + t("chart.tier_note") + "</p></div>");
+      }
       if (missing.length) {
         bits.push("<div class=\"notice\"><strong>" + (interval === "1h" ? t("chart.hours") : t("chart.gaps")) + " (" + missing.length + "):</strong> " +
           escapeHtml(missing.map(function (m) { return interval === "1h" ? formatTime(m.ts_start, m.session) : m; }).join(", ")) + "</div>");

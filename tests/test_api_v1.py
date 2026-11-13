@@ -54,6 +54,8 @@ def _canon(iid, day, close, *, flags=(), volume="1000000"):
         adjustment="split",
         flags=flags,
         generated_at=datetime(day.year, day.month, day.day, 21, tzinfo=UTC),
+        available_at=datetime(day.year, day.month, day.day, 22, tzinfo=UTC),
+        freshness="provisional" if day == END else "final",
     )
 
 
@@ -113,6 +115,10 @@ def test_markets_coverage(client):
     assert row["flags"]["divergent"] == 1
     assert row["flags"]["spike_suspect"] == 1
     assert row["flags"]["volume_missing"] == 1
+    assert row["latest_session"] == END.isoformat()
+    assert row["latest_freshness"] == {"provisional": 1}
+    assert row["latest_available_at"] == datetime(2020, 1, 8, 22, tzinfo=UTC).isoformat()
+    assert row["observed_session_coverage"] == {"present": 1, "instruments": 1}
 
 
 def test_instruments_search_and_paging(client):
@@ -163,6 +169,8 @@ def test_bars_canonical_default(client):
     assert isinstance(first["close"], str)
     flagged = next(b for b in body["bars"] if b["session_date"] == DAYS[1].isoformat())
     assert "divergent" in flagged["flags"]
+    assert flagged["freshness"] == "final"
+    assert flagged["available_at"] == "2020-01-03T22:00:00+00:00"
 
 
 def test_bars_by_symbol(client):

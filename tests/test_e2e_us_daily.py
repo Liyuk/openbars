@@ -250,9 +250,12 @@ def test_us_daily_end_to_end(world, capsys):
     for secret in (KEY_ID, SECRET_KEY, MASSIVE_KEY):
         assert secret not in text
     assert "universe 100" in text and "expected sessions 7" in text and "n/a" in text
+    assert "freshness: latest visible session" in text and "not a completeness guarantee" in text
     report = json.loads((world.data / "reports" / "verify.json").read_text())
     assert report["universe_size"] == 100 and report["expected_sessions"] == 7
     assert report["window"] == {"start": "2026-03-02", "end": "2026-03-10"}
+    assert report["freshness"]["session"] == "2026-03-10"
+    assert report["freshness"]["tiers"] == {"final": 100}
 
     whole, recent = report["periods"]
     cov = whole["coverage"]

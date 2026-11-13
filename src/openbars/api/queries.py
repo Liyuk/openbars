@@ -203,6 +203,8 @@ def _from_canonical_row(row: Any) -> dict[str, Any]:
         "flags": _flag_names(getattr(row, "flags", None)),
         "provider": getattr(row, "provider", None) or getattr(row, "price_source", None),
         "adjustment": getattr(getattr(row, "adjustment", None), "value", getattr(row, "adjustment", None)),
+        "available_at": getattr(row, "available_at", None).isoformat() if getattr(row, "available_at", None) else None,
+        "freshness": getattr(row, "freshness", None) or "final",
     }
 
 
@@ -224,6 +226,8 @@ def _from_arrow_table(table: Any) -> list[dict[str, Any]]:
                 "flags": _flag_names(flags),
                 "provider": rec.get("provider") or rec.get("price_source"),
                 "adjustment": rec.get("adjustment"),
+                "available_at": rec.get("available_at").isoformat() if rec.get("available_at") else None,
+                "freshness": rec.get("freshness") or "final",
             }
         )
     return out
@@ -389,6 +393,16 @@ def list_markets(backend: Any, *, interval: Interval = Interval.D1) -> list[dict
             for name in _flag_names(getattr(row, "flags", None)):
                 if name in flags:
                     flags[name] += 1
+        latest_session = max(sessions) if sessions else None
+        latest_rows = [row for row in rows if getattr(row, "session_date", None) == latest_session]
+        latest_freshness: dict[str, int] = {}
+        latest_available = []
+        for row in latest_rows:
+            tier = getattr(row, "freshness", None) or "final"
+            latest_freshness[tier] = latest_freshness.get(tier, 0) + 1
+            available_at = getattr(row, "available_at", None)
+            if available_at is not None:
+                latest_available.append(available_at)
         out.append(
             {
                 "market": market.value,
@@ -396,6 +410,13 @@ def list_markets(backend: Any, *, interval: Interval = Interval.D1) -> list[dict
                 "bars": len(rows),
                 "first_session": min(sessions).isoformat() if sessions else None,
                 "last_session": max(sessions).isoformat() if sessions else None,
+                "latest_session": latest_session.isoformat() if latest_session else None,
+                "latest_freshness": dict(sorted(latest_freshness.items())),
+                "latest_available_at": max(latest_available).isoformat() if latest_available else None,
+                "observed_session_coverage": {
+                    "present": len({getattr(row, "instrument_id", None) for row in latest_rows if getattr(row, "instrument_id", None)}),
+                    "instruments": len(instruments),
+                },
                 "flags": flags,
             }
         )
