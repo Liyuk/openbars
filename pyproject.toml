@@ -27,6 +27,7 @@ dependencies = [
 # Kept as a compatibility extra; Parquet and DuckDB are core dependencies.
 parquet = []
 postgres = ["psycopg[binary]>=3.1"]
+postgres-export = ["duckdb>=1.0", "psycopg[binary]>=3.1"]
 http = ["fastapi>=0.110", "uvicorn>=0.29"]
 yfinance = ["yfinance>=0.2"]
 baostock = ["baostock>=0.8"]
