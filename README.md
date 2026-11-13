@@ -61,6 +61,21 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 - `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
 - 再次提醒：openbars 不分发任何数据，一切由你用自己的 key（BYOK）在本地抓取，请遵守各数据源的服务条款（详见下方声明）。
 
+### 日线运行时刻与数据就绪
+
+日线只有「尽可能最近可得」这一条路径，没有当日/正式模式或模式开关。每次 `openbars run` 都按各来源当前能力规划并抓取尽可能新的数据；较早取得的临时行随后可由正式行覆盖。freshness 门槛不代表每个来源的交付 SLA，待验证来源尽力而为。
+
+真正何时运行由外部调度器（如 LaunchAgent / cron）决定。`schedule.daily_at` 是配置展示/记录字段，只由 `openbars config` 展示整个 `schedule` 段；规划器与 CLI 不读取它来触发运行。改这个值不会改变开跑时间。示例 `00:15 America/New_York` 对齐常见正式窗口，即 00:15 ET / 21:15 PT；实际触发仍须由外部调度设置。
+
+| 市场 | 建议运行时刻（仅建议） | 预期结果与证据状态 |
+| --- | --- | --- |
+| 美股 | 盘后约 13:20 PT（建议、待确认） | 可能取得 Alpaca SIP 当日日线临时数据；`now - 16 分钟` 请求截断规则已核实，但盘后可用性与完整性待验证。常见正式窗口 21:15 PT（00:15 ET）可取得 Massive 次日 00:00 ET 就绪后的正式日线；8 小时门槛及提前请求会返回 `data_not_ready` 已由代码核实。 |
+| A 股 | 上海时间 15:30 之后（建议、待确认） | 代码 freshness 门槛为收盘后 30 分钟；BaoStock 实际就绪与完整性待验证。 |
+| 港股 | 当日实际收盘 + 30 分钟之后（建议、待确认） | 代码 freshness 门槛已写明；Yahoo Finance / AKShare 等实际交付时效待验证。半日市按实际收盘计算。 |
+| 加密 | 次日 00:30 UTC 之后（建议、待确认） | 代码 freshness 门槛为 UTC 次日 00:30；Binance / Coinbase 实际就绪与完整性待验证。 |
+
+以上是运行时刻建议，不会自动配置调度。**增加盘后调度需人工确认；本 issue 不修改 LaunchAgent，也不新增守护进程。** 详见[来源就绪状态](docs/source-readiness.md)。
+
 #### 本机只读界面
 
 `openbars serve` 在本机打开覆盖看板、质量标记和 K 线页面（中英可切换），只绑定回环地址。界面是只读的：没有抓取或写入入口。K 线默认显示按规则对齐填充后的聚合数据（canonical），也可以切换到各个渠道的原始数据；原始数据中的缺日或缺字段会在图上标出。`/api/v1` 只给这些页面内部使用，本版不承诺稳定，请不要把它当成对外数据 API。
@@ -195,6 +210,21 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 - The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
 - `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.
 - Reminder: openbars distributes no data; everything is fetched locally with your own keys (BYOK), and you must follow each provider's terms (see the disclaimer below).
+
+### Daily run timing and source readiness
+
+Daily collection has one path: **fetch the latest data each source can currently provide**. There is no intraday/final mode or mode switch. Each `openbars run` plans and fetches as much recent data as source capabilities allow; a later final row can replace an earlier provisional row. Freshness thresholds are not provider delivery SLAs, and unverified sources remain best effort.
+
+The actual run time is controlled by an external scheduler such as LaunchAgent or cron. `schedule.daily_at` is a display/record field: `openbars config` prints the `schedule` section, while the planner and CLI do not read this value to trigger a run. Changing it does not change when a run starts. The example `00:15 America/New_York` matches the common final window, 00:15 ET / 21:15 PT; an external scheduler must still trigger the run.
+
+| Market | Suggested run time (proposal only) | Expected result and evidence status |
+| --- | --- | --- |
+| US | Around 13:20 PT after close (suggested, pending confirmation) | Alpaca SIP may provide a provisional daily bar; the `now - 16 minutes` request cutoff is code-verified, while after-close availability and completeness are unverified. The common final window at 21:15 PT (00:15 ET) is after Massive's next-day 00:00 ET readiness point; its 8-hour threshold and retryable `data_not_ready` response to earlier requests are code-verified. |
+| China A-shares | After 15:30 Shanghai time (suggested, pending confirmation) | The code freshness threshold is 30 minutes after close; BaoStock delivery timing and completeness are unverified. |
+| Hong Kong | 30 minutes after that day's actual close (suggested, pending confirmation) | The code freshness threshold is defined; actual delivery timing from Yahoo Finance / AKShare and other sources is unverified. Use the actual close on half days. |
+| Crypto | After 00:30 UTC on the next day (suggested, pending confirmation) | The code freshness threshold is 00:30 UTC next day; Binance / Coinbase readiness and completeness are unverified. |
+
+These are timing proposals and do not configure a scheduler. **Adding an after-close run requires human confirmation; this issue does not change LaunchAgent or add a daemon.** See [source readiness](docs/source-readiness.md).
 
 #### Local read-only UI
 

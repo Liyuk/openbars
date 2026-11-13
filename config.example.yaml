@@ -122,5 +122,7 @@ nodes:
   #   markets: [cn, hk]
 
 schedule:
-  daily_at: "06:30"        # in timezone below
+  # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
+  # 仅用于展示/记录：常见正式窗口示例（00:15 ET = 21:15 PT）；不会触发运行。
+  daily_at: "00:15"        # in timezone below / 使用下方时区
   timezone: America/New_York
