@@ -11,6 +11,7 @@ and ``policy_version``.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -84,7 +85,7 @@ def _iso_date(text: str) -> date:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha): daily 1d / hourly 1h (日线 / 小时线)")
     parser.add_argument("--version", action="version", version=f"openbars {__version__}")
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help=f"config file (default {DEFAULT_CONFIG})")
+    parser.add_argument("--config", default=None, help="config file (default: ./config.yaml when present, otherwise OPENBARS_HOME/config/config.yaml)")
     parser.add_argument("--data", default=None, help="storage directory (overrides storage.path)")
     parser.add_argument(
         "--env-file",
@@ -182,14 +183,42 @@ def main(
     if args.command == "init":
         from openbars.cli.init import init_project
 
-        if args.config != DEFAULT_CONFIG:
+        if args.config is not None:
             print("error: init takes a directory argument; --config is not used", file=sys.stderr)
             return EXIT_USAGE
         return init_project(args.directory, _Out(), exit_usage=EXIT_USAGE, yes=args.yes)
 
     out = _Out()
     try:
-        settings = load_settings(args.config, env=env, env_file=getattr(args, "env_file", None))
+        process_env = os.environ if env is None else env
+        explicit_config = args.config is not None
+        home_config = False
+        if explicit_config:
+            config_path = args.config
+        elif Path(DEFAULT_CONFIG).is_file():
+            config_path = DEFAULT_CONFIG
+        elif getattr(args, "env_file", None) is None:
+            configured_home = process_env.get("OPENBARS_HOME")
+            if configured_home is None:
+                openbars_home = Path(process_env.get("HOME", str(Path.home()))) / ".openbars"
+            elif configured_home == "~":
+                openbars_home = Path(process_env.get("HOME", str(Path.home())))
+            elif configured_home.startswith("~/"):
+                openbars_home = Path(process_env.get("HOME", str(Path.home()))) / configured_home[2:]
+            else:
+                openbars_home = Path(configured_home)
+            config_path = openbars_home / "config" / "config.yaml"
+            home_config = True
+        else:
+            config_path = DEFAULT_CONFIG
+        default_storage_path = str(openbars_home / "data") if home_config else "./data"
+        settings = load_settings(
+            config_path,
+            env=env,
+            env_file=getattr(args, "env_file", None),
+            default_storage_path=default_storage_path,
+        )
+        args.config = str(config_path)
         out = _Out(settings.secret_values())
         factory = provider_factory or build_providers
         now = clock or (lambda: datetime.now(UTC))

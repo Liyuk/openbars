@@ -398,9 +398,11 @@ def load_settings(
     *,
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
+    default_storage_path: str = "./data",
 ) -> Settings:
     """Parse ``config.yaml``, optionally load a dotenv file, expand ``${ENV_VAR}`` and validate.
 
+    ``default_storage_path`` is used only when the YAML omits ``storage.path``.
     Raises :class:`~openbars.core.errors.ConfigError` for a missing/unreadable file, bad
     YAML or an invalid market/interval/adjustment. Secret values never appear in the error.
     """
@@ -421,7 +423,10 @@ def load_settings(
     file_env = parse_env_file(chosen) if chosen is not None else None
     merged = merge_env(process_env, file_env)
     try:
-        settings = parse_settings(expand_env(data, merged))
+        expanded = expand_env(data, merged)
+        if "path" not in _section(expanded, "storage"):
+            expanded.setdefault("storage", {})["path"] = default_storage_path
+        settings = parse_settings(expanded)
     except ConfigError as exc:
         raise ConfigError(_scrub(str(exc), _referenced_values(data, merged))) from None
     refs = _provider_env_refs(data)
