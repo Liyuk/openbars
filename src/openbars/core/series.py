@@ -71,6 +71,10 @@ COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
 # AKShare HK daily, unadjusted Eastmoney bars. Not US, not in KNOWN_SOURCES.
 AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
+# AKShare A-share daily backup, unadjusted (adjust=""). Distinct provider id from the HK
+# adapter above; Eastmoney and Sina are separate feeds of the same provider.
+AKSHARE_CN_EASTMONEY_RAW = SourceIdentity("akshare_ashare", "eastmoney", "raw")
+AKSHARE_CN_SINA_RAW = SourceIdentity("akshare_ashare", "sina", "raw")
 # Futu OpenD HK daily (AuType.NONE), user's own OpenD login (#73). Not US, not in KNOWN_SOURCES.
 FUTU_OPEND_RAW = SourceIdentity("futu", "opend", "raw")
 # LongPort OpenAPI HK daily (AdjustType.NoAdjust), user's own account (#74). Not in KNOWN_SOURCES.
@@ -212,6 +216,21 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         session_semantics=SessionSemantics.REGULAR,
         volume_basis=VolumeBasis.AS_TRADED,
         currency="HKD",
+    ),
+    # AKShare A-share backup: unadjusted CNY bars on the Shanghai/Shenzhen regular session.
+    (AKSHARE_CN_EASTMONEY_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="CNY",
+    ),
+    (AKSHARE_CN_SINA_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="CNY",
     ),
     (FUTU_OPEND_RAW, Interval.D1): dict(
         price_basis=PriceBasis.RAW,

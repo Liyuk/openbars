@@ -14,7 +14,8 @@ version: 1
 # 选择市场（多选）: us | crypto | cn | hk
 # 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
 # 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
-# 改用 A 股：`markets: [cn]`，启用 providers.baostock，并在 universe.cn.symbols 写代码
+# 改用 A 股：`markets: [cn]`，启用 providers.baostock（或低频备源 providers.akshare_ashare），
+# 并在 universe.cn.symbols 写代码
 # 改用港股：`markets: [hk]`，启用 providers.yfinance（规划器只用这一源），并在 universe.hk.symbols 写代码
 # （如 sh.600000 / 600000.SH；裸 6 位代码会被跳过）即可 plan / run（默认仍关闭）。
 markets: [us]
@@ -100,6 +101,14 @@ providers:
   # 存 RAW、不写停牌占位、标记涨跌停；前/后复权（qfq / hfq）在读取时由复权因子派生。
   baostock:
     enabled: false
+  # A 股日线备源（AKShare，无需 token）。默认关闭；需安装可选依赖 `pip install openbars[akshare]`。
+  # feed: eastmoney（默认，stock_zh_a_hist）| sina（stock_zh_a_daily）。只存不复权（adjust=""）；
+  # 东财成交量以“手”返回，适配器换算为“股”，与 BaoStock 同口径。库为 MIT，但不转授上游数据权：
+  # 东财禁止未经交易所书面同意散发行情或对站点施以高负载，新浪限制未经许可的抓取。
+  # 仅作低频备源、本机私存、不再分发。A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+  akshare_ashare:
+    enabled: false
+    feed: eastmoney        # eastmoney | sina
 
 # 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
 reconcile:

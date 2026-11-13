@@ -69,7 +69,8 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
         out.line("小时线仅支持美股 / 1h is supported only for US; 请重选 / choose again.")
     available = set()
     for market, names in {"us": {"alpaca", "massive", "yfinance"}, "hk": {"yfinance"},
-                          "crypto": {"binance", "coinbase"}, "cn": {"baostock"}}.items():
+                          "crypto": {"binance", "coinbase"},
+                          "cn": {"baostock", "akshare_ashare"}}.items():
         if market in markets:
             available.update(names)
     if "us" in markets and "1h" in intervals:
@@ -78,7 +79,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     coverage = {
         ("us", "1d"): {"alpaca", "massive", "yfinance"},
         ("us", "1h"): {"alpaca", "massive", "yfinance", "twelve_data"},
-        ("hk", "1d"): {"yfinance"}, ("cn", "1d"): {"baostock"},
+        ("hk", "1d"): {"yfinance"}, ("cn", "1d"): {"baostock", "akshare_ashare"},
         ("crypto", "1d"): {"binance", "coinbase"},
     }
     while True:

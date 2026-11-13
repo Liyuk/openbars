@@ -30,6 +30,7 @@ _CREDENTIALS: dict[str, dict[str, str]] = {
     "binance": {},  # public market data: no key
     "coinbase": {},
     "baostock": {},  # anonymous login: no key (optional extra openbars[baostock])
+    "akshare_ashare": {},  # anonymous sites, no key (optional extra openbars[akshare])
 }
 
 
@@ -45,6 +46,7 @@ _PROVIDER_MARKETS: dict[str, frozenset[Market]] = {
     "binance": frozenset({Market.CRYPTO}),
     "coinbase": frozenset({Market.CRYPTO}),
     "baostock": frozenset({Market.CN}),
+    "akshare_ashare": frozenset({Market.CN}),
 }
 
 

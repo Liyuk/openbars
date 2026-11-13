@@ -4,9 +4,9 @@
 >
 > **免费、多市场、多数据源的 K 线采集、清洗与合并框架，产出一份可审计的唯一数据源。**
 
-**Status / 状态：pre-alpha** — 美股日线、加密日线、A 股日线（BaoStock，可选依赖）的本地 `plan` / `run` 链路已在本仓库可用；`verify` 覆盖 `markets` 中的每个市场（美股 / 加密 / A 股 / 港股，各用自己的日历与 `policy_version`）；港股日线（yfinance 主源，AKShare 佐证）同样可用；美股 1h 可选采集到 raw 层；其他非日线粒度仍在路线图中。API 随时会变。
+**Status / 状态：pre-alpha** — 美股日线、加密日线、A 股日线（BaoStock 主源，AKShare 东财/新浪低频备源，均可选依赖）的本地 `plan` / `run` 链路已在本仓库可用；`verify` 覆盖 `markets` 中的每个市场（美股 / 加密 / A 股 / 港股，各用自己的日历与 `policy_version`）；港股日线（yfinance 主源，AKShare 佐证）同样可用；美股 1h 可选采集到 raw 层；其他非日线粒度仍在路线图中。API 随时会变。
 
-*US daily, crypto daily and A-share daily (BaoStock, optional extra) local `plan` / `run` are available in this tree; `verify` covers every market in `markets` (US / crypto / A-shares / Hong Kong, each on its own calendar and `policy_version`); Hong Kong daily (yfinance primary, AKShare corroboration) is available too; US 1h collection is available as raw bars; other non-daily intervals come later. Pre-alpha: the API may change.*
+*US daily, crypto daily and A-share daily (BaoStock primary, AKShare Eastmoney/Sina low-frequency backup, both optional extras) local `plan` / `run` are available in this tree; `verify` covers every market in `markets` (US / crypto / A-shares / Hong Kong, each on its own calendar and `policy_version`); Hong Kong daily (yfinance primary, AKShare corroboration) is available too; US 1h collection is available as raw bars; other non-daily intervals come later. Pre-alpha: the API may change.*
 
 ---
 
@@ -70,7 +70,7 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 | 市场 | 建议运行时刻（仅建议） | 预期结果与证据状态 |
 | --- | --- | --- |
 | 美股 | 盘后约 13:20 PT（建议、待确认） | 可能取得 Alpaca SIP 当日日线临时数据；`now - 16 分钟` 请求截断规则已核实，但盘后可用性与完整性待验证。常见正式窗口 21:15 PT（00:15 ET）可取得 Massive 次日 00:00 ET 就绪后的正式日线；8 小时门槛及提前请求会返回 `data_not_ready` 已由代码核实。 |
-| A 股 | 上海时间 15:30 之后（建议、待确认） | 代码 freshness 门槛为收盘后 30 分钟；BaoStock 实际就绪与完整性待验证。 |
+| A 股 | 上海时间 15:30 之后（建议、待确认） | 代码 freshness 门槛为收盘后 30 分钟；BaoStock / AKShare 备源的实际就绪与完整性待验证。 |
 | 港股 | 当日实际收盘 + 30 分钟之后（建议、待确认） | 代码 freshness 门槛已写明；Yahoo Finance / AKShare 等实际交付时效待验证。半日市按实际收盘计算。 |
 | 加密 | 次日 00:30 UTC 之后（建议、待确认） | 代码 freshness 门槛为 UTC 次日 00:30；Binance / Coinbase 实际就绪与完整性待验证。 |
 
@@ -133,18 +133,20 @@ conventions:
 小时规范层仍待 #116；小时线与日线的一致性校验仍待 #116。
 看板 1h 支持仍待 #119。
 
-### A 股日线（BaoStock）
+### A 股日线（BaoStock；AKShare 备源）
 
 ```bash
-uv sync --extra baostock             # 或 pip install "openbars[baostock]"
-# config.yaml：markets: [cn]；providers.baostock.enabled: true；universe.cn.symbols: [sh.600000, 000001.SZ]
+uv sync --extra baostock --extra akshare   # 或 pip install "openbars[baostock]" "openbars[akshare]"
+# config.yaml：markets: [cn]；providers.baostock.enabled: true（或 providers.akshare_ashare.enabled: true）
+# universe.cn.symbols: [sh.600000, 000001.SZ]
 uv run openbars plan && uv run openbars run
 ```
 
 - 不需要 API key。`universe.cn.symbols` 写 `sh.600000` 或 `600000.SH`；**不接受**裸 6 位代码（会被跳过并给出提示）。
 - 条款：BaoStock 仅限**个人本地使用**；请勿提交或分发行情数据（`data/` 已被 git 忽略）。海外网络可能连不上 BaoStock，此时任务会失败并记入任务状态（`openbars status` 可查），网络恢复后重跑即可续抓。
 - 落库的是**不复权**序列（`cn-daily-v1`，`adjustment=raw`）：停牌日只留在 raw 层（带 `tradestatus`），规范层不写占位并标记涨跌停；复权因子首次拉取上市以来全量、之后只拉增量。读取时传 `adjustment=Adjustment.QFQ` / `Adjustment.HFQ`（前/后复权在查询时派生，不落库）。
-- 可选冒烟：`OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py`（1 只股票、2 个交易日，默认跳过）。
+- AKShare 备源：启用 `providers.akshare_ashare`（默认 `feed: eastmoney`，可选 `feed: sina`），定位**低频备源**、本机私存、不再分发；只请求不复权（`adjust=""`），东财成交量由“手”换算为“股”。库为 MIT，但**不转授**上游数据权：东财禁止未经交易所书面同意散发行情或施以高负载，新浪限制未经许可的抓取。AKShare 不提供复权因子，单独使用时 QFQ / HFQ 会因缺因子报错；A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+- 可选冒烟：`OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py`（1 只股票、2 个交易日，默认跳过）；`OPENBARS_AKSHARE_CN_LIVE=1 uv run pytest tests/test_akshare_cn_58.py`（AKShare，默认跳过）。
 - `verify`（A 股）：按 XSHG 日历、`cn-daily-v1`，只评分落库的 **RAW** 序列，QFQ / HFQ 是读取时派生的，不在评分之内。规范层的 `quality_status` 在 `LIMIT_UP` / `LIMIT_DOWN` / `SUSPENDED` 标记下仍为 `complete`，报告会统计这些标记的数量。停牌日 raw 保留、规范层不写占位，这个预期的空洞单独记为 `suspended_cells`，不计入 `missing`。
 
 ### 港股日线
@@ -220,7 +222,7 @@ The actual run time is controlled by an external scheduler such as LaunchAgent o
 | Market | Suggested run time (proposal only) | Expected result and evidence status |
 | --- | --- | --- |
 | US | Around 13:20 PT after close (suggested, pending confirmation) | Alpaca SIP may provide a provisional daily bar; the `now - 16 minutes` request cutoff is code-verified, while after-close availability and completeness are unverified. The common final window at 21:15 PT (00:15 ET) is after Massive's next-day 00:00 ET readiness point; its 8-hour threshold and retryable `data_not_ready` response to earlier requests are code-verified. |
-| China A-shares | After 15:30 Shanghai time (suggested, pending confirmation) | The code freshness threshold is 30 minutes after close; BaoStock delivery timing and completeness are unverified. |
+| China A-shares | After 15:30 Shanghai time (suggested, pending confirmation) | The code freshness threshold is 30 minutes after close; BaoStock / AKShare backup delivery timing and completeness are unverified. |
 | Hong Kong | 30 minutes after that day's actual close (suggested, pending confirmation) | The code freshness threshold is defined; actual delivery timing from Yahoo Finance / AKShare and other sources is unverified. Use the actual close on half days. |
 | Crypto | After 00:30 UTC on the next day (suggested, pending confirmation) | The code freshness threshold is 00:30 UTC next day; Binance / Coinbase readiness and completeness are unverified. |
 
@@ -282,18 +284,20 @@ See the [local measurement guide](docs/measuring-hourly.md#english) for timing a
 Hourly canonical reconciliation and the hourly-versus-daily consistency check are pending #116.
 Dashboard 1h support is pending #119.
 
-### A-share daily (BaoStock)
+### A-share daily (BaoStock; AKShare backup)
 
 ```bash
-uv sync --extra baostock             # or: pip install "openbars[baostock]"
-# config.yaml: markets: [cn]; providers.baostock.enabled: true; universe.cn.symbols: [sh.600000, 000001.SZ]
+uv sync --extra baostock --extra akshare   # or: pip install "openbars[baostock]" "openbars[akshare]"
+# config.yaml: markets: [cn]; providers.baostock.enabled: true (or providers.akshare_ashare.enabled: true)
+# universe.cn.symbols: [sh.600000, 000001.SZ]
 uv run openbars plan && uv run openbars run
 ```
 
 - No API key. Write `universe.cn.symbols` as `sh.600000` or `600000.SH`; bare 6-digit codes are **not** accepted (they are skipped with a note).
 - Terms: BaoStock is for **personal local use only**; never commit or redistribute market data (`data/` is git-ignored). BaoStock may be unreachable from overseas networks; jobs then fail and show up in `openbars status`; re-run once the network is back to resume.
 - The stored series is **unadjusted** (`cn-daily-v1`, `adjustment=raw`): suspended sessions stay in the raw layer only (with `tradestatus`), canonical gets no placeholder bar and carries limit-up / limit-down flags. Adjust factors are fetched as full history the first time and incrementally afterwards. Pass `adjustment=Adjustment.QFQ` / `Adjustment.HFQ` at read time (derived on query, never stored).
-- Optional smoke test: `OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py` (1 symbol, 2 sessions; skipped by default).
+- AKShare backup: enable `providers.akshare_ashare` (default `feed: eastmoney`, optional `feed: sina`). It is a **low-frequency backup**, stored locally, never redistributed; only unadjusted bars are requested (`adjust=""`) and Eastmoney lot volume is converted to shares. The library is MIT but does **not** relicense upstream quotes: Eastmoney forbids redistributing exchange quotes without written consent or putting a disproportionate load on its site, and Sina restricts unlicensed scraping. AKShare provides no adjust factors, so QFQ / HFQ report missing factors when it is used alone; the A-share canonical layer is a single-source projection, so enable one A-share source at a time.
+- Optional smoke tests: `OPENBARS_BAOSTOCK_SMOKE=1 uv run pytest tests/test_baostock_public_smoke.py` (1 symbol, 2 sessions; skipped by default); `OPENBARS_AKSHARE_CN_LIVE=1 uv run pytest tests/test_akshare_cn_58.py` (AKShare, skipped by default).
 - `verify` (A-shares): XSHG calendar, `cn-daily-v1`, scores the stored **RAW** series only; QFQ / HFQ are derived at read time and are not scored. `quality_status` stays `complete` under `LIMIT_UP` / `LIMIT_DOWN` / `SUSPENDED` flags, and the report counts those flags. A suspended day keeps its raw bar but gets no canonical placeholder; that expected hole is reported separately as `suspended_cells` and is not counted as `missing`.
 
 ### Hong Kong daily

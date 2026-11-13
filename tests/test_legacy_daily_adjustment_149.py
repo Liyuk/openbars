@@ -78,6 +78,8 @@ def test_normalize_rewrites_and_drops_superseded_legacy_rows():
     ("akshare", "eastmoney", Market.HK, "HKD", False),
     ("binance", "spot", Market.CRYPTO, None, False),
     ("baostock", "ashare", Market.CN, "CNY", False),
+    ("akshare_ashare", "eastmoney", Market.CN, "CNY", False),
+    ("akshare_ashare", "sina", Market.CN, "CNY", False),
 ])  # fmt: skip
 def test_only_known_split_sources_are_normalized(provider, feed, market, currency, expected):
     (row,) = rows([bar(provider, feed, DAYS[0], legacy=True)], market)
