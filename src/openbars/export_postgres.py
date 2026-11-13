@@ -1,21 +1,113 @@
-"""Optional, caller-controlled export of canonical Parquet bars to existing PostgreSQL tables."""
+"""Optional, caller-controlled export of canonical Parquet bars to a generic PostgreSQL table.
+
+This module is a **reference implementation** of the documented generic layout
+(``bars + source information``, see ``docs/postgres-export.md``): daily OHLCV plus the
+provenance openbars already stores on canonical rows (data source, fetch lineage when the
+file carries it, ``freshness``, ``available_at``). It deliberately knows nothing about any
+caller's own tables: there are no caller foreign keys (no integer upstream instrument id,
+no caller artifact / run ids) and ``instrument_id`` is written as the openbars string id.
+
+Callers that need their own official tables (with their own provenance columns) are
+expected to write an adapter on their side and read openbars data (Parquet / ``BarReader``)
+instead of pointing this exporter at those tables.
+
+Nothing here enters the default ``plan`` / ``run`` write path, and the exporter never runs
+DDL: the target table must exist. The default is a dry run; ``--apply`` is required to
+connect and write.
+"""
+
 from __future__ import annotations
 
-import csv
 import json
 import re
 from datetime import date, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
-_TABLES = {
-    "daily_bar": ("instrument_id", "session_date", "provider", "feed", "adjustment", "revision"),
-    "research_daily_bar": ("instrument_id", "session_date", "policy_version"),
-}
+#: Default target table name for the generic reference layout.
+REFERENCE_TABLE = "openbars_bars"
+
+#: The generic reference layout: ``(column, PostgreSQL type, nullable)``.
+#: Bars first, then the canonical source fields, then ``freshness`` / ``available_at`` and the
+#: raw fetch lineage that the canonical row may carry. Ordering is the INSERT column order.
+REFERENCE_COLUMNS: tuple[tuple[str, str, bool], ...] = (
+    # bar identity and time
+    ("instrument_id", "TEXT", False),
+    ("market", "TEXT", False),
+    ("interval", "TEXT", False),
+    ("session_date", "DATE", False),
+    ("ts_start", "TIMESTAMPTZ", False),
+    ("session", "TEXT", False),
+    ("policy_version", "TEXT", False),
+    # OHLCV (same precision as the Parquet / Postgres native schema)
+    ("open", "NUMERIC(20,8)", False),
+    ("high", "NUMERIC(20,8)", False),
+    ("low", "NUMERIC(20,8)", False),
+    ("close", "NUMERIC(20,8)", False),
+    ("volume", "NUMERIC(28,8)", True),
+    ("vwap", "NUMERIC(20,8)", True),
+    ("trade_count", "BIGINT", True),
+    # data source
+    ("provider", "TEXT", False),
+    ("feed", "TEXT", False),
+    ("adjustment", "TEXT", False),
+    ("revision", "INTEGER", False),
+    ("price_source", "TEXT", False),
+    ("volume_source", "TEXT", True),
+    ("sources_seen", "JSONB", False),
+    # reconciliation / quality
+    ("selection_reason", "TEXT", False),
+    ("quality_status", "TEXT", False),
+    ("flags", "JSONB", False),
+    ("capabilities", "JSONB", False),
+    ("reconcile_rule", "TEXT", False),
+    # source information: content fingerprint, generation time and the fetch-batch pointer
+    ("source_fingerprint", "TEXT", False),
+    ("generated_at", "TIMESTAMPTZ", False),
+    ("source_fetch_id", "TEXT", True),
+    # source information: provisional vs final, and when the bar became usable
+    ("freshness", "TEXT", False),
+    ("available_at", "TIMESTAMPTZ", True),
+)
+
+#: Idempotent upsert key, identical to the canonical bar key (openbars ``CANONICAL_KEY_SQL``).
+REFERENCE_KEY: tuple[str, ...] = ("instrument_id", "interval", "policy_version", "session_date", "ts_start")
+
+#: Canonical columns the exporter cannot work without (all part of ``openbars-storage-v1``).
+_REQUIRED = frozenset(
+    {
+        "instrument_id", "market", "interval", "ts_start", "session_date", "session", "policy_version",
+        "provider", "feed", "adjustment", "revision", "open", "high", "low", "close", "volume", "vwap",
+        "trade_count", "flags", "selection_reason", "quality_status", "capabilities", "source_fingerprint",
+        "price_source", "volume_source", "sources_seen", "reconcile_rule", "generated_at",
+    }
+)
+_JSONB = frozenset(column for column, kind, _ in REFERENCE_COLUMNS if kind == "JSONB")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PASSWORD = re.compile(r"(://[^:/@\s]+:)[^@\s]+@")
+
+
+def _check_table(table: str) -> None:
+    if not isinstance(table, str) or not _IDENT.fullmatch(table) or len(table) > 63:
+        raise ValueError("table must be an ASCII identifier of at most 63 characters")
+
+
+def reference_ddl(table: str = REFERENCE_TABLE) -> str:
+    """``CREATE TABLE`` for the generic reference layout. Printed/referenced by the docs only.
+
+    The exporter never executes DDL; this is here so a caller can create the target table
+    exactly as documented (and so tests can check the document and the insert agree).
+    """
+    _check_table(table)
+    lines = [
+        f'  "{column}" {kind}{"" if nullable else " NOT NULL"}'
+        for column, kind, nullable in REFERENCE_COLUMNS
+    ]
+    key = ", ".join(f'"{column}"' for column in REFERENCE_KEY)
+    lines.append(f"  PRIMARY KEY ({key})")
+    return f'CREATE TABLE "{table}" (\n' + ",\n".join(lines) + "\n)"
 
 
 def _connect(dsn: str) -> Any:
@@ -26,103 +118,116 @@ def _connect(dsn: str) -> Any:
     return psycopg.connect(dsn)
 
 
-def _mapping(path: str) -> dict[str, int]:
-    result: dict[str, int] = {}
-    with open(path, newline="", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or not {"instrument_id", "upstream_id"}.issubset(reader.fieldnames):
-            raise ValueError("mapping CSV must have instrument_id,upstream_id columns")
-        for line, row in enumerate(reader, start=2):
-            key = (row.get("instrument_id") or "").strip()
-            try:
-                value = int(row.get("upstream_id", ""))
-            except ValueError:
-                raise ValueError(f"mapping CSV line {line}: upstream_id must be an integer") from None
-            if not key or value < 0:
-                raise ValueError(f"mapping CSV line {line}: invalid instrument_id or upstream_id")
-            if key in result and result[key] != value:
-                raise ValueError(f"mapping CSV contains conflicting ids for {key!r}")
-            result[key] = value
-    return result
+def _json(value: Any) -> str:
+    return json.dumps(list(value or []))
 
 
-def _rows(source: str, mapping_file: str, table: str, since: date | None, days: int | None) -> list[tuple]:
-    files = sorted(Path(source).glob("**/*.parquet"))
-    if not files:
+def _sql(table: str) -> str:
+    columns = [column for column, _, _ in REFERENCE_COLUMNS]
+    names = ", ".join(f'"{column}"' for column in columns)
+    placeholders = ", ".join("%s::jsonb" if column in _JSONB else "%s" for column in columns)
+    conflict = ", ".join(f'"{column}"' for column in REFERENCE_KEY)
+    updates = ", ".join(f'"{column}"=EXCLUDED."{column}"' for column in columns if column not in REFERENCE_KEY)
+    return (
+        f'INSERT INTO "{table}" ({names}) VALUES ({placeholders}) '
+        f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}"
+    )
+
+
+def _load(source: str) -> list[dict[str, Any]]:
+    if not sorted(Path(source).glob("**/*.parquet")):
         return []
     # DuckDB reads Parquet values as Decimal; no intermediate float conversion occurs.
     con = duckdb.connect(":memory:")
     try:
         rel = con.execute("SELECT * FROM read_parquet(?, union_by_name=true)", [str(Path(source) / "**/*.parquet")])
-        columns = {desc[0] for desc in rel.description}
-        required = {"instrument_id", "session_date", "interval", "open", "high", "low", "close", "volume", "provider", "feed", "adjustment", "revision", "policy_version"}
-        if missing := required - columns:
-            raise ValueError(f"canonical Parquet is missing columns: {', '.join(sorted(missing))}")
-        result = rel.fetchall()
         names = [desc[0] for desc in rel.description]
-        objects = [dict(zip(names, row)) for row in result]
+        if missing := _REQUIRED - set(names):
+            raise ValueError(f"canonical Parquet is missing columns: {', '.join(sorted(missing))}")
+        return [dict(zip(names, row)) for row in rel.fetchall()]
     finally:
         con.close()
-    id_map = _mapping(mapping_file)
-    date_max = max((r["session_date"] for r in objects if r["interval"] == "1d"), default=None)
+
+
+def _bar_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Map one canonical row to the generic layout; only canonical/source information, no caller FKs."""
+    values: dict[str, Any] = {
+        "instrument_id": row["instrument_id"],
+        "market": row["market"],
+        "interval": row["interval"],
+        "session_date": row["session_date"],
+        "ts_start": row["ts_start"],
+        "session": row["session"],
+        "policy_version": row["policy_version"],
+        "open": row["open"],
+        "high": row["high"],
+        "low": row["low"],
+        "close": row["close"],
+        "volume": row["volume"],
+        "vwap": row["vwap"],
+        "trade_count": row["trade_count"],
+        "provider": row["provider"],
+        "feed": row["feed"],
+        "adjustment": row["adjustment"],
+        "revision": row["revision"],
+        "price_source": row["price_source"],
+        "volume_source": row.get("volume_source"),
+        "sources_seen": _json(row.get("sources_seen")),
+        "selection_reason": row["selection_reason"],
+        "quality_status": row["quality_status"],
+        "flags": _json(row.get("flags")),
+        "capabilities": _json(row.get("capabilities")),
+        "reconcile_rule": row["reconcile_rule"],
+        "source_fingerprint": row["source_fingerprint"],
+        "generated_at": row["generated_at"],
+        # Canonical -> raw fetch-batch pointer (generic source-information contract); null when
+        # the producer did not know the batch (older files, version-less imports).
+        "source_fetch_id": row.get("source_fetch_id"),
+        # Null / missing freshness reads as final everywhere else in openbars.
+        "freshness": row.get("freshness") or "final",
+        "available_at": row.get("available_at"),
+    }
+    return values
+
+
+def _rows(source: str, since: date | None, days: int | None) -> list[dict[str, Any]]:
+    objects = _load(source)
+    daily = [row for row in objects if row["interval"] == "1d"]
     if days is not None:
+        date_max = max((row["session_date"] for row in daily), default=None)
         if date_max is None:
             return []
         since = date_max - timedelta(days=days - 1)
-    rows = []
-    for row in objects:
-        day = row["session_date"]
-        if row["interval"] != "1d" or (since and day < since):
-            continue
-        upstream_id = id_map.get(row["instrument_id"])
-        if upstream_id is None:
-            raise ValueError(f"no caller-provided integer id for instrument_id {row['instrument_id']!r}")
-        if row["volume"] is None:
-            raise ValueError(f"volume is required by the target schema for {row['instrument_id']!r} on {day}")
-        common = (upstream_id, day)
-        if table == "daily_bar":
-            currency = next((c.split(":", 1)[1].upper() for c in row.get("capabilities", []) if c.lower().startswith("currency:")), None)
-            rows.append(common + (row["provider"], row["feed"], row["adjustment"], "unknown", "unknown", None,
-                "unknown", currency, "unknown", row["revision"], row["open"], row["high"], row["low"],
-                row["close"], row["volume"], row["vwap"], None, None))
-        else:
-            rows.append(common + (row["policy_version"], None, row["provider"], row["feed"], row["adjustment"],
-                row["revision"], row["open"], row["high"], row["low"], row["close"], row["volume"],
-                row["selection_reason"], row["quality_status"], json.dumps(row.get("capabilities") or []),
-                row["source_fingerprint"], row["generated_at"]))
-    return rows
+    selected = [row for row in daily if not (since and row["session_date"] < since)]
+    return [_bar_row(row) for row in selected]
 
 
-def _sql(table: str, layout: str) -> str:
-    if layout == "daily_bar":
-        cols = ("instrument_id", "session_date", "provider", "feed", "adjustment", "price_basis", "adjustment_scope", "adjustment_as_of", "session_semantics", "currency", "volume_basis", "revision", "open", "high", "low", "close", "volume", "vwap", "source_artifact_id", "ingest_run_id")
-        key = ("instrument_id", "session_date", "provider", "feed", "adjustment", "revision")
-    else:
-        cols = ("instrument_id", "session_date", "policy_version", "selected_source_bar_id", "provider", "feed", "adjustment", "revision", "open", "high", "low", "close", "volume", "selection_reason", "quality_status", "capabilities", "source_fingerprint", "generated_at")
-        key = ("instrument_id", "session_date", "policy_version")
-    names = ", ".join(cols)
-    placeholders = ", ".join("%s::jsonb" if col == "capabilities" else "%s" for col in cols)
-    updates = ", ".join(f"{col}=EXCLUDED.{col}" for col in cols if col not in key)
-    return f'INSERT INTO "{table}" ({names}) VALUES ({placeholders}) ON CONFLICT ({", ".join(key)}) DO UPDATE SET {updates}'
+def _scrub(message: str, dsn: str | None) -> str:
+    """Never echo a DSN or an inline password from a driver exception."""
+    if dsn:
+        message = message.replace(dsn, "[REDACTED]")
+    return _PASSWORD.sub(r"\1***@", message)
+
+
+def _params(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    return [tuple(row.get(column) for column, _, _ in REFERENCE_COLUMNS) for row in rows]
 
 
 def run(args, out) -> int:
     try:
-        if not _IDENT.fullmatch(args.table) or len(args.table) > 63:
-            raise ValueError("table must be an ASCII identifier of at most 63 characters")
-        layout = args.table_layout or (args.table if args.table in _TABLES else None)
-        if layout is None:
-            raise ValueError("custom table requires --table-layout")
-        rows = _rows(args.source, args.mapping, layout, args.since, args.days)
+        _check_table(args.table)
+        rows = _rows(args.source, args.since, args.days)
         out.line(f"export-postgres: {len(rows)} rows to {args.table} ({'apply' if args.apply else 'dry-run'})")
+        if not rows:
+            out.line("nothing to write")
+            return 0
         if not args.apply:
             out.line("dry-run: nothing written")
             return 0
         conn = _connect(args.dsn)
         try:
             with conn.cursor() as cur:
-                sql = _sql(args.table, layout)
-                cur.executemany(sql, rows)
+                cur.executemany(_sql(args.table), _params(rows))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -133,5 +238,5 @@ def run(args, out) -> int:
         return 0
     except Exception as exc:
         # Avoid echoing DSNs from driver exceptions.
-        out.err(f"error: Postgres export failed: {type(exc).__name__}: {str(exc).replace(args.dsn, '[REDACTED]')}")
+        out.err(f"error: Postgres export failed: {type(exc).__name__}: {_scrub(str(exc), getattr(args, 'dsn', None))}")
         return 1

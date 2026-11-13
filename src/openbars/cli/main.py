@@ -133,13 +133,11 @@ def _build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
     common(show)
 
-    export_pg = sub.add_parser("export-postgres", help="export canonical Parquet bars to an existing PostgreSQL table (optional extra)")
+    export_pg = sub.add_parser("export-postgres", help="export canonical Parquet bars to the generic reference PostgreSQL table (optional extra, reference implementation)")
     export_pg.add_argument("--source", required=True, help="canonical Parquet directory")
     export_pg.add_argument("--dsn", required=True, help="target PostgreSQL DSN")
-    export_pg.add_argument("--table", required=True, help="existing target table name")
-    export_pg.add_argument("--table-layout", choices=("daily_bar", "research_daily_bar"),
-                           help="target schema and conflict key; required for custom table names")
-    export_pg.add_argument("--mapping", required=True, help="CSV with instrument_id,upstream_id integer columns")
+    export_pg.add_argument("--table", default="openbars_bars",
+                           help="existing target table name (default: openbars_bars; the generic reference layout only)")
     window = export_pg.add_mutually_exclusive_group()
     window.add_argument("--since", type=_iso_date, help="first session date, inclusive")
     window.add_argument("--days", type=int, help="calendar days ending on latest source session (inclusive)")

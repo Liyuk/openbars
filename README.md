@@ -53,6 +53,9 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 # 可选：与外部 research-daily-v2 只读 API 做影子对账（符号列表与报告都放在仓库外）
 # uv run openbars shadow --symbols-file /path/to/symbols.txt \
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
+# 可选：把近期 canonical 日线写入通用参考表（K 线 + 来源信息；默认 dry-run，参考实现）
+# uv sync --extra postgres-export
+# uv run openbars export-postgres --source ./data/canonical --dsn "$TARGET_PG_DSN" --days 30 --apply
 ```
 
 - `init [目录]` 在终端启动向导；非终端或 `--yes` 复制示例配置。参见[数据源密钥申请与额度指南](docs/provider-keys.md)。任一目标已存在就报错退出（退出码 2），什么都不写。
@@ -103,6 +106,7 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 
 ### 升级说明
 
+- **Postgres 导出插件改为通用参考表（#203）**：`openbars export-postgres` 现在只写通用参考表（K 线 + 来源信息），默认表名 `openbars_bars`；`--table-layout` 与 `--mapping` 已删除，原先直写调用方官方表的布局不再支持。需要官方表 + 溯源列的调用方请自己做适配器。见 [docs/postgres-export.md](docs/postgres-export.md)。
 - **日线 raw 复权身份（#145 / #149）**：#145 之前，未在 `extra.adjustment` 里声明复权的拆股复权日线源（美股 Massive `eod`、Alpaca `iex` / `sip`、yfinance `yahoo`）被写成了 `adjustment=raw`；之后重新抓取会写成 `split`，两行在库里共存。读取时（Parquet 与 Postgres native 的 `scan_rows`）这些旧行按来源能力恢复为 `split`，若同一键已有新行则旧行被忽略，因此规范层选源与只有新行时一致，不需要迁移命令。港股 yfinance、AKShare、加密、A 股的 `raw` 本来就是不复权，不受影响；`upstream_compat` 的 `adjustment` 归上游所有，不做改写。旧行只占空间，compaction 不会删除它们（键不同）。
 
 ### 美股小时线（可选）
@@ -212,6 +216,10 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 # Keep the symbol list and the report outside this repository.
 # uv run openbars shadow --symbols-file /path/to/symbols.txt \
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
+# Optional: copy a recent window into the generic reference table (bars + source information;
+# dry-run by default, reference implementation).
+# uv sync --extra postgres-export
+# uv run openbars export-postgres --source ./data/canonical --dsn "$TARGET_PG_DSN" --days 30 --apply
 ```
 
 - `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. New installs write to `parquet_duckdb` and use a local SQLite quota gate. `upstream_compat` is for migration and tests only; explicit existing backend configuration continues to be honored. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
@@ -260,6 +268,7 @@ These are code thresholds for the freshness tier, not source delivery promises; 
 
 ### Upgrade notes
 
+- **The Postgres export plugin now writes the generic reference layout (#203)**: `openbars export-postgres` targets the generic `bars + source information` table only (default name `openbars_bars`). `--table-layout` and `--mapping` were removed, so the former caller-specific table layouts are no longer supported; callers that need their own official tables with provenance columns should write an adapter. See [docs/postgres-export.md](docs/postgres-export.md).
 - **Daily raw adjustment identity (#145 / #149)**: before #145, split-adjusted daily sources that did not set `extra.adjustment` (US Massive `eod`, Alpaca `iex` / `sip`, yfinance `yahoo`) were stored as `adjustment=raw`; refetching now writes `split`, so both rows can coexist. Reads (`scan_rows` on Parquet and Postgres native) restore those legacy rows to `split` from the source's capability and ignore a legacy row when a current row has the same key, so canonical selection matches a store holding only current rows; no migration command is needed. Hong Kong yfinance, AKShare, crypto and A-share `raw` rows really are unadjusted and are left alone; `upstream_compat` rows keep the upstream `adjustment`. The legacy rows only cost space; compaction does not remove them (their key differs).
 
 ### US hourly bars (optional)
