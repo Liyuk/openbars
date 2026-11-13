@@ -291,6 +291,7 @@ def _make_plan(settings: Settings, providers: Mapping[str, Any], backend: Any, n
 def _print_plan(out: _Out, plan: Plan, state: SqliteStateStore | None, extra_notes: list[str]) -> int:
     new = len(plan) if state is None else sum(1 for job in plan.jobs if state.load_job(job.job_id) is None)
     out.line(f"plan: {len(plan)} jobs ({new} new, {len(plan) - new} already queued)")
+    out.line("freshness tiers are separate from coverage: provisional != final; coverage is not a completeness guarantee")
     for (provider, kind), count in plan.counts().items():
         out.line(f"  {provider:<10} {kind:<9} {count}")
     for interval in sorted({job.interval.value for job in plan.jobs}):
@@ -443,6 +444,7 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
         state = SqliteStateStore(db)
 
     out.line("raw coverage (observed bar dates; not a completeness guarantee):")
+    out.line("freshness: provisional != final; available_at is separate from quality flags")
     if settings.storage_backend == "postgres":
         raw = backend.raw  # read-only; one bounded aggregate per provider/market/interval (#146)
     else:
@@ -630,11 +632,34 @@ def _verify(args: argparse.Namespace, settings: Settings, out: _Out, clock: Call
             policy_version=policy,
         )  # fmt: skip
         header = f"== market {market.value}: calendar {CALENDAR_NAMES[market]}, policy {policy} =="
-        lines = [header, *format_report(report), *(f"note: {n}" for n in notes)]
+        lines = [header, *format_report(report)]
+        visible_canonical = [row for row in canonical if row.policy_version == policy]
+        latest_day = max((row.session_date for row in visible_canonical), default=None)
+        latest_rows = [row for row in visible_canonical if row.session_date == latest_day]
+        tier_counts: dict[str, int] = {}
+        for row in latest_rows:
+            tier_counts[row.freshness] = tier_counts.get(row.freshness, 0) + 1
+        available = [row.available_at for row in latest_rows if row.available_at is not None]
+        freshness_summary = {
+            "session": latest_day.isoformat() if latest_day else None,
+            "tiers": dict(sorted(tier_counts.items())),
+            "available_at": max(available).isoformat() if available else None,
+        }
+        lines.append(
+            "freshness: " + (
+                f"latest visible session {freshness_summary['session']}; "
+                f"tiers {', '.join(f'{k}={v}' for k, v in freshness_summary['tiers'].items()) or 'unknown'}; "
+                f"available_at {freshness_summary['available_at'] or 'unknown'}"
+                if latest_day else "no canonical rows (unknown)"
+            )
+        )
+        lines.append("coverage: observed cells only; not a completeness guarantee; provisional != final")
+        lines.extend(f"note: {n}" for n in notes)
         payload = report.to_dict()
         payload["market"] = market.value
         payload["calendar"] = CALENDAR_NAMES[market]
         payload["notes"] = [*payload["notes"], *notes]
+        payload["freshness"] = freshness_summary
         blocks.append((market, lines, payload))
 
     if not blocks:

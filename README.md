@@ -65,6 +65,15 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 
 `openbars serve` 在本机打开覆盖看板、质量标记和 K 线页面（中英可切换），只绑定回环地址。界面是只读的：没有抓取或写入入口。K 线默认显示按规则对齐填充后的聚合数据（canonical），也可以切换到各个渠道的原始数据；原始数据中的缺日或缺字段会在图上标出。`/api/v1` 只给这些页面内部使用，本版不承诺稳定，请不要把它当成对外数据 API。
 
+| 市场（日线） | 临时层 provisional | 正式层 final（代码判定门槛） |
+| --- | --- | --- |
+| 美股 | 会话日内，T+0 | 次日 00:00 ET 起，T+1 |
+| 加密 | UTC 会话日内，T+0 | UTC 次日 00:30 起，T+1 |
+| A 股 | 会话日内，T+0 | 收盘后 30 分钟起，T+0 |
+| 港股 | 会话日内，T+0 | 当日实际收盘后 30 分钟起，T+0 |
+
+以上是 freshness 层的代码门槛，不是数据源到货承诺；未验证来源尽力而为、不承诺。时效性与完整性不一定同时达到。看板的观察覆盖不等于完整性保证；`available_at` 是可用时间，质量标记仍表达各自的质量含义。默认读取当前可见行，正式优先；没有正式行时显示临时行并标明。
+
 - 数据写在 `storage.path`（默认 `./data/`，已被 git 忽略）；`--data DIR` 可覆盖。`run` 幂等：已完成的窗口不会重复抓取，每天再跑一次即为增量。
 - 非日线粒度会触发较大的请求预算，需要显式 `--accept-budget` 才会提交/执行。
 - `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。对 `markets` 中的**每个市场**各出一份报告，按各自的日历与 `policy_version`：美股 XNYS + `research-daily-v2`；加密 `CryptoCalendar`（UTC 每天都是交易日，含周末）+ `crypto-daily-v1`；A 股 XSHG（XSHE 为别名，不含北交所）+ `cn-daily-v1`；港股 XHKG（半日市也算交易日）+ `hk-daily-v1`。窗口终点取该市场最近一个“已就绪”的交易日（可被 `history.end` / `--end` 提前）。某个已配置市场尚无落库数据时只给出提示并继续；所有市场都没有数据才报错。内容：预期交易日 × 标的的覆盖率、各来源（provider / feed / 复权）汇总、两源可比较时的 OHLC 与成交量一致率（默认容差价格 0.5%、成交量 5%，可由 `reconcile.tolerances` 调整；IEX 与 SIP 等不可比的序列记为 `not_comparable`，不计入分歧）、质量标记一致率（仅当有多个 projection 时，否则 `n/a`），并附“最近 N 个交易日”分段（`--recent N`）。`--start/--end` 限定窗口，`--json reports/verify.json` 把报告写到数据目录下：只配置一个市场时是单个报告对象（带 `market` / `calendar` 字段），配置多个市场时为 `{"markets": {"us": {…}, "cn": {…}}}`（没有数据的市场列在 `skipped`）。
@@ -190,6 +199,15 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 #### Local read-only UI
 
 `openbars serve` opens a coverage dashboard, quality-flag list, and K-line page (Chinese/English) on a loopback address only. The UI is read-only: it has no fetch or write actions. Charts default to the aggregated canonical series and can switch to each provider's raw bars; missing sessions and fields are marked on the chart. `/api/v1` exists only for this local UI and is not a stable public API in this version.
+
+| Daily market | Provisional tier | Final tier (code threshold) |
+| --- | --- | --- |
+| US | During the session, T+0 | From 00:00 ET next day, T+1 |
+| Crypto | During the UTC session day, T+0 | From 00:30 UTC next day, T+1 |
+| A-shares | During the session, T+0 | 30 minutes after close, T+0 |
+| Hong Kong | During the session, T+0 | 30 minutes after actual close, T+0 |
+
+These are code thresholds for the freshness tier, not source delivery promises; unverified sources are best effort with no promise. Freshness and completeness may not be reached at the same time. Observed dashboard coverage is not a completeness guarantee; `available_at` is the availability timestamp, and quality flags retain their separate meaning. Reads show the currently visible row, preferring final and otherwise showing provisional with its tier.
 
 - Data lands in `storage.path` (default `./data/`, git-ignored); `--data DIR` overrides it. `run` is idempotent: finished windows are not fetched again, so running it daily is the incremental update.
 - Non-daily intervals imply a large request budget and need an explicit `--accept-budget`.

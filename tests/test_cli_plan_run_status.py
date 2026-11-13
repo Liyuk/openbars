@@ -79,6 +79,7 @@ def test_plan_is_a_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "plan: 6 jobs (6 new" in out and "massive" in out and "daily" in out and "backfill" in out
     assert "budget" in out and "6 requests" in out and "dry run" in out
+    assert "provisional != final" in out and "completeness guarantee" in out
     assert state(tmp_path).list_jobs() == []  # nothing queued
 
 
@@ -453,6 +454,7 @@ def test_hourly_cli_reports_raw_coverage_and_resume(tmp_path, capsys):
     assert main(["--config", cfg, "status"], **kw) == 0
     out = capsys.readouterr().out
     assert "raw coverage" in out and "us/1h" in out and "2026-03-09" in out
+    assert "provisional != final" in out and "available_at" in out
     assert len(provider.requests) == 1
     assert any("interval=1h" in str(path) for path in (tmp_path / "data").rglob("*.parquet"))
     assert not list((tmp_path / "data" / "canonical").rglob("*.parquet"))

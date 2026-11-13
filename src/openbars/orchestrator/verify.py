@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from itertools import combinations
@@ -146,6 +146,8 @@ class VerifyCanonical:
     feed: str = ""
     quality_status: str | None = None
     flags: tuple[str, ...] = ()
+    available_at: datetime | None = None
+    freshness: str = "final"
 
 
 # --- outputs ---------------------------------------------------------------------------------
@@ -713,6 +715,7 @@ def load_canonical(
                 key=r["instrument_id"], session_date=r["session_date"], policy_version=r["policy_version"],
                 provider=r.get("provider") or "", feed=r.get("feed") or "", quality_status=r.get("quality_status"),
                 flags=tuple(r.get("flags") or ()),
+                available_at=r.get("available_at"), freshness=r.get("freshness") or "final",
             )  # fmt: skip
             for r in table.to_pylist()
         ]
@@ -720,6 +723,8 @@ def load_canonical(
         VerifyCanonical(
             key=cb.bar.instrument_id, session_date=cb.bar.session_date,
             provider=cb.bar.source, feed=cb.bar.feed or "",
+            available_at=getattr(cb.bar, "available_at", None),
+            freshness=getattr(cb.bar, "freshness", None) or "final",
         )  # fmt: skip
         for cb in store.scan(list(instrument_ids or ()), interval, window)
     ]
