@@ -1082,6 +1082,14 @@ def _with_available_at(table: pa.Table) -> pa.Table:
     return table.append_column(field, pa.nulls(table.num_rows, field.type))
 
 
+def _with_source_fetch_id(table: pa.Table) -> pa.Table:
+    """Add an all-null ``source_fetch_id`` when no canonical file has the column yet (#202)."""
+    if "source_fetch_id" in table.column_names:
+        return table
+    field = CANONICAL_BARS_SCHEMA.field("source_fetch_id")
+    return table.append_column(field, pa.nulls(table.num_rows, field.type))
+
+
 def _with_freshness(table: pa.Table) -> pa.Table:
     """Treat absent/null pre-tier canonical rows as final."""
     if "freshness" not in table.column_names:
@@ -1279,7 +1287,7 @@ class DuckDbBarReader:
         else:
             # PIT selects the latest eligible physical revision before derivation.
             table = self.backend.query_canonical_history(where, params, available_by)
-        table = _with_freshness(_with_available_at(table))
+        table = _with_freshness(_with_source_fetch_id(_with_available_at(table)))
         if table.num_rows == 0:
             return table
         # Crypto rows are stored as delivered (no corporate actions, no adjustment basis): they

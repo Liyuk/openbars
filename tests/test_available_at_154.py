@@ -81,7 +81,7 @@ def test_available_at_is_an_additive_nullable_utc_column():
     assert field.nullable and field.type == TS == pa.timestamp("us", tz="UTC")
     assert SCHEMA_VERSION == 1
     assert CANONICAL_BARS_SCHEMA.field("freshness").nullable
-    assert CANONICAL_BARS_SCHEMA.names[-2:] == ["available_at", "freshness"]
+    assert CANONICAL_BARS_SCHEMA.names[-3:] == ["available_at", "freshness", "source_fetch_id"]
 
 
 def test_freshness_is_independent_and_legacy_null_defaults_to_final(tmp_path):

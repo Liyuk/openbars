@@ -82,6 +82,7 @@ CANONICAL_DAILY_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec("source_fingerprint", STRING, False),
     FieldSpec("generated_at", TIMESTAMP_UTC, False),
     FieldSpec("currency", STRING, True),  # ISO 4217 of the bar prices; null when unknown
+    FieldSpec("source_fetch_id", STRING, True),  # selected source bar's raw fetch_id; null = unknown
     FieldSpec("available_at", TIMESTAMP_UTC, True),  # #154: research availability; null = unknown
     FieldSpec("freshness", STRING, True),  # missing or null means final
 )

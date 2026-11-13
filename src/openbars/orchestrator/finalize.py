@@ -177,6 +177,7 @@ def observation_from_raw(bar: RawBar) -> SourceObservation | None:
         adjustment=adjustment,
         series=bar.series,
         available_at=raw_ingested_at(bar),
+        fetch_id=bar.fetch_id,
         freshness=freshness,
     )
 
@@ -506,6 +507,7 @@ class CnCanonicalSink:
             sources_seen=(bar.provider,),
             available_at=raw_ingested_at(bar),
             freshness=_freshness_for_raw(bar),
+            source_fetch_id=bar.fetch_id,
         )
 
     def _ingest_factors(self, job: Job, by_id: Mapping[str, Sequence[RawBar]]) -> None:
@@ -693,6 +695,7 @@ def parquet_canonical_writer(canonical_store: object) -> CanonicalWriter:
                 currency=r.currency,
                 available_at=r.available_at,
                 freshness=r.freshness,
+                source_fetch_id=r.source_fetch_id,
             )
             for r in rows
         ]

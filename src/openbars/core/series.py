@@ -364,6 +364,9 @@ class CanonicalDailyRow:
     source_fingerprint: str
     generated_at: datetime
     currency: str | None = None  # ISO 4217 of the bar prices; None when unknown
+    # Stable pointer to the fetch batch of the selected source bar: the selected raw row's
+    # ``fetch_id``. None when the producer does not know it (legacy / imported rows).
+    source_fetch_id: str | None = None
     # #154: earliest moment the bar may be used for research (the selected source's raw
     # ``ingested_at``); None when the producer does not know it.
     available_at: datetime | None = None
@@ -401,6 +404,10 @@ class CanonicalDailyRow:
             raise TypeError("source_fingerprint must be str")
         if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
             raise ValueError("generated_at must be timezone-aware")
+        if self.source_fetch_id is not None and (
+            not isinstance(self.source_fetch_id, str) or not self.source_fetch_id
+        ):
+            raise ValueError("source_fetch_id must be a non-empty string or None")
         if self.available_at is not None and (
             self.available_at.tzinfo is None or self.available_at.utcoffset() is None
         ):

@@ -70,6 +70,8 @@ class SourceObservation:
     adjustment: str
     revision: int = 1
     source_bar_id: str | None = None
+    # #202: the raw row's ``fetch_id`` (the fetch batch that produced the selected bar).
+    fetch_id: str | None = None
     series: BarSeriesIdentity | None = None  # None: resolved via BarSeriesCatalog
     available_at: datetime | None = None  # #154: the source row's raw ``ingested_at`` when known
     freshness: str = "final"
@@ -155,6 +157,7 @@ class CanonicalSelection:
             currency=bar.resolved_series.currency,
             available_at=bar.available_at,
             freshness=bar.freshness,
+            source_fetch_id=bar.fetch_id,
         )
 
 
