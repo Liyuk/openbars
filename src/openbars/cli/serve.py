@@ -1,7 +1,8 @@
-"""`openbars serve`: local read-only UI, loopback only.
+"""``openbars serve``: local read-only UI and the self-hosted ``/api/v1`` read API.
 
-The HTTP JSON routes under ``/api/v1`` exist solely for this UI. They are not a
-stable public API. This module must not import FastAPI at import time so
+This version binds loopback only: a non-loopback ``--host`` is refused. The JSON
+routes are the public read API documented in ``docs/api.md``; the bundled UI is
+one client of them. This module must not import FastAPI at import time so
 ``openbars serve --help`` works without the ``http`` extra.
 """
 
@@ -114,7 +115,7 @@ def run_serve(
 
     gate = open_readonly_quota_gate(settings, root)
     app = create_app(settings=settings, backend=backend, data_dir=root, quota_gate=gate)
-    out.line("openbars serve: read-only local UI (not a public data API)")
+    out.line("openbars serve: read-only local UI and self-hosted API (/api/v1, see docs/api.md)")
     out.line(f"listening on http://{host}:{port}  (loopback only; no fetch, no writes)")
     run = server
     if run is None:

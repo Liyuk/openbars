@@ -22,4 +22,4 @@
 - Artifacts and target version of basis:
 - Checks, review and evidence:
 - Incomplete, unknown external side effects:
-- 下一步 (Next steps) and decisions requiring human input:
+- Next steps and decisions requiring human input:

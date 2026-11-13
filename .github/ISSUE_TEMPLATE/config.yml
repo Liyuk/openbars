@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 想法 / 设计讨论
+  - name: Ideas and design discussions
     url: https://github.com/Liyuk/openbars/discussions
-    about: 新功能、设计和范围先在 Discussions 讨论，形成共识后再开 Issue。
+    about: Discuss new features, design and scope in Discussions first; open an Issue once there is consensus.

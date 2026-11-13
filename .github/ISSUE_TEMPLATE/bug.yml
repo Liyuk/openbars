@@ -1,27 +1,27 @@
 name: Bug
-description: 缺陷报告
+description: Report a defect
 labels: ["bug"]
 body:
   - type: textarea
     id: repro
     attributes:
-      label: 复现步骤
-      description: 命令、配置片段（去掉密钥）、市场/粒度/provider
+      label: Steps to reproduce
+      description: Commands, config snippets (with secrets removed), market / interval / provider
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 预期与实际
+      label: Expected versus actual
     validations:
       required: true
   - type: textarea
     id: env
     attributes:
-      label: 环境
-      placeholder: openbars 版本 / Python 版本 / OS / 存储后端 / 采集节点
+      label: Environment
+      placeholder: openbars version / Python version / OS / storage backend / collector node
   - type: textarea
     id: evidence
     attributes:
-      label: 证据
-      description: 日志、fetch_log 片段、截图。不要贴 API key 或数据源原始数据全文。
+      label: Evidence
+      description: Logs, `fetch_log` snippets, screenshots. Do not paste API keys or full provider payloads.

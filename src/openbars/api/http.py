@@ -1,7 +1,9 @@
-"""Optional HTTP read API (fastapi extra).
+"""Read-only HTTP read API (fastapi extra).
 
-Routes under ``/api/v1`` exist only for the local ``openbars serve`` UI.
-They are not a stable public API and must stay read-only.
+Routes under ``/api/v1`` are the public, self-hosted read API documented in
+``docs/api.md``: whoever deploys ``openbars serve`` owns and serves it, and the
+bundled local UI uses the same routes. The service is read-only; it never plans,
+fetches, or writes.
 """
 
 from __future__ import annotations

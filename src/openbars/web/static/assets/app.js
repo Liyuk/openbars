@@ -1,65 +1,89 @@
-/* openbars local read-only UI. Pages are bilingual; /api/v1 is for this UI only. */
 (function () {
   "use strict";
 
   var I18N = {
     en: {
+      "brand": "OpenBars",
       "nav.dashboard": "Dashboard",
       "nav.chart": "Chart",
       "nav.flags": "Flags",
-      "header.readonly": "Local read-only UI. Not a public API.",
-      "footer.api": "Routes under /api/v1 are for this local UI only and are not a stable public API.",
+      "header.readonly": "read-only",
+      "header.station_title": "Shows data already on disk. Never fetches or writes.",
+      "footer.api": "/api/v1 is a self-hosted API: you deploy it and you own it; there is no hosted service. Bound to this machine by default.",
       "interval.label": "Interval",
-      "chart.hours": "Missing hours",
-      "chart.hourly_bars": "Hourly bars (New York time)",
-      "chart.no_hourly": "No canonical hourly bars are available.",
-      "chart.unknown_alignment": "Hourly alignment is unknown; missing hours are unavailable.",
-      "dash.title": "Coverage dashboard",
-      "dash.lede": "Read-only view of stored bars, quality flags, and quota usage. This page never fetches or writes data.",
-      "dash.markets": "Markets",
-      "dash.no_markets": "No stored markets yet.",
-      "dash.instruments": "Instruments",
-      "dash.bars": "Bars",
-      "dash.first": "First session",
-      "dash.last": "Last session",
-      "dash.freshness": "Latest-session freshness",
-      "dash.available_at": "Latest available at",
-      "dash.coverage": "Observed latest-session coverage",
-      "dash.coverage_note": "Observed coverage is not a completeness guarantee. Freshness and completeness may differ.",
-      "dash.flags": "Quality flags",
-      "dash.quota": "Quota usage",
-      "dash.quota_empty": "No quota database found. The server does not create one in read-only mode.",
+      "dash.title": "Observation register",
+      "dash.lede": "What is stored on disk, per market. This page never fetches or writes.",
+      "dash.market": "Market",
+      "dash.session": "Latest session",
+      "dash.freshness": "Freshness",
+      "dash.available_at": "Available at",
+      "dash.observed": "Observed",
+      "dash.bars_count": "Bars",
+      "dash.instruments": "Instr.",
+      "dash.range": "Range",
+      "dash.flags_count": "Flags",
+      "dash.note_freshness": "Freshness: provisional rows may later be replaced by final rows. Freshness is not a quality flag.",
+      "dash.note_coverage": "Observed: instruments with a row for the latest session. Not a completeness guarantee.",
+      "dash.flags_section": "Quality flags",
+      "dash.quota_section": "Quota",
       "dash.provider": "Provider",
       "dash.used": "Used",
       "dash.remaining": "Remaining",
       "dash.penalized": "Penalized until",
-      "flags.title": "Quality flags",
-      "flags.lede": "Canonical bars marked divergent, spike_suspect, volume_missing, or stale.",
-      "flags.empty": "No flagged bars in the current window.",
-      "flags.date": "Session",
-      "flags.symbol": "Symbol",
-      "flags.id": "Instrument",
-      "flags.names": "Flags",
-      "flags.market": "Market",
-      "chart.title": "K-line",
-      "chart.lede": "Default view is the aggregated canonical series. Switch source to inspect a raw provider; missing sessions appear as gaps.",
+      "dash.open_flags": "Open flags register ›",
+      "dash.quota_note": "Counts from the local quota store. Keys are never shown.",
+      "dash.no_markets": "No stored markets yet. Run `openbars run` in a terminal, then reload. This page never fetches.",
+      "dash.no_quota": "No quota store found. The read-only server never creates one.",
+      "fresh.final": "final",
+      "fresh.provisional": "provisional",
+      "state.loading": "Reading stored data…",
+      "state.error": "Couldn't read data.",
+      "chart.title": "Chart",
+      "chart.lede": "Canonical bars by default. Switch the source to inspect one provider's raw bars; missing sessions stay as gaps.",
       "chart.symbol": "Symbol or id",
-      "chart.source": "Data source",
+      "chart.source": "Source",
       "chart.start": "Start",
       "chart.end": "End",
       "chart.load": "Load",
-      "chart.canonical_note": "Showing aggregated canonical bars (filled and aligned by policy).",
-      "chart.raw_note": "Showing raw bars from this provider. Gaps and missing fields come from the source and are not filled.",
-      "chart.gaps": "Missing sessions",
-      "chart.missing_fields": "Bars with missing fields",
-      "chart.empty": "No bars for this selection.",
-      "chart.pick": "Enter a symbol or instrument id, then load.",
-      "chart.flags": "Flags on this bar",
-      "chart.freshness": "Freshness",
+      "chart.reading": "Reading",
       "chart.available_at": "Available at",
-      "chart.tier_note": "Provisional does not mean final; freshness is separate from quality flags and coverage.",
-      "err.generic": "Unable to load data.",
-      "dash.flags_empty": "No flagged bars.",
+      "chart.flags": "Flags",
+      "chart.remarks": "Remarks",
+      "chart.tier_note": "Provisional is not final. Freshness is separate from quality flags and coverage.",
+      "chart.raw_suffix": "raw, not filled",
+      "chart.pick": "Enter a symbol or instrument id, then Load.",
+      "chart.empty": "No bars for this selection.",
+      "chart.no_hourly": "No canonical hourly bars are available.",
+      "chart.unknown_alignment": "Hourly alignment is unknown; missing hours are unavailable.",
+      "chart.gaps": "Missing sessions",
+      "chart.hours": "Missing hours",
+      "chart.missing_fields": "Bars with missing fields",
+      "chart.bars_daily_table": "Daily bars",
+      "chart.bars_daily_caption": "Loaded daily bars data",
+      "chart.bars_hourly_table": "Hourly bars (New York time)",
+      "chart.bars_hourly_caption": "Loaded hourly bars data in New York time",
+      "chart.bars_date": "Date",
+      "chart.bars_time_ny": "Time NY",
+      "chart.bars_session": "Session",
+      "chart.bars_open": "O",
+      "chart.bars_high": "H",
+      "chart.bars_low": "L",
+      "chart.bars_close": "C",
+      "chart.bars_volume": "V",
+      "chart.bars_freshness": "Freshness",
+      "chart.bars_flags": "Flags",
+      "flags.title": "Quality flags",
+      "flags.lede": "Canonical bars carrying a quality flag. Read-only.",
+      "flags.session": "Session",
+      "flags.market": "Market",
+      "flags.symbol": "Symbol",
+      "flags.instrument": "Instrument",
+      "flags.names": "Flags",
+      "flags.all": "all",
+      "flags.empty": "No flagged bars in this window.",
+      "flags.showing": "Showing {from}–{to} of {total}.",
+      "page.prev": "Previous 200",
+      "page.next": "Next 200",
       "flag.divergent": "divergent",
       "flag.spike_suspect": "spike suspect",
       "flag.volume_missing": "volume missing",
@@ -71,66 +95,90 @@
       "flag.adjustment_unverified": "adjustment unverified",
       "flag.limit_up": "limit up",
       "flag.limit_down": "limit down",
-      "flag.suspended": "suspended",
-      "gap.label": "gap"
+      "flag.suspended": "suspended"
     },
     zh: {
+      "brand": "OpenBars",
       "nav.dashboard": "看板",
       "nav.chart": "K 线",
       "nav.flags": "质量标记",
-      "header.readonly": "本机只读界面，不是公开 API。",
-      "footer.api": "/api/v1 仅供本机页面内部使用，本版不承诺稳定。",
+      "header.readonly": "只读",
+      "header.station_title": "只展示已落盘数据，不抓取、不写入。",
+      "footer.api": "/api/v1 是自托管的公开 API：谁下载谁部署，可完全私有，没有托管服务。默认只绑定本机。",
       "interval.label": "周期",
-      "chart.hours": "缺失时段",
-      "chart.hourly_bars": "小时线（纽约时间）",
-      "chart.no_hourly": "暂无规范层小时线。",
-      "chart.unknown_alignment": "小时线对齐方式未知，无法显示缺失时段。",
-      "dash.title": "覆盖看板",
-      "dash.lede": "只读查看已存 K 线覆盖、质量标记和额度用量。本页不会抓取或写入数据。",
-      "dash.markets": "市场",
-      "dash.no_markets": "还没有已存储的市场数据。",
+      "dash.title": "观测记录",
+      "dash.lede": "按市场查看已落盘的数据。本页不会抓取或写入。",
+      "dash.market": "市场",
+      "dash.session": "最新交易日",
+      "dash.freshness": "时效性",
+      "dash.available_at": "可用时间",
+      "dash.observed": "观察覆盖",
+      "dash.bars_count": "K 线条数",
       "dash.instruments": "品种数",
-      "dash.bars": "K 线条数",
-      "dash.first": "首个交易日",
-      "dash.last": "最近交易日",
-      "dash.freshness": "最新会话时效性",
-      "dash.available_at": "最近可用时间",
-      "dash.coverage": "最新会话观察覆盖",
-      "dash.coverage_note": "观察覆盖不保证完整性；时效性与完整性可能不同步。",
-      "dash.flags": "质量标记",
-      "dash.quota": "额度用量",
-      "dash.quota_empty": "未找到额度数据库。只读模式下服务不会创建该文件。",
+      "dash.range": "范围",
+      "dash.flags_count": "标记",
+      "dash.note_freshness": "时效性：临时数据之后可能被正式数据替换。时效性不是质量标记。",
+      "dash.note_coverage": "观察覆盖：最新交易日有数据的品种数，不保证完整。",
+      "dash.flags_section": "质量标记",
+      "dash.quota_section": "额度",
       "dash.provider": "渠道",
       "dash.used": "已用",
       "dash.remaining": "剩余",
       "dash.penalized": "惩罚至",
-      "flags.title": "质量标记",
-      "flags.lede": "canonical 层中带 divergent、spike_suspect、volume_missing 或 stale 标记的 K 线。",
-      "flags.empty": "当前窗口没有带标记的 K 线。",
-      "flags.date": "交易日",
-      "flags.symbol": "代码",
-      "flags.id": "品种",
-      "flags.names": "标记",
-      "flags.market": "市场",
+      "dash.open_flags": "查看质量标记 ›",
+      "dash.quota_note": "来自本机额度库的计数，不显示任何密钥。",
+      "dash.no_markets": "还没有已存储的市场。请在终端运行 `openbars run` 后刷新。本页不会抓取。",
+      "dash.no_quota": "未找到额度库。只读服务不会创建它。",
+      "fresh.final": "正式",
+      "fresh.provisional": "临时",
+      "state.loading": "正在读取已存数据…",
+      "state.error": "无法读取数据。",
       "chart.title": "K 线",
-      "chart.lede": "默认查看按规则对齐填充后的聚合数据（canonical）。可切换到各渠道原始数据；缺失的交易日会显示为缺口。",
+      "chart.lede": "默认查看聚合的 canonical 数据。切换源检查单个渠道的原始数据；缺失交易日显示为缺口。",
       "chart.symbol": "代码或品种 id",
       "chart.source": "数据源",
       "chart.start": "开始",
       "chart.end": "结束",
       "chart.load": "加载",
-      "chart.canonical_note": "正在显示聚合后的 canonical 数据（按策略对齐填充）。",
-      "chart.raw_note": "正在显示该渠道的原始数据。缺口和缺字段来自源数据，不会被填充。",
-      "chart.gaps": "缺失交易日",
-      "chart.missing_fields": "缺字段的 K 线",
-      "chart.empty": "没有符合条件的 K 线。",
-      "chart.pick": "输入代码或品种 id，然后加载。",
-      "chart.flags": "本根标记",
-      "chart.freshness": "时效性",
+      "chart.reading": "读数",
       "chart.available_at": "可用时间",
-      "chart.tier_note": "临时不等于正式；时效性与质量标记、覆盖率分开显示。",
-      "err.generic": "无法加载数据。",
-      "dash.flags_empty": "没有带标记的 K 线。",
+      "chart.flags": "标记",
+      "chart.remarks": "备注",
+      "chart.tier_note": "临时不等于正式。时效性与质量标记、覆盖率分开显示。",
+      "chart.raw_suffix": "原始数据，未填充",
+      "chart.pick": "输入代码或品种 id，然后加载。",
+      "chart.empty": "没有符合条件的 K 线。",
+      "chart.no_hourly": "暂无规范层小时线。",
+      "chart.unknown_alignment": "小时线对齐方式未知，无法显示缺失时段。",
+      "chart.gaps": "缺失交易日",
+      "chart.hours": "缺失时段",
+      "chart.missing_fields": "缺字段的 K 线",
+      "chart.bars_daily_table": "日线数据",
+      "chart.bars_daily_caption": "已加载的日线数据",
+      "chart.bars_hourly_table": "小时线（纽约时间）",
+      "chart.bars_hourly_caption": "已加载的小时线数据（纽约时间）",
+      "chart.bars_date": "日期",
+      "chart.bars_time_ny": "纽约时间",
+      "chart.bars_session": "交易时段",
+      "chart.bars_open": "开",
+      "chart.bars_high": "高",
+      "chart.bars_low": "低",
+      "chart.bars_close": "收",
+      "chart.bars_volume": "量",
+      "chart.bars_freshness": "时效性",
+      "chart.bars_flags": "标记",
+      "flags.title": "质量标记",
+      "flags.lede": "带质量标记的 canonical K 线。只读。",
+      "flags.session": "交易日",
+      "flags.market": "市场",
+      "flags.symbol": "代码",
+      "flags.instrument": "品种",
+      "flags.names": "标记",
+      "flags.all": "全部",
+      "flags.empty": "当前窗口没有带标记的 K 线。",
+      "flags.showing": "第 {from}–{to} 条，共 {total} 条。",
+      "page.prev": "前 200 条",
+      "page.next": "后 200 条",
       "flag.divergent": "价格分歧",
       "flag.spike_suspect": "疑似尖刺",
       "flag.volume_missing": "成交量缺失",
@@ -142,8 +190,7 @@
       "flag.adjustment_unverified": "复权未核实",
       "flag.limit_up": "涨停",
       "flag.limit_down": "跌停",
-      "flag.suspended": "停牌",
-      "gap.label": "缺失"
+      "flag.suspended": "停牌"
     }
   };
 
@@ -155,22 +202,33 @@
     try {
       var saved = localStorage.getItem("openbars.lang");
       if (saved === "zh" || saved === "en") return saved;
-    } catch (err) { /* ignore */ }
+    } catch (err) {}
     var nav = (navigator.language || "en").toLowerCase();
     return nav.indexOf("zh") === 0 ? "zh" : "en";
   }
 
-  function t(key) {
+  function t(key, vars) {
     var table = I18N[lang] || I18N.en;
-    return table[key] || I18N.en[key] || key;
+    var str = table[key] || I18N.en[key] || key;
+    if (vars) {
+      Object.keys(vars).forEach(function (k) {
+        str = str.replace("{" + k + "}", vars[k]);
+      });
+    }
+    return str;
   }
 
   function setLang(next) {
     lang = next === "zh" ? "zh" : "en";
-    try { localStorage.setItem("openbars.lang", lang); } catch (err) { /* ignore */ }
+    try {
+      localStorage.setItem("openbars.lang", lang);
+    } catch (err) {}
     document.documentElement.lang = lang === "zh" ? "zh-Hans" : "en";
     document.querySelectorAll("[data-i18n]").forEach(function (el) {
       el.textContent = t(el.getAttribute("data-i18n"));
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach(function (el) {
+      el.title = t(el.getAttribute("data-i18n-title"));
     });
     var btn = document.getElementById("lang-toggle");
     if (btn) btn.textContent = lang === "zh" ? "English" : "中文";
@@ -183,9 +241,11 @@
 
   function markNav() {
     var path = pathOf();
-    document.querySelectorAll("nav a[data-nav]").forEach(function (el) {
-      var target = el.getAttribute("data-nav");
-      el.classList.toggle("active", target === path);
+    var tabs = document.querySelectorAll(".tabs a[data-p]");
+    tabs.forEach(function (el) {
+      var target = el.getAttribute("data-p");
+      var match = target === "dash" ? path === "/" : path === "/" + target;
+      el.toggleAttribute("aria-current", match ? "page" : "");
     });
   }
 
@@ -201,12 +261,6 @@
     });
   }
 
-  function el(html) {
-    var wrap = document.createElement("div");
-    wrap.innerHTML = html.trim();
-    return wrap.firstElementChild;
-  }
-
   function escapeHtml(value) {
     return String(value == null ? "" : value)
       .replace(/&/g, "&amp;")
@@ -215,176 +269,409 @@
       .replace(/"/g, "&quot;");
   }
 
-  function flagLabel(name) {
-    return t("flag." + name) || name;
+  function flagTier(name) {
+    var alert = ["divergent", "spike_suspect"];
+    var caution = ["volume_missing", "stale", "gap", "filled_from_fallback", "adjustment_unverified", "revised"];
+    var note = ["single_source", "limit_up", "limit_down", "suspended"];
+    if (alert.indexOf(name) !== -1) return "alert";
+    if (caution.indexOf(name) !== -1) return "caution";
+    if (note.indexOf(name) !== -1) return "note";
+    return "note";
   }
 
-  function flagBadges(flags) {
-    return (flags || []).map(function (name) {
-      var danger = name === "divergent" || name === "spike_suspect";
-      return '<span class="badge ' + (danger ? "danger" : "warn") + '">' + escapeHtml(flagLabel(name)) + "</span>";
-    }).join(" ");
+  function remarkMark(name) {
+    var tier = flagTier(name);
+    return '<span class="rm ' + tier + '">[' + escapeHtml(t("flag." + name)) + "]</span>";
   }
 
-  function formatUsed(obj) {
-    if (!obj || typeof obj !== "object") return "—";
-    return Object.keys(obj).map(function (k) { return k + ": " + obj[k]; }).join(", ") || "—";
+  function formatCompactNum(n) {
+    if (n == null || n === "") return "—";
+    n = Number(n);
+    if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(2).replace(/\.?0+$/, "") + "K";
+    return String(n);
   }
 
-  function renderError(where, err) {
-    where.innerHTML = '<p class="err">' + escapeHtml(err && err.message ? err.message : t("err.generic")) + "</p>";
+  function formatTime(date, session) {
+    if (!date) return "";
+    var d = new Date(date);
+    var opts = {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    };
+    return new Intl.DateTimeFormat(lang === "zh" ? "zh-CN" : "en-US", opts).format(d) +
+      (session ? " " + escapeHtml(session) : "");
   }
 
-  function intervalControl(value) {
-    return '<label>' + t("interval.label") + '<select id="interval"><option value="1d">1d</option><option value="1h"' + (value === "1h" ? " selected" : "") + '>1h</option></select></label>';
-  }
-
-  function formatTime(value, session) {
-    if (!value) return "";
-    return new Intl.DateTimeFormat(lang === "zh" ? "zh-CN" : "en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value)) + (session ? " (" + session + ")" : "");
-  }
-
-  function renderDashboard(root) {
-    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
-    root.innerHTML =
-      "<h1>" + t("dash.title") + "</h1>" +
-      '<p class="lede">' + t("dash.lede") + "</p>" +
-      intervalControl(interval) +
-      "<h2>" + t("dash.markets") + "</h2>" +
-      '<div id="markets" class="grid"></div>' +
-      "<h2>" + t("dash.flags") + "</h2>" +
-      '<div id="flag-summary" class="card"></div>' +
-      "<h2>" + t("dash.quota") + "</h2>" +
-      '<div id="quota" class="card"></div>';
-
-    document.getElementById("interval").addEventListener("change", function () { location.search = "?interval=" + this.value; });
-    Promise.all([apiGet("/api/v1/markets?interval=" + interval), apiGet("/api/v1/flags?limit=1&interval=" + interval), apiGet("/api/v1/quota")])
-      .then(function (results) {
-        var markets = results[0].markets || [];
-        var flags = results[1];
-        var quota = results[2];
-        var box = document.getElementById("markets");
-        if (!markets.length) {
-          box.innerHTML = '<p class="empty">' + t("dash.no_markets") + "</p>";
-        } else {
-          box.innerHTML = markets.map(function (m) {
-            var flagBits = Object.keys(m.flags || {}).filter(function (k) { return m.flags[k]; }).map(function (k) {
-              return flagLabel(k) + " " + m.flags[k];
-            }).join(" · ");
-            return (
-              '<article class="card">' +
-                "<h2>" + escapeHtml((m.market || "").toUpperCase()) + "</h2>" +
-                '<div class="metric"><span>' + t("dash.instruments") + "</span><span>" + m.instruments + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.bars") + "</span><span>" + m.bars + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.first") + "</span><span>" + escapeHtml(m.first_session || "—") + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.last") + "</span><span>" + escapeHtml(m.last_session || "—") + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.freshness") + "</span><span>" + escapeHtml(Object.keys(m.latest_freshness || {}).map(function (k) { return k + " " + m.latest_freshness[k]; }).join(", ") || "—") + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.available_at") + "</span><span>" + escapeHtml(m.latest_available_at || "—") + "</span></div>" +
-                '<div class="metric"><span>' + t("dash.coverage") + "</span><span>" + escapeHtml((m.observed_session_coverage || {}).present || 0) + " / " + escapeHtml((m.observed_session_coverage || {}).instruments || 0) + "</span></div>" +
-                '<p class="note">' + t("dash.coverage_note") + "</p>" +
-                (flagBits ? '<p class="note">' + escapeHtml(flagBits) + "</p>" : "") +
-              "</article>"
-            );
-          }).join("");
-        }
-        var counts = flags.counts || {};
-        var parts = Object.keys(counts).filter(function (k) { return counts[k] > 0; }).map(function (k) {
-          return '<div class="metric"><span>' + escapeHtml(flagLabel(k)) + "</span><span>" + counts[k] + "</span></div>";
-        }).join("");
-        document.getElementById("flag-summary").innerHTML =
-          (parts || '<p class="empty">' + t("dash.flags_empty") + "</p>") +
-          '<p class="note"><a href="/flags?interval=' + interval + '">' + t("nav.flags") + "</a></p>";
-
-        var quotaBox = document.getElementById("quota");
-        if (!quota.available || !(quota.providers || []).length) {
-          quotaBox.innerHTML = '<p class="empty">' + t("dash.quota_empty") + "</p>";
-        } else {
-          var rows = quota.providers.map(function (p) {
-            return "<tr><td class=\"mono\">" + escapeHtml(p.provider || p.id || "") + "</td><td>" +
-              escapeHtml(formatUsed(p.used)) + "</td><td>" + escapeHtml(formatUsed(p.remaining)) +
-              "</td><td>" + escapeHtml(p.penalized_until || "—") + "</td></tr>";
-          }).join("");
-          quotaBox.innerHTML =
-            "<table><thead><tr><th>" + t("dash.provider") + "</th><th>" + t("dash.used") +
-            "</th><th>" + t("dash.remaining") + "</th><th>" + t("dash.penalized") +
-            "</th></tr></thead><tbody>" + rows + "</tbody></table>";
-        }
-      })
-      .catch(function (err) { renderError(root, err); });
-  }
-
-  function renderFlags(root) {
-    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
-    root.innerHTML =
-      "<h1>" + t("flags.title") + "</h1>" +
-      '<p class="lede">' + t("flags.lede") + "</p>" +
-      intervalControl(interval) + '<div id="flags-table" class="card"></div>';
-    document.getElementById("interval").addEventListener("change", function () { location.search = "?interval=" + this.value; });
-    apiGet("/api/v1/flags?limit=200&interval=" + interval).then(function (body) {
-      var box = document.getElementById("flags-table");
-      var items = body.items || [];
-      if (!items.length) {
-        box.innerHTML = '<p class="empty">' + t("flags.empty") + "</p>";
-        return;
+  function formatFreshness(freshness) {
+    if (!freshness || typeof freshness !== "object") return "";
+    var parts = [];
+    ["final", "provisional"].forEach(function (tier) {
+      if (freshness[tier]) {
+        var cssClass = tier === "final" ? "final" : "prov";
+        var label = t("fresh." + tier);
+        parts.push('<span class="fr ' + cssClass + '"><i></i><b>' + freshness[tier] + '</b> ' + label + '</span>');
       }
-      var rows = items.map(function (item) {
-        return "<tr><td>" + escapeHtml(interval === "1h" ? formatTime(item.ts_start, item.session) : item.session_date || "") + "</td><td>" +
-          escapeHtml((item.market || "").toUpperCase()) + "</td><td class=\"mono\">" +
-          escapeHtml(item.symbol || "") + "</td><td class=\"mono\">" +
-          escapeHtml(item.instrument_id || "") + "</td><td>" + flagBadges(item.flags) + "</td></tr>";
-      }).join("");
-      box.innerHTML =
-        "<table><thead><tr><th>" + t("flags.date") + "</th><th>" + t("flags.market") +
-        "</th><th>" + t("flags.symbol") + "</th><th>" + t("flags.id") + "</th><th>" +
-        t("flags.names") + "</th></tr></thead><tbody>" + rows + "</tbody></table>";
-    }).catch(function (err) { renderError(root, err); });
+    });
+    return parts.join("");
+  }
+
+  function showPage(page) {
+    document.querySelectorAll("main > div[id^='p-']").forEach(function (el) {
+      el.hidden = true;
+    });
+    var pageEl = document.getElementById("p-" + page);
+    if (pageEl) pageEl.hidden = false;
+    markNav();
   }
 
   function queryParams() {
     return new URLSearchParams(location.search);
   }
 
-  function renderChart(root) {
+  function renderDashboard() {
+    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
+    var marketRows = document.getElementById("market-rows");
+    var flagsTally = document.getElementById("flags-tally");
+    var quotaRows = document.getElementById("quota-rows");
+
+    marketRows.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--pencil);">' + t("state.loading") + "</td></tr>";
+
+    Promise.all([
+      apiGet("/api/v1/markets?interval=" + interval),
+      apiGet("/api/v1/flags?limit=1&interval=" + interval),
+      apiGet("/api/v1/quota")
+    ])
+      .then(function (results) {
+        var markets = results[0].markets || [];
+        var flags = results[1];
+        var quota = results[2];
+
+        if (!markets.length) {
+          marketRows.innerHTML = '<tr><td colspan="9" style="padding: 20px; color: var(--pencil);">' + t("dash.no_markets") + "</td></tr>";
+        } else {
+          marketRows.innerHTML = markets
+            .map(function (m) {
+              var flagsTotal = Object.values(m.flags || {}).reduce(function (a, b) { return a + b; }, 0);
+              var flagsLink = flagsTotal > 0 ? '<a class="flagcount" href="/flags?interval=' + interval + '">' + flagsTotal + ' ›</a>' : '<span class="zero">0</span>';
+              var firstSession = m.first_session || "—";
+              var lastSession = m.last_session || "—";
+              var range = firstSession === "—" || lastSession === "—" ? "—" : firstSession + " → " + lastSession;
+
+              return '<tr>' +
+                '<td class="mk" data-l="' + t("dash.market") + '">' + escapeHtml((m.market || "").toUpperCase()) + '</td>' +
+                '<td data-l="' + t("dash.session") + '">' + escapeHtml(m.latest_session || "—") + '</td>' +
+                '<td data-l="' + t("dash.freshness") + '">' + formatFreshness(m.latest_freshness) + '</td>' +
+                '<td data-l="' + t("dash.available_at") + '" title="' + escapeHtml(m.latest_available_at || "") + '">' + escapeHtml(m.latest_available_at ? m.latest_available_at.substring(0, 16) : "—") + '</td>' +
+                '<td class="num" data-l="' + t("dash.observed") + '">' + ((m.observed_session_coverage && m.observed_session_coverage.present) || 0) + ' / ' + ((m.observed_session_coverage && m.observed_session_coverage.instruments) || 0) + '</td>' +
+                '<td class="num" data-l="' + t("dash.bars_count") + '" title="' + escapeHtml(m.bars || "") + '">' + formatCompactNum(m.bars) + '</td>' +
+                '<td class="num" data-l="' + t("dash.instruments") + '">' + (m.instruments || 0) + '</td>' +
+                '<td data-l="' + t("dash.range") + '">' + escapeHtml(range) + '</td>' +
+                '<td class="num" data-l="' + t("dash.flags_count") + '">' + flagsLink + '</td>' +
+                '</tr>';
+            })
+            .join("");
+        }
+
+        var counts = flags.counts || {};
+        var nonZero = Object.keys(counts).filter(function (k) { return counts[k] > 0; });
+        if (!nonZero.length) {
+          flagsTally.innerHTML = '<tr><td colspan="2" style="text-align: center; padding: 12px; color: var(--pencil);">—</td></tr>';
+        } else {
+          var tiers = {
+            alert: ["divergent", "spike_suspect"],
+            caution: ["volume_missing", "stale", "gap", "filled_from_fallback", "adjustment_unverified", "revised"],
+            note: ["single_source", "limit_up", "limit_down", "suspended"]
+          };
+          var sorted = [];
+          Object.keys(tiers).forEach(function (tierName) {
+            tiers[tierName].forEach(function (flag) {
+              if (counts[flag]) {
+                sorted.push({ flag: flag, count: counts[flag], tier: tierName });
+              }
+            });
+          });
+          sorted.sort(function (a, b) { return b.count - a.count; });
+
+          flagsTally.innerHTML = sorted
+            .map(function (item) {
+              return '<tr><td>' + remarkMark(item.flag) + '</td><td class="flagcount">' + item.count + '</td></tr>';
+            })
+            .join("");
+        }
+
+        if (!quota.available || !quota.providers || !quota.providers.length) {
+          quotaRows.innerHTML = '<tr><td colspan="4" style="padding: 12px; color: var(--pencil);">' + t("dash.no_quota") + "</td></tr>";
+        } else {
+          quotaRows.innerHTML = quota.providers
+            .map(function (p) {
+              var usedStrs = p.used ? Object.keys(p.used).map(function (k) { return k + ": " + p.used[k]; }) : [];
+              var remStrs = p.remaining ? Object.keys(p.remaining).map(function (k) { return k + ": " + p.remaining[k]; }) : [];
+              return '<tr>' +
+                '<td class="mono">' + escapeHtml(p.provider || p.id || "") + '</td>' +
+                '<td>' + usedStrs.map(function (s) { return '<span class="stack">' + escapeHtml(s) + '</span>'; }).join("") + '</td>' +
+                '<td>' + remStrs.map(function (s) { return '<span class="stack">' + escapeHtml(s) + '</span>'; }).join("") + '</td>' +
+                '<td>' + escapeHtml(p.penalized_until || "—") + '</td>' +
+                '</tr>';
+            })
+            .join("");
+        }
+      })
+      .catch(function (err) {
+        marketRows.innerHTML = '<tr><td colspan="9" style="padding: 12px; color: var(--remark);">Error: ' + escapeHtml(err.message) + '</td></tr>';
+      });
+  }
+
+  function renderFlags() {
+    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
+    var flag = queryParams().get("flag") || "";
+    var offset = Number(queryParams().get("offset")) || 0;
+
+    var chipsDiv = document.getElementById("flag-chips");
+    var flagRows = document.getElementById("flag-rows");
+    var pagerDiv = document.getElementById("flag-pager");
+
+    flagRows.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: var(--pencil);">' + t("state.loading") + "</td></tr>";
+
+    apiGet("/api/v1/flags?interval=" + interval + "&limit=1")
+      .then(function (body) {
+        var counts = body.counts || {};
+        var allCount = Object.values(counts).reduce(function (a, b) { return a + b; }, 0);
+        var chips = '<span class="lbl" id="fl">' + t("flags.lede").split(" ")[0] + '</span><div class="seg" role="radiogroup" aria-labelledby="fl">';
+        chips += '<label><input type="radio" name="f" value=""' + (!flag ? " checked" : "") + '><span>' + t("flags.all") + ' ' + allCount + '</span></label>';
+
+        var tiers = {
+          alert: ["divergent", "spike_suspect"],
+          caution: ["volume_missing", "stale", "gap", "filled_from_fallback", "adjustment_unverified", "revised"],
+          note: ["single_source", "limit_up", "limit_down", "suspended"]
+        };
+        Object.keys(tiers).forEach(function (tierName) {
+          tiers[tierName].forEach(function (f) {
+            if (counts[f]) {
+              chips += '<label><input type="radio" name="f" value="' + f + '"' + (flag === f ? " checked" : "") + '><span>' + t("flag." + f) + ' ' + counts[f] + '</span></label>';
+            }
+          });
+        });
+        chips += '</div>';
+        chipsDiv.innerHTML = chips;
+
+        document.querySelectorAll(".chips input[name='f']").forEach(function (inp) {
+          inp.addEventListener("change", function () {
+            var params = new URLSearchParams();
+            params.set("interval", interval);
+            if (this.value) params.set("flag", this.value);
+            history.replaceState(null, "", "/flags?" + params.toString());
+            renderFlags();
+          });
+        });
+
+        var apiPath = "/api/v1/flags?interval=" + interval + "&offset=" + offset + "&limit=200";
+        if (flag) apiPath += "&flag=" + encodeURIComponent(flag);
+        return apiGet(apiPath);
+      })
+      .then(function (body) {
+        var items = body.items || [];
+        var total = body.total || 0;
+
+        if (!items.length) {
+          flagRows.innerHTML = '<tr><td colspan="5" style="padding: 20px; color: var(--pencil);">' + t("flags.empty") + "</td></tr>";
+          pagerDiv.innerHTML = "";
+        } else {
+          flagRows.innerHTML = items
+            .map(function (item) {
+              var sessionStr = interval === "1h" ? formatTime(item.ts_start, item.session) : item.session_date;
+              return '<tr>' +
+                '<td data-l="' + t("flags.session") + '">' + escapeHtml(sessionStr) + '</td>' +
+                '<td data-l="' + t("flags.market") + '">' + escapeHtml((item.market || "").toUpperCase()) + '</td>' +
+                '<td data-l="' + t("flags.symbol") + '" class="mono">' + escapeHtml(item.symbol || "") + '</td>' +
+                '<td data-l="' + t("flags.instrument") + '" class="mono">' + escapeHtml(item.instrument_id || "") + '</td>' +
+                '<td data-l="' + t("flags.names") + '">' + (item.flags || []).map(remarkMark).join("") + '</td>' +
+                '</tr>';
+            })
+            .join("");
+
+          var from = offset + 1;
+          var to = Math.min(offset + 200, total);
+          var showing = t("flags.showing", { from: from, to: to, total: total });
+          var pagerHtml = '<span>' + showing + '</span>';
+          if (offset > 0) {
+            pagerHtml += '<button class="ghost" type="button" data-offset="' + Math.max(0, offset - 200) + '">' + t("page.prev") + '</button>';
+          }
+          if (to < total) {
+            pagerHtml += '<button class="ghost" type="button" data-offset="' + (offset + 200) + '">' + t("page.next") + '</button>';
+          }
+          pagerDiv.innerHTML = pagerHtml;
+
+          document.querySelectorAll("#flag-pager .ghost").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var newOffset = Number(this.getAttribute("data-offset"));
+            var params = new URLSearchParams();
+            params.set("interval", interval);
+            if (flag) params.set("flag", flag);
+            if (newOffset) params.set("offset", newOffset);
+            history.replaceState(null, "", "/flags?" + params.toString());
+            renderFlags();
+          });
+        });
+        }
+      })
+      .catch(function (err) {
+        flagRows.innerHTML = '<tr><td colspan="5" style="padding: 12px; color: var(--remark);">Error: ' + escapeHtml(err.message) + '</td></tr>';
+      });
+  }
+
+  var chartRequestSequence = 0;
+
+  function renderChart() {
     var q = queryParams();
     var initial = q.get("id") || q.get("symbol") || "";
     var initialSource = q.get("source") || "canonical";
-    root.innerHTML =
-      "<h1>" + t("chart.title") + "</h1>" +
-      '<p class="lede">' + t("chart.lede") + "</p>" +
-      '<form class="toolbar" id="chart-form">' + intervalControl(q.get("interval")) +
-        "<label>" + t("chart.symbol") + '<input name="q" id="chart-q" value="' + escapeHtml(initial) + '" placeholder="TEST1" autocomplete="off"></label>' +
-        "<label>" + t("chart.source") + '<select name="source" id="chart-source"><option value="canonical">canonical</option></select></label>' +
-        "<label>" + t("chart.start") + '<input name="start" id="chart-start" type="date" value="' + escapeHtml(q.get("start") || "") + '"></label>' +
-        "<label>" + t("chart.end") + '<input name="end" id="chart-end" type="date" value="' + escapeHtml(q.get("end") || "") + '"></label>' +
-        '<button class="action" type="submit">' + t("chart.load") + "</button>" +
-      "</form>" +
-      '<div id="chart-note" class="note">' + t("chart.pick") + "</div>" +
-      '<div class="card"><div id="chart"></div></div>' +
-      '<div id="chart-meta"></div>';
+    var initialStart = q.get("start") || "";
+    var initialEnd = q.get("end") || "";
+    var interval = q.get("interval") === "1h" ? "1h" : "1d";
 
-    var sourceSel = document.getElementById("chart-source");
-    if (initialSource && initialSource !== "canonical") {
-      var opt = document.createElement("option");
-      opt.value = initialSource;
-      opt.textContent = initialSource;
-      sourceSel.appendChild(opt);
-      sourceSel.value = initialSource;
-    }
+    var chartRecord = document.getElementById("chart-record");
+    var chartSource = document.getElementById("chart-source");
+    var chartQ = document.getElementById("chart-q");
+    var chartStart = document.getElementById("chart-start");
+    var chartEnd = document.getElementById("chart-end");
+    var chartRemarks = document.getElementById("chart-remarks");
+
+    chartQ.value = initial;
+    chartStart.value = initialStart;
+    chartEnd.value = initialEnd;
+
+    var radios = document.querySelectorAll("input[name='iv2']");
+    radios.forEach(function (r) { r.checked = r.value === interval; });
 
     document.getElementById("chart-form").addEventListener("submit", function (ev) {
       ev.preventDefault();
-      loadChart();
+      loadChartData();
     });
-    sourceSel.addEventListener("change", resetChartWindow);
-    document.getElementById("interval").addEventListener("change", resetChartWindow);
 
-    if (initial) loadChart();
+    chartSource.addEventListener("change", resetChartWindow);
+
+    radios.forEach(function (r) {
+      r.addEventListener("change", resetChartWindow);
+    });
+
+    if (initial) loadChartData();
   }
 
   function resetChartWindow() {
     document.getElementById("chart-start").value = "";
     document.getElementById("chart-end").value = "";
-    loadChart();
+    loadChartData();
+  }
+
+  function loadChartData() {
+    var requestSeq = ++chartRequestSequence;
+    var q = document.getElementById("chart-q").value.trim();
+    var source = document.getElementById("chart-source").value || "canonical";
+    var start = document.getElementById("chart-start").value;
+    var end = document.getElementById("chart-end").value;
+    var interval = document.querySelector("input[name='iv2']:checked").value;
+    var chartRecord = document.getElementById("chart-record");
+    var chartStart = document.getElementById("chart-start");
+    var chartEnd = document.getElementById("chart-end");
+
+    if (!q) {
+      chartRecord.textContent = t("chart.pick");
+      return;
+    }
+
+    var params = new URLSearchParams();
+    if (q.indexOf(":") !== -1) params.set("id", q);
+    else params.set("symbol", q);
+    params.set("source", source);
+    params.set("interval", interval);
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    history.replaceState(null, "", "/chart?" + params.toString());
+
+    apiGet("/api/v1/bars?" + params.toString())
+      .then(function (body) {
+        if (requestSeq !== chartRequestSequence) return;
+
+        if (body.start) chartStart.value = body.start;
+        if (body.end) chartEnd.value = body.end;
+
+        fillSources(body.available_sources, body.source);
+
+        var sym = body.symbol || q;
+        var id = body.instrument_id || q;
+        var market = body.market || "";
+        var adjustment = body.adjustment || "";
+        var isCanonical = body.source === "canonical";
+
+        var recordLine = '<span class="sym">' + escapeHtml(sym) + '</span>' +
+          '<span class="mono pencil">' + escapeHtml(id) + '</span>' +
+          '<span class="sep">·</span>' +
+          '<span>' + escapeHtml(market) + '</span>' +
+          '<span class="sep">·</span>' +
+          '<span>' + escapeHtml(source) + '</span>';
+
+        if (adjustment) recordLine += '<span class="sep">·</span><span>' + escapeHtml(adjustment) + '</span>';
+
+        if (body.start && body.end) {
+          recordLine += '<span class="sep">·</span><span>' + escapeHtml(body.start) + ' → ' + escapeHtml(body.end) + '</span>';
+        }
+
+        if (!isCanonical) {
+          recordLine += '<span class="sep">·</span><span class="pencil">' + t("chart.raw_suffix") + '</span>';
+        }
+
+        chartRecord.innerHTML = recordLine;
+
+        var bars = body.bars || [];
+        var missing = interval === "1h" ? (body.missing_hours || []) : (body.missing_sessions || []);
+
+        // Clear the reading slip first; drawChart() refills it from the latest bar.
+        updateReadingSlip(null);
+        drawChart(bars, missing, interval);
+        populateBarTables(bars, interval);
+
+        // Set aria-label for chart accessibility
+        var chartEl = document.getElementById("chart");
+        var rangeStr = body.start && body.end ? (body.start + " to " + body.end) : "unknown range";
+        var barCountStr = bars.length.toString();
+        var gapCountStr = missing.length.toString();
+        var ariaLabel = sym + ", " + rangeStr + ", " + barCountStr + " bars, " + gapCountStr + " gaps";
+        if (chartEl) {
+          chartEl.setAttribute("aria-label", ariaLabel);
+        }
+
+        var remarksHtml = "";
+        if (missing.length) {
+          remarksHtml += '<p><span class="k">' + t(interval === "1h" ? "chart.hours" : "chart.gaps") + ' (' + missing.length + '):</span> ' +
+            escapeHtml(missing.map(function (m) { return interval === "1h" ? formatTime(m.ts_start, m.session) : m; }).join(", ")) + '</p>';
+        }
+        var fieldGaps = bars.filter(function (b) { return (b.missing_fields || []).length; });
+        if (fieldGaps.length) {
+          remarksHtml += '<p><span class="k">' + t("chart.missing_fields") + ':</span> ' +
+            escapeHtml(fieldGaps.map(function (b) {
+              var dateStr = interval === "1h" ? formatTime(b.ts_start, b.session) : b.session_date;
+              return dateStr + ' (' + (b.missing_fields || []).join(", ") + ')';
+            }).join("; ")) + '</p>';
+        }
+
+        var remarksSection = document.getElementById("chart-remarks");
+        if (remarksHtml) {
+          remarksSection.hidden = false;
+          remarksSection.innerHTML = '<h2 data-i18n="chart.remarks">' + t("chart.remarks") + '</h2>' + remarksHtml;
+        } else {
+          remarksSection.hidden = true;
+        }
+      })
+      .catch(function (err) {
+        if (requestSeq !== chartRequestSequence) return;
+        chartRecord.innerHTML = '<span style="color: var(--remark);">Error: ' + escapeHtml(err.message) + '</span>';
+      });
   }
 
   function fillSources(available, selected) {
@@ -394,190 +681,299 @@
     if (names.indexOf("canonical") === -1) names.unshift("canonical");
     if (current && names.indexOf(current) === -1) names.push(current);
     sel.innerHTML = names.map(function (name) {
-      return '<option value="' + escapeHtml(name) + '">' + escapeHtml(name) + "</option>";
+      return '<option value="' + escapeHtml(name) + '">' + escapeHtml(name) + '</option>';
     }).join("");
     sel.value = current;
   }
 
-  function num(value) {
-    if (value == null || value === "") return undefined;
-    return Number(value);
+  function formatNumber(value) {
+    if (value === 0 || value === "0") return "0";
+    if (value == null) return "—";
+    return value.toLocaleString(lang === "zh" ? "zh-CN" : "en-US");
   }
 
-  var chartRequestSequence = 0;
+  function populateBarTables(bars, interval) {
+    var dailyContainer = document.getElementById("bar-table-daily");
+    var hourlyContainer = document.getElementById("bar-table-hourly");
 
-  function loadChart() {
-    var requestSequence = ++chartRequestSequence;
-    var q = document.getElementById("chart-q").value.trim();
-    var source = document.getElementById("chart-source").value || "canonical";
-    var start = document.getElementById("chart-start").value;
-    var end = document.getElementById("chart-end").value;
-    var note = document.getElementById("chart-note");
-    var meta = document.getElementById("chart-meta");
-    if (!q) {
-      note.textContent = t("chart.pick");
+    if (!bars || !bars.length) {
+      document.getElementById("daily-bars-rows").innerHTML = "";
+      document.getElementById("hourly-bars-rows").innerHTML = "";
+      if (dailyContainer) dailyContainer.hidden = true;
+      if (hourlyContainer) hourlyContainer.hidden = true;
       return;
     }
-    var params = new URLSearchParams();
-    if (q.indexOf(":") !== -1) params.set("id", q);
-    else params.set("symbol", q);
-    params.set("source", source);
-    var interval = document.getElementById("interval").value;
-    params.set("interval", interval);
-    if (start) params.set("start", start);
-    if (end) params.set("end", end);
-    history.replaceState(null, "", "/chart?" + params.toString());
-    apiGet("/api/v1/bars?" + params.toString()).then(function (body) {
-      if (requestSequence !== chartRequestSequence) return;
-      if (body.start) document.getElementById("chart-start").value = body.start;
-      if (body.end) document.getElementById("chart-end").value = body.end;
-      fillSources(body.available_sources, body.source);
-      var isCanonical = body.source === "canonical";
-      note.textContent = body.note ? t(isCanonical && !(body.bars || []).length ? ("chart.no_hourly") : "chart.unknown_alignment") : (isCanonical ? t("chart.canonical_note") : t("chart.raw_note"));
-      var missing = interval === "1h" ? (body.missing_hours || []) : (body.missing_sessions || []);
-      var bars = body.bars || [];
-      drawChart(bars, missing, isCanonical, interval);
-      var bits = [];
-      var latestBar = bars.length ? bars[bars.length - 1] : null;
-      if (latestBar && isCanonical) {
-        bits.push('<div class="notice"><strong>' + t("chart.freshness") + ":</strong> " + escapeHtml(latestBar.freshness || "final") +
-          " · " + t("chart.available_at") + ": " + escapeHtml(latestBar.available_at || "—") +
-          '<p class="note">' + t("chart.tier_note") + "</p></div>");
-      }
-      if (missing.length) {
-        bits.push("<div class=\"notice\"><strong>" + (interval === "1h" ? t("chart.hours") : t("chart.gaps")) + " (" + missing.length + "):</strong> " +
-          escapeHtml(missing.map(function (m) { return interval === "1h" ? formatTime(m.ts_start, m.session) : m; }).join(", ")) + "</div>");
-      }
-      var fieldGaps = bars.filter(function (b) { return (b.missing_fields || []).length; });
-      if (fieldGaps.length) {
-        bits.push("<div class=\"notice\"><strong>" + t("chart.missing_fields") + ":</strong> " +
-          fieldGaps.map(function (b) {
-            return escapeHtml(interval === "1h" ? formatTime(b.ts_start, b.session) : b.session_date) + " (" + escapeHtml((b.missing_fields || []).join(", ")) + ")";
-          }).join("; ") + "</div>");
-      }
-      if (interval === "1h" && bars.length) {
-        bits.push("<h2>" + t("chart.hourly_bars") + "</h2><ul>" + bars.map(function (b) {
-          return "<li>" + escapeHtml(formatTime(b.ts_start, b.session)) + " " + flagBadges(b.flags) + "</li>";
-        }).join("") + "</ul>");
-      }
-      if (!bars.length) bits.unshift('<p class="empty">' + t("chart.empty") + "</p>");
-      meta.innerHTML = bits.join("");
-    }).catch(function (err) {
-      if (requestSequence !== chartRequestSequence) return;
-      note.innerHTML = '<span class="err">' + escapeHtml(err.message || t("err.generic")) + "</span>";
-    });
+
+    if (interval === "1h") {
+      // Populate hourly bars table
+      var hourlyRows = document.getElementById("hourly-bars-rows");
+      hourlyRows.innerHTML = bars
+        .map(function (bar) {
+          var timeStr = formatTime(bar.ts_start, bar.session);
+          var session = escapeHtml(bar.session || "—");
+          var open = formatNumber(bar.open);
+          var high = formatNumber(bar.high);
+          var low = formatNumber(bar.low);
+          var close = formatNumber(bar.close);
+          var volume = formatNumber(bar.volume);
+          var flags = bar.flags && bar.flags.length ? bar.flags.map(remarkMark).join("") : "—";
+
+          return '<tr>' +
+            '<td data-l="' + t("chart.bars_time_ny") + '">' + escapeHtml(timeStr) + '</td>' +
+            '<td data-l="' + t("chart.bars_session") + '">' + session + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_open") + '">' + open + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_high") + '">' + high + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_low") + '">' + low + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_close") + '">' + close + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_volume") + '">' + volume + '</td>' +
+            '<td data-l="' + t("chart.bars_flags") + '">' + flags + '</td>' +
+            '</tr>';
+        })
+        .join("");
+      document.getElementById("daily-bars-rows").innerHTML = "";
+      if (dailyContainer) dailyContainer.hidden = true;
+      if (hourlyContainer) hourlyContainer.hidden = false;
+    } else {
+      // Populate daily bars table
+      var dailyRows = document.getElementById("daily-bars-rows");
+      dailyRows.innerHTML = bars
+        .map(function (bar) {
+          var dateStr = escapeHtml(bar.session_date || "—");
+          var open = formatNumber(bar.open);
+          var high = formatNumber(bar.high);
+          var low = formatNumber(bar.low);
+          var close = formatNumber(bar.close);
+          var volume = formatNumber(bar.volume);
+          var freshness = bar.freshness ? '<span class="fr ' + (bar.freshness === "final" ? "final" : "prov") + '"><i></i>' + t("fresh." + (bar.freshness === "final" ? "final" : "provisional")) + '</span>' : "—";
+          var flags = bar.flags && bar.flags.length ? bar.flags.map(remarkMark).join("") : "—";
+
+          return '<tr>' +
+            '<td data-l="' + t("chart.bars_date") + '">' + dateStr + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_open") + '">' + open + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_high") + '">' + high + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_low") + '">' + low + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_close") + '">' + close + '</td>' +
+            '<td class="num" data-l="' + t("chart.bars_volume") + '">' + volume + '</td>' +
+            '<td data-l="' + t("chart.bars_freshness") + '">' + freshness + '</td>' +
+            '<td data-l="' + t("chart.bars_flags") + '">' + flags + '</td>' +
+            '</tr>';
+        })
+        .join("");
+      document.getElementById("hourly-bars-rows").innerHTML = "";
+      if (dailyContainer) dailyContainer.hidden = false;
+      if (hourlyContainer) hourlyContainer.hidden = true;
+    }
   }
 
-  function drawChart(bars, missing, isCanonical, interval) {
+  function drawChart(bars, missing, interval) {
     var hourly = interval === "1h";
-    function timeOf(item) { return hourly ? Math.floor(new Date(item.ts_start).getTime() / 1000) : (typeof item === "string" ? item : item.session_date); }
+
+    function timeOf(item) {
+      if (hourly) return Math.floor(new Date(item.ts_start).getTime() / 1000);
+      return item.session_date;
+    }
+
     var host = document.getElementById("chart");
     if (!window.LightweightCharts) {
-      host.textContent = t("err.generic");
+      host.textContent = "LightweightCharts not available";
       return;
     }
+
     if (chartApi) {
       chartApi.remove();
       chartApi = null;
       candleSeries = null;
     }
+
+    var root = document.documentElement;
+    var styles = getComputedStyle(root);
+    var paperColor = styles.getPropertyValue("--paper").trim();
+    var pencilColor = styles.getPropertyValue("--pencil").trim();
+    var ruleColor = styles.getPropertyValue("--rule").trim();
+    var formColor = styles.getPropertyValue("--form").trim();
+    var entryColor = styles.getPropertyValue("--entry").trim();
+
     chartApi = LightweightCharts.createChart(host, {
       width: host.clientWidth || 800,
-      height: 440,
-      localization: hourly ? { timeFormatter: function (time) { return formatTime(time * 1000); } } : {},
-      layout: { background: { color: "#ffffff" }, textColor: "#1a2332" },
-      grid: { vertLines: { color: "#eef1f4" }, horzLines: { color: "#eef1f4" } },
-      rightPriceScale: { borderColor: "#d8dee6" },
-      timeScale: { borderColor: "#d8dee6", timeVisible: hourly, tickMarkFormatter: hourly ? function (time) { return formatTime(time * 1000); } : undefined }
+      height: hourly ? 320 : 460,
+      layout: {
+        background: { color: paperColor },
+        textColor: pencilColor
+      },
+      grid: {
+        vertLines: { color: ruleColor },
+        horzLines: { color: ruleColor }
+      },
+      rightPriceScale: { borderColor: formColor },
+      timeScale: { borderColor: formColor, timeVisible: hourly }
     });
+
     candleSeries = chartApi.addCandlestickSeries({
-      upColor: "#087f5b",
-      downColor: "#b42318",
-      borderVisible: false,
-      wickUpColor: "#087f5b",
-      wickDownColor: "#b42318"
+      upColor: paperColor,
+      downColor: entryColor,
+      borderUpColor: entryColor,
+      borderDownColor: entryColor,
+      wickUpColor: entryColor,
+      wickDownColor: entryColor,
+      borderVisible: true
     });
-    var byDay = {};
-    bars.forEach(function (b) { byDay[timeOf(b)] = b; });
-    var days = bars.map(timeOf).concat((missing || []).map(timeOf));
-    days.sort(function (a, b) { return a < b ? -1 : a > b ? 1 : 0; });
-    var data = [];
-    var seen = {};
-    days.forEach(function (day) {
-      if (!day || seen[day]) return;
-      seen[day] = true;
-      var b = byDay[day];
-      if (!b) {
-        data.push({ time: day });
-        return;
-      }
-      var o = num(b.open), h = num(b.high), l = num(b.low), c = num(b.close);
-      if (o == null || h == null || l == null || c == null) {
-        data.push({ time: day });
-        return;
-      }
-      data.push({ time: day, open: o, high: h, low: l, close: c });
+
+    var chartData = bars.map(function (b) {
+      return {
+        time: timeOf(b),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close
+      };
     });
-    candleSeries.setData(data);
+
+    if (chartData.length) candleSeries.setData(chartData);
+
+    // Lightweight Charts v4 markers: build the list, then call setMarkers() once.
+    var gapColor = styles.getPropertyValue("--remark").trim();
     var markers = [];
-    (missing || []).forEach(function (day) {
+    missing.forEach(function (m) {
       markers.push({
-        time: timeOf(day),
+        time: timeOf(m),
         position: "belowBar",
-        color: "#b54708",
+        color: gapColor,
         shape: "circle",
-        text: t("gap.label")
+        text: t("flag.gap")
       });
     });
-    if (isCanonical) {
-      bars.forEach(function (b) {
-        if (!(b.flags || []).length) return;
+
+    bars.forEach(function (b) {
+      if (b.flags && b.flags.length) {
         markers.push({
           time: timeOf(b),
           position: "aboveBar",
-          color: "#b42318",
+          color: gapColor,
           shape: "arrowDown",
-          text: (b.flags || []).map(flagLabel).join(", ")
+          text: b.flags.map(function (name) { return t("flag." + name); }).join(", ")
         });
-      });
-    } else {
-      bars.forEach(function (b) {
-        if (!(b.missing_fields || []).length) return;
-        markers.push({
-          time: timeOf(b),
-          position: "aboveBar",
-          color: "#b54708",
-          shape: "arrowDown",
-          text: (b.missing_fields || []).join(", ")
-        });
-      });
-    }
+      }
+    });
+
     markers.sort(function (a, b) { return a.time < b.time ? -1 : a.time > b.time ? 1 : 0; });
     if (markers.length) candleSeries.setMarkers(markers);
+
+    var latestBar = null;
+    chartApi.subscribeCrosshairMove(function (param) {
+      if (param.point === undefined || !param.time || param.seriesPrices.size === 0) {
+        if (bars.length > 0) {
+          latestBar = bars[bars.length - 1];
+          updateReadingSlip(latestBar);
+        }
+        return;
+      }
+      var barIdx = bars.findIndex(function (b) { return timeOf(b) === param.time; });
+      if (barIdx >= 0) {
+        latestBar = bars[barIdx];
+        updateReadingSlip(latestBar);
+      }
+    });
+
+    if (bars.length > 0) {
+      latestBar = bars[bars.length - 1];
+      updateReadingSlip(latestBar);
+    }
+
     chartApi.timeScale().fitContent();
   }
 
-  window.addEventListener("resize", function () {
-    if (chartApi) {
-      var host = document.getElementById("chart");
-      if (host) chartApi.applyOptions({ width: host.clientWidth });
+  function updateReadingSlip(bar) {
+    if (!bar) {
+      document.getElementById("s-date").textContent = "—";
+      document.getElementById("s-o").textContent = "—";
+      document.getElementById("s-h").textContent = "—";
+      document.getElementById("s-l").textContent = "—";
+      document.getElementById("s-c").textContent = "—";
+      document.getElementById("s-v").textContent = "—";
+      document.getElementById("s-fr").innerHTML = "";
+      document.getElementById("s-av").textContent = "—";
+      document.getElementById("s-fl").textContent = "—";
+      return;
     }
-  });
 
-  function boot() {
-    setLang(detectLang());
-    markNav();
-    var root = document.getElementById("app");
-    var path = pathOf();
-    if (path === "/chart") renderChart(root);
-    else if (path === "/flags") renderFlags(root);
-    else renderDashboard(root);
+    var dateStr = document.querySelector("input[name='iv2']:checked").value === "1h" ?
+      formatTime(bar.ts_start, bar.session) :
+      bar.session_date;
+    document.getElementById("s-date").textContent = dateStr;
+
+    document.getElementById("s-o").textContent = bar.open != null ? bar.open.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+    document.getElementById("s-h").textContent = bar.high != null ? bar.high.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+    document.getElementById("s-l").textContent = bar.low != null ? bar.low.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+    document.getElementById("s-c").textContent = bar.close != null ? bar.close.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+    document.getElementById("s-v").textContent = bar.volume != null ? bar.volume.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+
+    if (bar.freshness) {
+      var freshnessClass = bar.freshness === "provisional" ? "prov" : "final";
+      var freshnessLabel = t("fresh." + (bar.freshness === "provisional" ? "provisional" : "final"));
+      document.getElementById("s-fr").innerHTML =
+        '<span class="fr ' + freshnessClass + '"><i></i>' + freshnessLabel + '</span>';
+    } else {
+      document.getElementById("s-fr").innerHTML = '';
+    }
+
+    document.getElementById("s-av").textContent = bar.available_at ? bar.available_at.substring(0, 16) : "—";
+
+    if (bar.flags && bar.flags.length) {
+      document.getElementById("s-fl").innerHTML = bar.flags.map(remarkMark).join(" ");
+    } else {
+      document.getElementById("s-fl").textContent = "—";
+    }
   }
 
-  document.getElementById("lang-toggle").addEventListener("click", function () {
-    setLang(lang === "zh" ? "en" : "zh");
-    boot();
-  });
+  function init() {
+    lang = detectLang();
+    setLang(lang);
 
-  boot();
+    // Set host address to current location.host
+    var hostAddr = document.getElementById("host-addr");
+    if (hostAddr) {
+      hostAddr.textContent = location.host || "127.0.0.1:8787";
+    }
+
+    document.getElementById("lang-toggle").addEventListener("click", function () {
+      lang = lang === "zh" ? "en" : "zh";
+      setLang(lang);
+    });
+
+    var path = pathOf();
+    var page = path === "/" ? "dash" : path.substring(1);
+
+    showPage(page);
+
+    var radios1 = document.querySelectorAll("input[name='iv1']");
+    radios1.forEach(function (r) {
+      r.addEventListener("change", function () {
+        location.search = "?interval=" + this.value;
+      });
+    });
+
+    var radios3 = document.querySelectorAll("input[name='iv3']");
+    radios3.forEach(function (r) {
+      r.addEventListener("change", function () {
+        var q = new URLSearchParams(location.search);
+        q.set("interval", this.value);
+        history.replaceState(null, "", "/flags?" + q.toString());
+        renderFlags();
+      });
+    });
+
+    var interval = queryParams().get("interval") === "1h" ? "1h" : "1d";
+    radios1.forEach(function (r) { r.checked = r.value === interval; });
+    radios3.forEach(function (r) { r.checked = r.value === interval; });
+
+    if (page === "dash") {
+      renderDashboard();
+    } else if (page === "flags") {
+      renderFlags();
+    } else if (page === "chart") {
+      renderChart();
+    }
+  }
+
+  window.addEventListener("DOMContentLoaded", init);
 })();

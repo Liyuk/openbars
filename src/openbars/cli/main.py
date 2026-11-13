@@ -83,7 +83,10 @@ def _iso_date(text: str) -> date:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="openbars", description="openbars (pre-alpha): daily 1d / hourly 1h (日线 / 小时线)")
+    parser = argparse.ArgumentParser(
+        prog="openbars",
+        description="OpenBars (pre-alpha): free, multi-market, multi-source OHLCV bars reconciled into one canonical dataset (daily 1d, hourly 1h)",
+    )
     parser.add_argument("--version", action="version", version=f"openbars {__version__}")
     parser.add_argument("--config", default=None, help="config file (default: ./config.yaml when present, otherwise OPENBARS_HOME/config/config.yaml)")
     parser.add_argument("--data", default=None, help="storage directory (overrides storage.path)")
@@ -100,9 +103,9 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--data", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         p.add_argument("--env-file", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
-    init = sub.add_parser("init", help="配置向导 / setup wizard (never overwrites / 绝不覆盖)")
-    init.add_argument("directory", nargs="?", default=".", help="目标目录 / target directory (default .)")
-    init.add_argument("--yes", "-y", action="store_true", help="复制模板 / copy templates without prompts")
+    init = sub.add_parser("init", help="interactive setup wizard (never overwrites existing files)")
+    init.add_argument("directory", nargs="?", default=".", help="target directory (default .)")
+    init.add_argument("--yes", "-y", action="store_true", help="copy the templates without prompting")
 
     verify = sub.add_parser("verify", help="coverage and cross-source agreement report over stored bars, per configured market (us, crypto, cn, hk)")
     common(verify)
@@ -111,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--recent", type=int, default=20, help="also report the last N sessions (0 = off, default 20)")
     verify.add_argument("--json", default=None, metavar="PATH", help="also write the report as JSON under the data dir (several markets: {\"markets\": {name: report}})")
 
-    plan = sub.add_parser("plan", help="show daily/hourly jobs and request budget / 日线、小时线作业及请求预算 (dry run)")
+    plan = sub.add_parser("plan", help="show daily and hourly jobs and the request budget (dry run)")
     common(plan)
     plan.add_argument("--submit", action="store_true", help="write the planned jobs to the state db")
     plan.add_argument("--accept-budget", action="store_true", help="accept a large non-daily request budget")
@@ -127,7 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
         run.add_argument("--accept-budget", action="store_true", help="accept a large non-daily request budget")
         run.add_argument("--lease-ttl", type=float, default=DEFAULT_LEASE_TTL.total_seconds(), help=argparse.SUPPRESS)
 
-    status = sub.add_parser("status", help="job counts and raw coverage by interval / 按周期查看作业与原始覆盖")
+    status = sub.add_parser("status", help="job counts, dead jobs and raw coverage per interval")
     common(status)
 
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")

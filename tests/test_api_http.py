@@ -40,5 +40,7 @@ def test_index_page_is_served():
     response = client.get("/")
     assert response.status_code == 200
     text = response.text
-    assert "openbars" in text
+    # The brand is written OpenBars; only identifiers stay lowercase `openbars`.
+    assert "OpenBars" in text
     assert "read-only" in text.lower() or "只读" in text
+    assert "/assets/app.js" in text

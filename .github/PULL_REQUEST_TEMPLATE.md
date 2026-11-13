@@ -1,19 +1,19 @@
-## 关联
+## Links
 
 Closes #
 Discussion:
 
-## 做了什么
+## What changed
 
-## 怎么验证的
+## How it was verified
 
-<!-- 只写实际运行过的检查及结果；没跑过的不要标为通过 -->
+<!-- Only list checks you actually ran, with their results; do not mark unrun checks as passing -->
 - [ ] `uv run --extra dev pytest`
 
-## 未完成 / 风险
+## Open items / risks
 
-## 检查清单
+## Checklist
 
-- [ ] 没有提交任何密钥、`.env`、数据文件（`data/`、`*.parquet`、`*.duckdb`）
-- [ ] 接口或口径变更已同步 `docs/architecture.md`
-- [ ] 新 provider 已声明 `SourceCapability`、`QuotaPolicy` 与条款
+- [ ] No secret, `.env` or data file is committed (`data/`, `*.parquet`, `*.duckdb`)
+- [ ] API or convention changes are reflected in `docs/architecture.md` / `docs/api.md`
+- [ ] A new provider declares `SourceCapability`, `QuotaPolicy` and its terms
