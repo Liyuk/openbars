@@ -1,6 +1,12 @@
-# Switching an upstream research series to openbars
+# Migrating an upstream research series to openbars
 
-Generic cut-over notes for a research-series store that already uses the
+`upstream_compat` is retained for migration work and tests only. It is not the
+default or a routine production write path. New installations write to local
+Parquet + DuckDB and use a local SQLite quota gate. Explicitly configuring
+`storage.backend: postgres` with `mode: upstream_compat` continues to select
+compat behavior; configuration is never silently redirected.
+
+Compatibility notes for a research-series store that already uses the
 `upstream_compat` tables (`instrument`, `symbol_alias`, `daily_bar`,
 `research_daily_bar`, and the two watermark tables). This document names no
 private implementation. For a particular deployment, keep the concrete file
@@ -10,33 +16,37 @@ and config checklist outside this repository.
 
 ## Prerequisites
 
-- Introspection must pass: openbars starts in `upstream_compat` and **never
+- For an isolated migration / test database only, introspection must pass:
+  openbars starts in `upstream_compat` and **never
   runs migrations**. Missing tables/columns or `numeric` precision mismatches
   raise `UpstreamSchemaError` with a `problems` list. Fix the schema on the
   upstream side (or point at a compatible database) before enabling writes.
-- Set `storage.postgres.mode: upstream_compat` and `storage.postgres.write: true`.
-  Writes stay off when `write` is false or omitted.
+- In that isolated environment, explicitly set `storage.postgres.mode:
+  upstream_compat` and `storage.postgres.write: true` to test writes. Writes
+  stay off when `write` is false or omitted. Do not point this at a live
+  production database.
 - Provide a Postgres DSN at runtime only (environment / env file). Do not
   commit it. `openbars config` redacts it.
 - `state_path` (SQLite) is required: jobs, checkpoints and the fetch log are
   not stored in the upstream database.
-- Share QuotaGate with the upstream writer by setting
-  `storage.postgres.quota: postgres` (`provider_request_gate` /
-  `provider_request_usage`) if both processes use the same provider key;
-  otherwise leave the default `sqlite` gate or give openbars its own key.
-  This never migrates those tables.
+- The default quota gate is local SQLite. In isolated migration / test setups,
+  `storage.postgres.quota: postgres` can use existing
+  `provider_request_gate` / `provider_request_usage` tables; this never
+  migrates those tables.
 - `upstream_compat` writes US daily bars only.
 
 ## CLI
 
-`openbars plan` and `openbars run` honor `storage.backend: postgres`. The DSN
+`openbars plan` and `openbars run` honor `storage.backend: postgres` in
+migration / test setups. The DSN
 is resolved at runtime from settings (`storage.postgres.dsn`, typically
 `${OPENBARS_PG_DSN}` or an env file) and is never printed by `openbars config`
 or command output. A dry-run `plan` (no `--submit`) opens the backend
 read-only even if `write: true`, so it will introspect the upstream schema
 but will not write jobs or bars. `plan --submit` and `run` use the
 configured `write` flag and can upsert `daily_bar`, `research_daily_bar`,
-and the corporate-action tables in `upstream_compat`. Jobs, checkpoints and
+and the corporate-action tables in `upstream_compat`; use a disposable
+database for write validation. Jobs, checkpoints and
 the fetch log stay in `{storage.path}/state.db` for compat mode (they are
 not stored in the upstream database). Set `storage.postgres.quota: postgres`
 to share `provider_request_gate` / `provider_request_usage` with the upstream
@@ -59,42 +69,37 @@ openbars instrument ids are strings; upstream FKs are integers.
   first bar). More than one hit (ticker reuse) raises `AmbiguousInstrumentError`
   with an actionable report: each candidate's numeric `instrument_id`, alias
   validity window, and exchange / security type. Pass one of those numeric ids.
-- Prefer numeric upstream ids (or a pre-seeded identity table) in production.
+- In compatibility tests, prefer numeric ids (or a pre-seeded identity table).
   Ticker-only bootstrap is fine for a short dry-run, but it can mis-merge a
   reused ticker.
 
 If a covering alias is missing and no symbol is available, the bar can still
 be written, but readers that join `symbol_alias` will not see it.
 
-## Shadow, dual-write, cut-over, rollback
+## Migration and compatibility verification (non-production)
 
-1. **Shadow (read-only).** Run the openbars pipeline against Parquet (or a
+1. **Read-only comparison.** Run the openbars pipeline against Parquet (or a
    separate schema / `policy_version`) and compare it to the existing
    `research-daily-v2` series (`openbars shadow` / `openbars verify`). Watch
    coverage, price agreement, volume agreement, and quality-status agreement.
-2. **Dry-run write.** Point `upstream_compat` with `write: true` at a
+2. **Compatibility test write.** Point `upstream_compat` with `write: true` at a
    *throwaway* database loaded with the upstream DDL (or a snapshot), never
    the live one, and confirm an external reader can join
    `research_daily_bar` to `symbol_alias` with the covering-alias predicate
    (see `RESEARCH_SERIES_READ_SQL` in `openbars.storage.compat_write`).
-3. **Dual-write / lock-step.** When cutting onto the live tables, pause or
-   serialize the upstream projector for the same `(policy_version, session_date)`
-   first. openbars takes a transaction-level advisory lock with this exact
-   key (do not change the prefix):
+3. Do not configure `upstream_compat` as a routine production writer or
+   dual-write it with an upstream projector. Core production writes use
+   Parquet + DuckDB and the local SQLite quota gate. A separate export feature
+   may be used for external Postgres writes.
+
+For compatibility tests, canonical writes take a transaction-level advisory
+lock with this key (do not change the prefix):
 
        sha256("research-daily:{policy_version}:{YYYY-MM-DD}")[:8]  # signed big-endian int64
        SELECT pg_advisory_xact_lock(key)
 
-   The upstream projector must use the same algorithm. After a canonical
-   write, openbars increments `research_series_watermark` and
-   `research_series_date_watermark` so cache-based readers invalidate.
-4. **Cut over.** Leave `write: true` on openbars, then take upstream fetch /
-   project workers offline one source at a time (fallback sources first, then
-   the primary). Keep their code and feature flags in place.
-5. **Rollback.** Set openbars `write: false` (or stop the openbars writer) and
-   resume the upstream workers. Because the table shapes and policy version
-   are shared, no data migration is required. Watermarks keep incrementing
-   from whichever process writes last.
+Compatibility writes update the watermarks for cache-based readers. This
+behavior is retained for migration and test environments only.
 
 `selected_source_bar_id` is always set when a canonical upsert succeeds: a
 matching `daily_bar` is reused when present; otherwise a row is materialized
@@ -110,6 +115,6 @@ observation / event / revision tables (`event_key` =
 `upstream_compat` 在 `write: true` 时写入既有表，永不做迁移；启动时做列级校验。
 字符串 instrument id 若是整数就复用，否则按代码引导；代码复用冲突会给出带数值 id 和有效期的歧义报告，必须改传其中一个 id。只写 canonical 时会补写对应 `daily_bar` 以填 `selected_source_bar_id`；公司行动写入现有观察/事件/修订表，并可通过 `corporate_actions()` 读回最新修订；无法识别的行动类型会记入本地 unresolved 并告警，不会静默跳过。`mappings(provider=…)` 支持按 provider 筛选（别名本身仍是 `*`）。compat master 已是完整 `InstrumentStore`，unresolved / observe 等放在本地 `identity.db`。`storage.postgres.quota: postgres` 时 CLI 与 upstream 共用 `provider_request_gate` / `usage`（默认仍是本地 sqlite）。
 `openbars plan` / `run` 已支持 `storage.backend: postgres`：DSN 只在运行时解析且不会打印；dry-run `plan` 只读，`plan --submit` 与 `run` 按 `write` 写入。compat 模式下 jobs 仍在本地 SQLite。
-切换前先影子对账，再在临时库验证外部读取 SQL；切到共用表时与 upstream 投影器共用
-`research-daily:{policy}:{date}` 的 advisory lock，并依赖水位表让缓存失效。
-回滚只需关掉 openbars 写入、恢复 upstream worker，不必迁数据。密钥和 DSN 只在运行时提供，不要入库。
+迁移比对只读运行；写入验证只在一次性测试库进行，不能作为正式库日常写入或双写流程。
+compat 保留 advisory lock 与水位更新，仅供迁移 / 测试使用。生产核心写入默认走
+Parquet + DuckDB，配额走本地 SQLite；密钥和 DSN 只在运行时提供，不要入库。

@@ -20,7 +20,7 @@ openbars 是一个**本地运行的行情仓库框架**，不是又一个数据�
 2. **配额感知调度**：在免费额度内编排抓取——共享限流闸门、重试、断点续抓、历史回补、每日增量。
 3. **清洗与合并**：证券主数据（稳定 ID + 代码有效期）、交易日历、复权参数化、缺口检测、多源仲裁、质量标记，最终写成一份带来源与审计记录的**规范层（canonical）**数据。
 
-默认存储为 Parquet + DuckDB，Postgres 可选。读取方式是 Python 库，HTTP 接口可选。
+默认写入 Parquet + DuckDB，配额闸门使用本地 SQLite；Postgres 是可选后端。`upstream_compat` 只用于迁移与测试，不是日常生产写入路径。读取方式是 Python 库，HTTP 接口可选。
 
 Parquet 与 DuckDB 是核心依赖，普通安装即可使用默认存储；`parquet` extra 为兼容旧安装命令保留，不再额外安装依赖。
 
@@ -56,6 +56,7 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 ```
 
 - `init [目录]` 在终端启动向导；非终端或 `--yes` 复制示例配置。参见[数据源密钥申请与额度指南](docs/provider-keys.md)。任一目标已存在就报错退出（退出码 2），什么都不写。
+- 新安装和示例配置默认写入 `parquet_duckdb`，配额使用本地 SQLite。Postgres `upstream_compat` 仅供迁移与测试；已有明确配置仍按其指定后端运行。
 - **密钥优先级（高 → 低）**：① 进程环境变量；② dotenv 文件：`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`，都没有时自动读取 **`config.yaml` 同目录的 `.env`**（不存在也不报错）；③ `config.yaml` 里 `${VAR:-default}` 的默认值。也接受 `ALPACA_API_KEY` / `ALPACA_API_SECRET` 作为 `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` 的别名（仅当规范名未设置时）。
 - 示例配置里 Alpaca 与 Massive 都是 `enabled: true` 的主源：`run` 在它们缺 key 时会报错并列出变量名（如 `MASSIVE_API_KEY`），请填上 key，或把不用的源改成 `enabled: false`。`plan` 只提示缺失，不会中止（但没有任何可用源、或选了无源支持的粒度时会报错）。
 - `quota:` 只能**收紧**默认免费额度；要调高必须写 `quota: { per_minute: 999, override: true }`，否则报错。
@@ -209,7 +210,7 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 #   --start YYYY-MM-DD --end YYYY-MM-DD --output /path/to/report-dir --fetch
 ```
 
-- `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
+- `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. New installs write to `parquet_duckdb` and use a local SQLite quota gate. `upstream_compat` is for migration and tests only; explicit existing backend configuration continues to be honored. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
 - **Key priority (highest first):** (1) the process environment; (2) a dotenv file: `--env-file`, else `OPENBARS_ENV_FILE`, else `env_file` in `config.yaml`, and when none of those is set, **`.env` next to `config.yaml`** is loaded automatically (no error if it is absent); (3) `${VAR:-default}` in `config.yaml`. `ALPACA_API_KEY` / `ALPACA_API_SECRET` are accepted as aliases for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` when the canonical name is unset.
 - The example config enables both Alpaca and Massive as primary providers: `run` fails with the missing variable names (for example `MASSIVE_API_KEY`) if one lacks credentials, so fill the keys in or set `enabled: false` on providers you do not use. `plan` only notes missing credentials (but errors when no usable provider is left, or when an interval is selected that no enabled provider offers).
 - `quota:` may only **tighten** the default free-tier limits; raising one needs an explicit `quota: { per_minute: 999, override: true }`, otherwise it is an error.

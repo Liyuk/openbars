@@ -43,6 +43,11 @@ def test_yes_bypasses_terminal_wizard(tmp_path, monkeypatch):
     repo = Path(__file__).resolve().parent.parent
     assert (tmp_path / "config.yaml").read_bytes() == (repo / "config.example.yaml").read_bytes()
     assert (tmp_path / ".env").read_bytes() == (repo / ".env.example").read_bytes()
+    from openbars.config.loader import load_settings
+
+    settings = load_settings(tmp_path / "config.yaml", env={})
+    assert settings.storage_backend == "parquet_duckdb"
+    assert settings.postgres_quota == "sqlite"
 
 
 @pytest.mark.parametrize("existing", ["config.yaml", ".env"])
