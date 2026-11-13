@@ -7,6 +7,9 @@
 #      else .env next to this file when it exists)
 #   3. ${VAR:-default} below
 # Literal values here are used as written.
+# Runtime home: OPENBARS_HOME (default ~/.openbars). Without --config / --env-file,
+# an existing ./config.yaml keeps the legacy CWD behavior; otherwise config is read
+# from $OPENBARS_HOME/config/config.yaml and omitted storage.path defaults to $OPENBARS_HOME/data.
 # `openbars config` prints the effective settings; secret values are redacted.
 # env_file: .env
 version: 1
@@ -51,7 +54,8 @@ universe:
 
 storage:
   backend: parquet_duckdb  # parquet_duckdb | postgres
-  path: ./data
+  # Omit path to use the runtime-home default when this is the automatically selected config.
+  # Existing CWD configs and explicitly selected configs without path retain ./data.
   postgres:
     dsn: ${OPENBARS_PG_DSN}
     mode: native           # native | upstream_compat（compat 永不做迁移，只做列级校验）
