@@ -66,6 +66,7 @@ from openbars.providers.us.alpaca import ESTIMATED_BARS_PER_PAGE
 from openbars.providers.us.massive_window import (
     ROLLING_WINDOW_DAYS,
     massive_grouped_sessions,
+    session_is_ready,
 )
 from openbars.providers.us.yfinance import should_request_yfinance
 from openbars.quota.policy import QuotaPolicy
@@ -233,9 +234,17 @@ class RawStoreCoverage:
 
             for fetch in fetches:
                 if fetch.status in {"ok", "empty"} and fetch.started_at is not None:
-                    last_day = fetch.started_at.astimezone(NEW_YORK).date() - timedelta(days=1)
+                    fetched_at = fetch.started_at.astimezone(UTC)
+                    last_day = fetched_at.astimezone(NEW_YORK).date()
+                    fetched_sessions = session_days(
+                        fetch.window.start, min(fetch.window.end, last_day)
+                    )
+                    provider_name = getattr(fetch, "provider", "")
                     successful[fetch.job_id].update(
-                        session_days(fetch.window.start, min(fetch.window.end, last_day))
+                        day for day in fetched_sessions
+                        if fetched_at >= xnys.session_bounds(day)[-1][1]
+                        + (timedelta(minutes=16) if provider_name == "alpaca" else timedelta(0))
+                        and (provider_name != "massive" or session_is_ready(day, fetched_at))
                     )
 
             index: dict[tuple[str, str], set[date]] = defaultdict(set)
@@ -368,7 +377,7 @@ def _normalize_universe(
 def latest_ready_session(now: datetime, market: Market = Market.US) -> date | None:
     """Latest ready session of ``market``.
 
-    US: latest XNYS session strictly before the New York date of ``now``. Crypto: latest UTC
+    US: latest XNYS session whose regular close has passed. Crypto: latest UTC
     day that closed at least ``CRYPTO_COMPLETION_WAIT_MINUTES`` (30) before ``now``. CN: latest
     XSHG session whose 15:00 Shanghai close is at least ``CN_COMPLETION_WAIT_MINUTES`` (30)
     before ``now``. HK: latest XHKG session whose actual close (16:00, or 12:00 on a half day)
@@ -386,9 +395,7 @@ def latest_ready_session(now: datetime, market: Market = Market.US) -> date | No
         return hk_calendar.latest_completed_session(now, HK_COMPLETION_WAIT_MINUTES)
     if market is not Market.US:
         return None
-    today = now.astimezone(NEW_YORK).date()
-    found = xnys.sessions(today - timedelta(days=14), today - timedelta(days=1))
-    return found[-1] if found else None
+    return xnys.latest_completed_session(now, wait_minutes=0)
 
 
 _latest_ready_session = latest_ready_session
@@ -634,8 +641,17 @@ class DefaultPlanner:
             return
 
         is_us = market is Market.US
-        latest = latest_ready_session(now, market)
         today = _today(now, market)
+        calendar_latest = latest_ready_session(now, market)
+        if calendar_latest is None:
+            return
+        # US routing needs today's session in the candidate window so each provider can
+        # apply its own readiness rule. Other markets keep their established close + wait.
+        if market is Market.US:
+            candidates = xnys.sessions(today - timedelta(days=14), today)
+            latest = candidates[-1] if candidates else None
+        else:
+            latest = calendar_latest
         if latest is None:
             return
         end = min(selection.history_end or latest, latest)
@@ -645,6 +661,34 @@ class DefaultPlanner:
             return
         window = DateRange(start, end)
         all_sessions = _sessions(market, start, end)
+
+        def ready_sessions(cap: SourceCapability, sessions=all_sessions) -> list[date]:
+            if market is not Market.US:
+                return list(sessions)
+            ready = []
+            for day in sessions:
+                if cap.provider == "massive" and interval is Interval.D1:
+                    if session_is_ready(day, now):
+                        ready.append(day)
+                elif day < today:
+                    ready.append(day)
+                elif cap.provider == "alpaca":
+                    # The adapter clips SIP requests at now - 16 minutes. Planning follows
+                    # that implemented cutoff; data completeness remains best effort.
+                    close = xnys.session_bounds(day)[-1][1]
+                    if now.astimezone(UTC) >= close + timedelta(minutes=16):
+                        ready.append(day)
+                elif cap.latency_verified:
+                    close = xnys.session_bounds(day)[-1][1]
+                    if now.astimezone(UTC) >= close + cap.latency:
+                        ready.append(day)
+                # Unverified zero-latency sources remain previous-session only.
+            return ready
+
+        readiness_candidates = (
+            xnys.sessions(today - timedelta(days=14), today)
+            if market is Market.US else all_sessions
+        )
 
         def emit(
             kind: JobKind,
@@ -661,7 +705,7 @@ class DefaultPlanner:
                 caps_by_job[job_id] = capable[provider]
 
         if is_us and interval is Interval.H1:
-            self._plan_hourly(capable, coverage, window, all_sessions, symbols, today, latest, emit, notes)
+            self._plan_hourly(capable, coverage, window, all_sessions, symbols, today, latest, now, emit, notes)
             return
 
         # 1. whole-market grouped providers -------------------------------------------------
@@ -675,8 +719,9 @@ class DefaultPlanner:
             planned = massive_grouped_sessions(
                 window, as_of=today, now=now, covered=have, sessions=all_sessions
             )
+            source_latest = max(ready_sessions(capable[name], readiness_candidates), default=None)
             for day in sorted(planned, reverse=True):
-                daily = day == latest
+                daily = day == source_latest
                 emit(
                     JobKind.DAILY if daily else JobKind.BACKFILL, name, WHOLE_MARKET,
                     DateRange(day, day),
@@ -705,7 +750,9 @@ class DefaultPlanner:
         for name in multi:
             cap = capable[name]
             floor = cap.history_start or start
-            eligible = [d for d in all_sessions if d >= floor and d not in whole_done]
+            source_ready = ready_sessions(cap)
+            eligible = [d for d in source_ready if d >= floor and d not in whole_done]
+            source_latest = max(ready_sessions(cap, readiness_candidates), default=None)
             if not eligible:
                 continue
             span = DateRange(eligible[0], eligible[-1])
@@ -721,7 +768,7 @@ class DefaultPlanner:
                 primary_covered[sym] |= have | set(
                     missing
                 )  # covered now or by this plan
-                for win, kind in self._windows(missing, latest):
+                for win, kind in self._windows(missing, source_latest or latest):
                     groups[(win.start, win.end, kind)].append(sym)
             size = self._batch_size(name, cap)
             for (w_start, w_end, kind), syms in sorted(
@@ -736,9 +783,11 @@ class DefaultPlanner:
         for name in fallback:
             cap = capable[name]
             groups_fb: dict[tuple[date, date], list[str]] = defaultdict(list)
+            source_ready = set(ready_sessions(cap))
+            source_latest = max(source_ready, default=latest)
             for sym in symbols:
                 have = coverage.covered(name, market, interval, window, symbol=sym)
-                candidates = [d for d in all_sessions if d not in have]
+                candidates = [d for d in all_sessions if d in source_ready and d not in have]
                 for rng in should_request_yfinance(
                     window, primary_covered=primary_covered[sym], sessions=candidates
                 ):
@@ -752,12 +801,8 @@ class DefaultPlanner:
                         PRIORITY_FALLBACK_HISTORY if pre_history else PRIORITY_FALLBACK_GAP,
                     )  # fmt: skip
 
-    def _plan_hourly(self, capable, coverage, window, sessions, symbols, today, latest, emit, notes):
-        """Plan complete US sessions; readiness follows the daily next-day rule.
-
-        This conservative rule also exceeds Alpaca SIP's close + 16 minute delay.
-        Windows never cross a session already covered for every requested symbol.
-        """
+    def _plan_hourly(self, capable, coverage, window, sessions, symbols, today, latest, now, emit, notes):
+        """Plan complete US sessions using each source's declared readiness."""
         if not symbols:
             notes.append(PlanNote("no_universe", "us/1h: no symbols configured; skipped"))
             return
@@ -768,21 +813,39 @@ class DefaultPlanner:
             if name == "twelve_data" and self.include_extended_hours:
                 notes.append(PlanNote("unsupported_options", "us/1h: twelve_data does not support extended hours; skipped"))
                 continue
+            readiness_candidates = xnys.sessions(today - timedelta(days=14), today)
+            if name == "massive":
+                source_ready = [d for d in readiness_candidates if d < today]
+            elif name == "alpaca":
+                source_ready = [
+                    d for d in readiness_candidates
+                    if d < today or now.astimezone(UTC) >= xnys.session_bounds(d)[-1][1] + timedelta(minutes=16)
+                ]
+            elif cap.latency_verified:
+                source_ready = [
+                    d for d in readiness_candidates
+                    if d < today or now.astimezone(UTC) >= xnys.session_bounds(d)[-1][1] + cap.latency
+                ]
+            else:
+                source_ready = [d for d in readiness_candidates if d < today]
+            source_latest = max(source_ready, default=None)
             floor = max(window.start, cap.history_start or window.start,
                         today - cap.rolling_window if cap.rolling_window else window.start)
-            eligible = [d for d in sessions if d >= floor]
+            eligible = [d for d in sessions if d in source_ready and d >= floor]
             groups = defaultdict(list)
             for symbol in symbols:
                 have = coverage.covered(name, Market.US, Interval.H1, window, symbol=symbol)
                 # Complete-session fetches make missing hours genuine no-trade hours.
                 for day in eligible:
+                    if day not in source_ready:
+                        continue
                     if day not in have:
                         groups[day].append(symbol)
             size = 1 if cap.batch is BatchShape.PER_SYMBOL else self._batch_size(name, cap)
             # Without state history, retain old job IDs so existing queued jobs cannot overlap.
             if getattr(coverage, "state", None) is None:
                 for day, syms in groups.items():
-                    kind = JobKind.DAILY if day == latest else JobKind.BACKFILL
+                    kind = JobKind.DAILY if day == source_latest else JobKind.BACKFILL
                     for chunk in _chunks(syms, size):
                         emit(kind, name, chunk, DateRange(day, day),
                              PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
@@ -790,11 +853,14 @@ class DefaultPlanner:
             active = {}
             def flush(chunk):
                 start, end, count = active.pop(chunk)
-                kind = JobKind.DAILY if start == end == latest else JobKind.BACKFILL
+                kind = JobKind.DAILY if start == end == source_latest else JobKind.BACKFILL
                 emit(kind, name, chunk, DateRange(start, end),
                      PRIORITY_DAILY_MULTI if kind is JobKind.DAILY else PRIORITY_BACKFILL_MULTI)
             for day in eligible:
                 chunks = set(_chunks(groups.get(day, []), size))
+                if day == source_latest:
+                    for chunk in list(active):
+                        flush(chunk)
                 for chunk in list(active):
                     start, _, count = active[chunk]
                     limit = max(1, 20000 // (13 * len(chunk))) if name == "alpaca" else (312 if name == "twelve_data" else 366)
