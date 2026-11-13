@@ -31,6 +31,7 @@ http = ["fastapi>=0.110", "uvicorn>=0.29"]
 yfinance = ["yfinance>=0.2"]
 baostock = ["baostock>=0.8"]
 akshare = ["akshare>=1.12"]
+tushare = ["tushare>=1.4"]
 dev = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -55,6 +56,7 @@ binance = "openbars.providers.crypto.binance:BinanceProvider"
 coinbase = "openbars.providers.crypto.coinbase:CoinbaseProvider"
 baostock = "openbars.providers.cn.baostock:BaoStockProvider"
 akshare_ashare = "openbars.providers.cn.akshare:AKShareCNProvider"
+tushare = "openbars.providers.cn.tushare:TushareProvider"
 akshare = "openbars.providers.hk.akshare:AKShareHKProvider"
 futu = "openbars.providers.hk.futu:FutuOpenDProvider"
 longport = "openbars.providers.hk.longport:LongPortProvider"

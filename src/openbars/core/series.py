@@ -69,6 +69,9 @@ BINANCE_ARCHIVE_RAW = SourceIdentity("binance", "archive", "raw")
 COINBASE_EXCHANGE_RAW = SourceIdentity("coinbase", "exchange", "raw")
 # BaoStock A-share daily, unadjusted (adjustflag=3), CN regular session. Not US, not in KNOWN_SOURCES.
 BAOSTOCK_ASHARE_RAW = SourceIdentity("baostock", "ashare", "raw")
+# Tushare A-share daily, unadjusted (``daily``; no qfq/hfq or adj_factor on the free tier).
+# Not US, not in KNOWN_SOURCES.
+TUSHARE_ASHARE_RAW = SourceIdentity("tushare", "ashare", "raw")
 # AKShare HK daily, unadjusted Eastmoney bars. Not US, not in KNOWN_SOURCES.
 AKSHARE_EASTMONEY_RAW = SourceIdentity("akshare", "eastmoney", "raw")
 # AKShare A-share daily backup, unadjusted (adjust=""). Distinct provider id from the HK
@@ -201,6 +204,14 @@ _CATALOG: dict[tuple[SourceIdentity, Interval], dict[str, object]] = {
         adjustment_scope=AdjustmentScope.NONE,
         session_semantics=SessionSemantics.REGULAR,
         volume_basis=VolumeBasis.AS_TRADED,
+    ),
+    # Tushare A-share daily: same stored basis as BaoStock (RAW, CNY, regular XSHG sessions).
+    (TUSHARE_ASHARE_RAW, Interval.D1): dict(
+        price_basis=PriceBasis.RAW,
+        adjustment_scope=AdjustmentScope.NONE,
+        session_semantics=SessionSemantics.REGULAR,
+        volume_basis=VolumeBasis.AS_TRADED,
+        currency="CNY",
     ),
     # Unadjusted HK daily (``Asia/Hong_Kong`` regular / half-day session), volume as traded.
     (YFINANCE_YAHOO_RAW, Interval.D1): dict(

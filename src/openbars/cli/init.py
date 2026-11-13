@@ -70,7 +70,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     available = set()
     for market, names in {"us": {"alpaca", "massive", "yfinance"}, "hk": {"yfinance"},
                           "crypto": {"binance", "coinbase"},
-                          "cn": {"baostock", "akshare_ashare"}}.items():
+                          "cn": {"baostock", "akshare_ashare", "tushare"}}.items():
         if market in markets:
             available.update(names)
     if "us" in markets and "1h" in intervals:
@@ -79,7 +79,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     coverage = {
         ("us", "1d"): {"alpaca", "massive", "yfinance"},
         ("us", "1h"): {"alpaca", "massive", "yfinance", "twelve_data"},
-        ("hk", "1d"): {"yfinance"}, ("cn", "1d"): {"baostock", "akshare_ashare"},
+        ("hk", "1d"): {"yfinance"}, ("cn", "1d"): {"baostock", "akshare_ashare", "tushare"},
         ("crypto", "1d"): {"binance", "coinbase"},
     }
     while True:
@@ -117,7 +117,7 @@ def _wizard(config_src: Path, out: _Writer) -> tuple[bytes, bytes]:
     for start, end, replacement in sorted(edits, reverse=True):
         template = template[:start] + replacement + template[end:]
     keys = {"alpaca": ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"), "massive": ("MASSIVE_API_KEY",),
-            "twelve_data": ("TWELVE_DATA_API_KEY",)}
+            "twelve_data": ("TWELVE_DATA_API_KEY",), "tushare": ("TUSHARE_TOKEN",)}
     lines = ["# Private credentials / 私有凭据；不要提交"]
     for provider in providers:
         for name in keys.get(provider, ()):

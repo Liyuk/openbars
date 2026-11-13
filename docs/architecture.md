@@ -345,6 +345,19 @@ QuotaPolicy
 - **条款**：库为 MIT，但**不转授**上游数据权。东财法律声明禁止未经交易所书面同意复制、传播或散发行情，并禁止对站点施以不成比例的高负载（[声明](https://about.eastmoney.com/home/disclaimer)）；新浪用户条款限制未经许可的抓取与商业使用（[新浪财经](https://finance.sina.com.cn/)）。适配器定位为**低频备源**、本机私存、不再分发；`personal_only=True`、`redistribution_allowed=False`。
 - **编排器接入**：`markets: [cn]`、启用 `providers.akshare_ashare`、`universe.cn.symbols` 即可 `plan` / `run`；与 BaoStock 一样是 `PER_SYMBOL`，规划器对每个启用的 `cn`/`1d` 源分别出任务。A 股规范层仍是**单源投影**（`CnCanonicalSink`，不经过对账器），同一时间建议只启用一个 A 股源，避免同日同一 `instrument_id` 被两个源先后覆盖。
 
+#### 3.5.3c Tushare 免费档 A 股日线（#59）
+
+设计讨论：[#54](https://github.com/Liyuk/openbars/discussions/54)。代码 `openbars.providers.cn.tushare`，入口 `tushare`；源身份 `tushare/ashare/raw`，口径 `raw / none / regular / as_traded`，币种 `CNY`，不属于美股 `KNOWN_SOURCES`。
+
+- **只取免费档能拿到的非复权日线**：调 `pro.daily(ts_code=…, start_date=…, end_date=…)`，固定落库 `RAW`（不复权）；不调用 `pro_bar` 的 `qfq` / `hfq`，也不调用 `adj_factor`。免费档约 120 积分、每分钟 50 次、每天 8,000 次；`QuotaGate` 默认按 50/分钟、8,000/24h、`safety_margin=0.9` 限流，每次请求 1 个 token，`key_scope="per_key"`。
+- **token**：必需，只从配置解析出的值（示例配置为 `${TUSHARE_TOKEN}`）或直接使用时的 `TUSHARE_TOKEN` 环境变量读取；不写入仓库、日志或错误信息。`secret_values()` 返回 token 仅用于 CLI 输出脱敏。缺少 token 抛不可重试的 `tushare_token_missing`。
+- **成交量与成交额**：`daily` 的 `vol` 单位是“手”，适配器换算为“股”（×100，与 BaoStock / AKShare 同口径）；`RawBar.extra` 保留 `volume_lots`、源 `amount`（千元，`amount_unit="thousand_cny"`）、换算后的 `amount_cny`，以及 `pre_close` / `change` / `pct_chg` / `ts_code`。Tushare 不返回停牌占位行，也没有 `tradestatus` / `isST`，适配器不推断这些标记。
+- **symbol**：输入接受 `normalize_cn_symbol` 认得的写法（`sh.600000` / `600000.SH` / `600000.SS` / `SZ000001` …），裸 6 位代码以 `invalid_request` 拒绝；API 调用用 Tushare 的 `600000.SH`，落库 `symbol_as_returned` 统一为 A 股原生的 `sh.600000` / `sz.000001`（与 BaoStock 和规划器覆盖判断一致）。`PER_SYMBOL`，每次一个 symbol，无游标。
+- **日历与解析**：只保留 XSHG 交易日（`openbars.calendars.cn`），非交易日行丢弃；窗口超出 `exchange-calendars` 假期覆盖时以 `invalid_request` 拒绝，不编造会话。价格/成交量从字符串转 `Decimal`，不经 float；`ts_start` 为当日 `00:00 Asia/Shanghai`。行属于另一个 `ts_code`、日期重复或单元格非法时整批 `invalid_payload`。`daily` 单次最多约 6,000 行，能力声明 `max_bars_per_request=6000`。
+- **依赖与测试**：`pip install openbars[tushare]`；模块导入不依赖该包，默认客户端只在取数时懒加载，未安装抛不可重试的 `tushare_not_installed`。测试用注入的假客户端与合成行，默认不打网、不读取真实 token。没有 `fetch_adjust_factors`，A 股 QFQ / HFQ 仍需 BaoStock 因子；A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+- **条款**：Tushare 条款为个人、不可转让、非商业、可撤销许可；公开使用其数据须标注「数据来源：Tushare数据」。`personal_only=True`、`redistribution_allowed=False`，openbars 只做本机私存、不再分发。
+- `config.example.yaml` 中 `providers.tushare` 默认 `enabled: false`，只保留 `${TUSHARE_TOKEN}` 环境变量引用。
+
 #### 3.5.4 yfinance 港股日线编排器（#77）
 
 配置 `markets: [hk]`、启用 `providers.yfinance`（`openbars[yfinance]`）、`universe.hk.symbols`（如 `00700` / `0700.HK`）即可 `plan` / `run`。日历为 XHKG（§3.4.5），日期取 `Asia/Hong_Kong`，只规划交易所交易日，`latest_ready_session` = 当日实际收市 + 30 分钟。规划器没有整市场路径，也不走美股那套 yfinance 回退窗口；yfinance 是港股唯一规划源（`MULTI_SYMBOL`）。同一只股票的多种写法只规划一次；覆盖同时认配置写法、5 位代码、Yahoo ticker 与 `hk:eq:xhkg:…`。`run` 落 raw 后由 `HkCanonicalSink`（`DispatchingSink(hk=…)`，`cli.wiring.make_sink` 已接好）写成 `hk-daily-v1` canonical，**不走美股 XNYS 对账器**；没有 `hk=` 的 `DispatchingSink` 对 HK 只保留 raw。

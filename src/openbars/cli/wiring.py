@@ -31,6 +31,7 @@ _CREDENTIALS: dict[str, dict[str, str]] = {
     "coinbase": {},
     "baostock": {},  # anonymous login: no key (optional extra openbars[baostock])
     "akshare_ashare": {},  # anonymous sites, no key (optional extra openbars[akshare])
+    "tushare": {"token": "token"},  # TUSHARE_TOKEN; free tier, optional extra openbars[tushare]
 }
 
 
@@ -47,6 +48,7 @@ _PROVIDER_MARKETS: dict[str, frozenset[Market]] = {
     "coinbase": frozenset({Market.CRYPTO}),
     "baostock": frozenset({Market.CN}),
     "akshare_ashare": frozenset({Market.CN}),
+    "tushare": frozenset({Market.CN}),
 }
 
 
