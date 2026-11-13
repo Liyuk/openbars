@@ -1,0 +1,20 @@
+{
+  "ticker": "ZZZA",
+  "queryCount": 1,
+  "resultsCount": 1,
+  "adjusted": true,
+  "results": [
+    {
+      "v": 2000,
+      "vw": 12.0,
+      "o": 12.0,
+      "c": 12.5,
+      "h": 13.0,
+      "l": 11.5,
+      "t": 1704171600000,
+      "n": 20
+    }
+  ],
+  "status": "DELAYED",
+  "request_id": "synthetic-request-0100"
+}

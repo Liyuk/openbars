@@ -1,0 +1,41 @@
+[
+  {
+    "ts_code": "600000.SH",
+    "trade_date": "20240102",
+    "open": 10.0,
+    "high": 10.3,
+    "low": 9.9,
+    "close": 10.2,
+    "pre_close": 10.0,
+    "change": 0.2,
+    "pct_chg": 2.0,
+    "vol": 1234.0,
+    "amount": 1287.0
+  },
+  {
+    "ts_code": "600000.SH",
+    "trade_date": "20240103",
+    "open": 10.2,
+    "high": 10.4,
+    "low": 10.1,
+    "close": 10.1,
+    "pre_close": 10.2,
+    "change": -0.1,
+    "pct_chg": -0.98,
+    "vol": 2345.0,
+    "amount": 2405.0
+  },
+  {
+    "ts_code": "600000.SH",
+    "trade_date": "20240104",
+    "open": 10.1,
+    "high": 10.2,
+    "low": 10.0,
+    "close": 10.15,
+    "pre_close": 10.1,
+    "change": 0.05,
+    "pct_chg": 0.5,
+    "vol": 0.0,
+    "amount": 0.0
+  }
+]

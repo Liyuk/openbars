@@ -1,0 +1,17 @@
+{
+  "corporate_actions": {
+    "reverse_splits": [
+      {"symbol": "ZZZA", "new_rate": 1, "old_rate": 4, "process_date": "2024-03-01", "ex_date": "2024-03-01"}
+    ],
+    "name_changes": [
+      {"old_symbol": "TEST1", "new_symbol": "TEST2", "process_date": "2024-03-05"}
+    ],
+    "cash_mergers": [
+      {"acquiree_symbol": "ZZZA", "rate": 3.5, "process_date": "2024-03-10"}
+    ],
+    "rights_issues": [
+      {"symbol": "TEST1", "ex_date": "2024-03-11"}
+    ]
+  },
+  "next_page_token": null
+}

@@ -1,0 +1,159 @@
+# openbars example configuration. `openbars init` writes it as config.yaml (git-ignored).
+# Secrets are referenced as ${ENV_VAR}; never write keys inline.
+#
+# Optional dotenv file (never commit it). Resolution, highest wins:
+#   1. process environment
+#   2. env file (--env-file, else OPENBARS_ENV_FILE, else this key,
+#      else .env next to this file when it exists)
+#   3. ${VAR:-default} below
+# Literal values here are used as written.
+# Runtime home: OPENBARS_HOME (default ~/.openbars). Without --config / --env-file,
+# an existing ./config.yaml keeps the legacy CWD behavior; otherwise config is read
+# from $OPENBARS_HOME/config/config.yaml and omitted storage.path defaults to $OPENBARS_HOME/data.
+# `openbars config` prints the effective settings; secret values are redacted.
+# env_file: .env
+version: 1
+
+# Markets (multi-select): us | crypto | cn | hk
+# US only by default. For crypto set `markets: [crypto]`, enable providers.binance /
+# providers.coinbase below and list pairs in universe.crypto.symbols (no API key needed).
+# For China A-shares set `markets: [cn]`, enable providers.baostock (or the low-frequency
+# backup providers.akshare_ashare, or providers.tushare when you have a token) and list
+# symbols in universe.cn.symbols (e.g. sh.600000 / 600000.SH; bare 6-digit codes are skipped).
+# For Hong Kong set `markets: [hk]`, enable providers.yfinance (the only source the planner
+# uses for HK) and list symbols in universe.hk.symbols. Then plan / run (still off by default).
+markets: [us]
+
+# Intervals (multi-select): 1d (default) | 1h | 30m | 15m | 5m | 1m
+# Non-daily intervals trigger the provider's extra quota rules and the backfill budget check.
+intervals: [1d]
+
+# Backfill history window
+history:
+  start: 2016-01-01        # or "max"
+  end: null                # null = today
+
+universe:
+  us:
+    # Quote tickers that look like keywords or numbers, e.g. "ON", "0001".
+    # Quote tickers like ON or numeric codes, e.g. "ON", "0001".
+    # Explicit symbols (Alpaca / yfinance jobs need them; Massive plans the whole market):
+    # symbols: [TEST1, ZZZA]
+    include: [common_stock, etf]   # adr, preferred, ... optional
+    exclude_otc: true
+  # Crypto (used when markets includes crypto). Write the provider's native symbol:
+  #   Binance:  alphanumeric, e.g. TESTUSDT (sent to binance only)
+  #   Coinbase: BASE-QUOTE product id, e.g. TEST-USDT (sent to coinbase only)
+  # Daily bars are cut at UTC 00:00, weekends are sessions, and the two exchanges are
+  # separate instruments that are never merged.
+  # crypto:
+  #   symbols: [TESTUSDT, TEST-USDT]
+  # China A-shares (used when markets includes cn). Write BaoStock's native `sh.600000` /
+  # `sz.000001`, or `600000.SH` (several spellings of one stock are planned once); dates are
+  # Shanghai time, sessions come from the XSHG calendar, and a day is ready 30 minutes after
+  # the 15:00 close.
+  # cn:
+  #   symbols: [sh.600000, sz.000001]
+
+storage:
+  backend: parquet_duckdb  # parquet_duckdb | postgres
+  # Omit path to use the runtime-home default when this is the automatically selected config.
+  # Existing CWD configs and explicitly selected configs without path retain ./data.
+  postgres:
+    dsn: ${OPENBARS_PG_DSN}
+    mode: native           # native | upstream_compat; compat is for migration and tests only and never migrates upstream tables
+    write: false           # Postgres is read-only unless writes are configured
+    quota: sqlite          # local SQLite for new installs; postgres only to share existing quota tables
+    # the DSN is resolved at runtime only (environment / env file); never commit a real DSN
+
+conventions:
+  adjustment: split        # raw | split | split_dividend | all (derived at read time)
+  us_hourly_alignment: session_open   # session_open (9:30) | clock_hour
+  include_extended_hours: false
+
+providers:
+  alpaca:
+    enabled: true
+    feed: sip              # sip | iex — volumes are never mixed across feeds
+    key_id: ${ALPACA_API_KEY_ID}
+    secret_key: ${ALPACA_API_SECRET_KEY}
+    # Omit quota to use the provider's declared free-tier defaults; you may tighten it here.
+    # Raising it above the default requires an explicit override: true, otherwise it is an error:
+    #   quota: { per_minute: 999, override: true }
+    quota: { per_minute: 190 }
+  massive:
+    enabled: true
+    api_key: ${MASSIVE_API_KEY}
+    quota: { per_minute: 4 }
+  yfinance:
+    enabled: true
+    quota: { per_minute: 30 }
+  twelve_data:             # US hourly only (1h, regular hours); free tier: 8/min, 800 per UTC day
+    enabled: false
+    api_key: ${TWELVE_DATA_API_KEY}
+  alpha_vantage:
+    enabled: false
+    api_key: ${ALPHA_VANTAGE_API_KEY}
+    role: audit            # primary | fallback | audit
+  # Crypto (public market data, no key). Off by default; does not affect a US-only first run.
+  binance:
+    enabled: false
+    base_url: https://data-api.binance.vision
+  coinbase:                # Coinbase Exchange public candles
+    enabled: false
+    base_url: https://api.exchange.coinbase.com
+  # China A-share daily (BaoStock, no token). Off by default; needs `pip install openbars[baostock]`.
+  # Stores unadjusted prices (adjustflag=3) and also fetches adjustment factors and suspension
+  # fields; no official rate limits exist, so the defaults are conservative. Personal local use
+  # only. With `markets: [cn]` + `universe.cn.symbols`: raw rows keep suspension placeholders,
+  # the canonical layer (cn-daily-v1) stores RAW, writes no suspension placeholder and flags
+  # limit moves; forward/backward adjustment (qfq / hfq) is derived from factors at read time.
+  baostock:
+    enabled: false
+  # China A-share daily backup (AKShare, no token). Off by default; needs
+  # `pip install openbars[akshare]`. feed: eastmoney (default, stock_zh_a_hist) | sina
+  # (stock_zh_a_daily). Unadjusted only (adjust=""); Eastmoney returns volume in lots and the
+  # adapter converts to shares, matching BaoStock. The library is MIT but does not relicense
+  # upstream data: Eastmoney forbids redistributing quotes without written exchange consent or
+  # loading the site disproportionately, and Sina restricts unlicensed scraping. Low-frequency
+  # backup only, local private storage, no redistribution. The A-share canonical layer is a
+  # single-source projection, so enable one A-share source at a time.
+  akshare_ashare:
+    enabled: false
+    feed: eastmoney        # eastmoney | sina
+  # China A-share daily (Tushare free tier, token required). Off by default; needs
+  # `pip install openbars[tushare]`. Reference the token through the environment only, never in
+  # plain text: set TUSHARE_TOKEN in .env / the environment. The free tier is about 120 points,
+  # 50 requests/minute and 8000/day and only provides unadjusted daily bars (no qfq/hfq, no
+  # adj_factor). The licence is personal, non-commercial and revocable; public use of its data
+  # must carry Tushare's required attribution. Local private storage only, no redistribution;
+  # the A-share canonical layer is a single-source projection, so enable one A-share source.
+  tushare:
+    enabled: false
+    token: ${TUSHARE_TOKEN}
+
+# Multi-source arbitration: priority per market × interval × field
+reconcile:
+  us:
+    1d:
+      price: [massive, alpaca, yfinance]
+      volume: [alpaca]     # one feed only
+  tolerances:
+    price_rel: 0.005
+    volume_rel: 0.05         # research-daily-v2 defaults: price 0.5%, volume 5% (read by `openbars verify`)
+
+# Collector nodes: local or remote (e.g. A-shares / Hong Kong from a China-based network)
+nodes:
+  - name: local
+    kind: local
+  # - name: cn-node
+  #   kind: remote
+  #   url: https://cn-node.example.com
+  #   token: ${OPENBARS_NODE_TOKEN}
+  #   markets: [cn, hk]
+
+schedule:
+  # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
+  # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
+  daily_at: "00:15"        # in the timezone below
+  timezone: America/New_York

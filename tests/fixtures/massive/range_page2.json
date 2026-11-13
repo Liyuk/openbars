@@ -1,0 +1,30 @@
+{
+  "ticker": "TEST1",
+  "queryCount": 2,
+  "resultsCount": 2,
+  "adjusted": true,
+  "results": [
+    {
+      "v": 4000,
+      "vw": 14.0,
+      "o": 14.0,
+      "c": 14.5,
+      "h": 15.0,
+      "l": 13.5,
+      "t": 1704344400000,
+      "n": 40
+    },
+    {
+      "v": 5000,
+      "vw": 15.0,
+      "o": 15.0,
+      "c": 15.5,
+      "h": 16.0,
+      "l": 14.5,
+      "t": 1704430800000,
+      "n": 50
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0100"
+}

@@ -1,0 +1,27 @@
+[
+  {
+    "id": "TEST-USDT",
+    "base_currency": "TEST",
+    "quote_currency": "USDT",
+    "status": "online",
+    "trading_disabled": false
+  },
+  {
+    "id": "ZZZ-USDT",
+    "base_currency": "ZZZ",
+    "quote_currency": "USDT",
+    "status": "offline",
+    "trading_disabled": false
+  },
+  {
+    "id": "HALT-USDT",
+    "base_currency": "HALT",
+    "quote_currency": "USDT",
+    "status": "online",
+    "trading_disabled": true
+  },
+  {
+    "id": "BARE-USDT",
+    "status": "online"
+  }
+]

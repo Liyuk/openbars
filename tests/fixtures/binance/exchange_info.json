@@ -1,0 +1,33 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1704067200000,
+  "rateLimits": [
+    {"rateLimitType": "REQUEST_WEIGHT", "interval": "MINUTE", "intervalNum": 1, "limit": 6000}
+  ],
+  "symbols": [
+    {
+      "symbol": "TESTUSDT",
+      "status": "TRADING",
+      "baseAsset": "TEST",
+      "quoteAsset": "USDT",
+      "isSpotTradingAllowed": true,
+      "permissions": ["SPOT"]
+    },
+    {
+      "symbol": "ZZZUSDT",
+      "status": "BREAK",
+      "baseAsset": "ZZZ",
+      "quoteAsset": "USDT",
+      "isSpotTradingAllowed": true,
+      "permissions": ["SPOT"]
+    },
+    {
+      "symbol": "MARGINONLYUSDT",
+      "status": "TRADING",
+      "baseAsset": "MARGINONLY",
+      "quoteAsset": "USDT",
+      "isSpotTradingAllowed": false,
+      "permissions": ["MARGIN"]
+    }
+  ]
+}

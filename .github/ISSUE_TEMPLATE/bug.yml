@@ -1,0 +1,27 @@
+name: Bug
+description: Report a defect
+labels: ["bug"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Commands, config snippets (with secrets removed), market / interval / provider
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected versus actual
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: openbars version / Python version / OS / storage backend / collector node
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Logs, `fetch_log` snippets, screenshots. Do not paste API keys or full provider payloads.

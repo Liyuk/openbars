@@ -1,0 +1,5 @@
+ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
+TEST1|Synthetic Holdings Inc. Common Stock|N|TEST1|N|100|N|TEST1
+ZZZC|Synthetic Index Fund ETF|P|ZZZC|Y|100|N|ZZZC
+ZZZD|Synthetic Odd Exchange Corp|X|ZZZD|N|100|N|ZZZD
+File Creation Time: 0101202400:00|||||||

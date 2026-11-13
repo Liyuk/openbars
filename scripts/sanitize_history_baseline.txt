@@ -1,0 +1,6 @@
+# Findings in history that was pushed before the guardrails existed.
+# Format: <short-commit>:<path>:<line>:<rule>. Reported as warnings by --history;
+# `--history --release` ignores this file, so it must be resolved (history rewrite or
+# fresh squashed public root) before the repository goes public.
+913058a:docs/architecture.md:12:private_term
+913058a:docs/architecture.md:308:private_term

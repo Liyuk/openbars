@@ -1,0 +1,383 @@
+"""On-disk schemas for the openbars storage layer (``openbars-storage-v1``).
+
+One definition drives every backend: Arrow/Parquet schemas for the raw, canonical and
+ref layers, the state-table specs (SQLite default, Postgres native), the dedup keys,
+and the SQL type mapping used for DuckDB views and Postgres DDL. See
+docs/architecture.md section 10 for the prose version.
+
+Numbers: prices are ``decimal128(20,8)`` and volumes ``decimal128(28,8)`` everywhere
+(Parquet, DuckDB, Postgres ``NUMERIC``). Nothing is persisted through binary floats.
+
+Schema versioning: ``SCHEMA_VERSION`` is stamped into every Parquet file's key-value
+metadata (``openbars.schema_version``) and into ``state.db`` (``schema_meta``). v1 is the
+first on-disk version; any change to column names, types, keys or partitioning bumps
+it and ships a documented migration (architecture.md section 10.6). Readers refuse files
+stamped with a version newer than ``SCHEMA_VERSION`` (``SchemaVersionError``).
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Mapping
+
+try:
+    import pyarrow as pa
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "openbars.storage.schema needs pyarrow; reinstall openbars"
+    ) from exc
+
+from openbars.storage.state_schema import (  # noqa: F401  (re-exported)
+    FETCH_STATUSES,
+    SCHEMA_VERSION,
+    STATE_TABLES,
+    StateColumn,
+    StateTable,
+    qident,
+    state_ddl,
+)
+
+SCHEMA_NAME = f"openbars-storage-v{SCHEMA_VERSION}"
+METADATA_VERSION_KEY = b"openbars.schema_version"
+METADATA_LAYER_KEY = b"openbars.layer"
+
+DEFAULT_POLICY_VERSION = "research-daily-v2"
+# ``DuckDbBarReader.bars`` default: pick the policy from market / instrument ids (see
+# ``reconcile.crypto.policy_version_for_market``). An explicit policy string always wins.
+AUTO_POLICY_VERSION = "auto"
+UNKNOWN = "unknown"
+
+
+# --- bar-series semantics (string-compatible with the upstream internal implementation) ---
+
+
+class PriceBasis(StrEnum):
+    RAW = "raw"
+    SPLIT_ADJUSTED = "split_adjusted"
+    TOTAL_RETURN_ADJUSTED = "total_return_adjusted"
+    PROVIDER_DEFINED = "provider_defined"
+    UNKNOWN = "unknown"
+
+
+class AdjustmentScope(StrEnum):
+    NONE = "none"
+    SPLITS = "splits"
+    DIVIDENDS = "dividends"
+    SPLITS_AND_DIVIDENDS = "splits_and_dividends"
+    PROVIDER_DEFINED = "provider_defined"
+    UNKNOWN = "unknown"
+
+
+class SessionSemantics(StrEnum):
+    REGULAR = "regular"
+    EXTENDED = "extended"
+    PROVIDER_ALIGNED = "provider_aligned"
+    UTC_DAY = "utc_day"
+    UNKNOWN = "unknown"
+
+
+class VolumeBasis(StrEnum):
+    AS_TRADED = "as_traded"
+    SPLIT_ADJUSTED = "split_adjusted"
+    PROVIDER_DEFINED = "provider_defined"
+    UNKNOWN = "unknown"
+
+
+# --- Arrow types -------------------------------------------------------------------------
+
+PRICE = pa.decimal128(20, 8)
+VOLUME = pa.decimal128(28, 8)
+PRICE_SCALE = 8
+TS = pa.timestamp("us", tz="UTC")
+STR_LIST = pa.list_(pa.string())
+
+
+def _f(name: str, typ: pa.DataType, nullable: bool = False) -> pa.Field:
+    return pa.field(name, typ, nullable=nullable)
+
+
+RAW_BARS_FIELDS = [
+    _f("provider", pa.string()),
+    _f("market", pa.string()),  # partition key duplicated into the file
+    _f("feed", pa.string()),  # "" when the provider has no feed concept
+    _f("adjustment", pa.string()),  # as delivered by the provider; "raw" when unadjusted
+    _f("symbol_as_returned", pa.string()),
+    _f("instrument_id", pa.string(), True),  # null until the symbol is resolved
+    _f("interval", pa.string()),
+    _f("ts_start", TS),
+    _f("session_date", pa.date32()),
+    _f("price_basis", pa.string()),
+    _f("adjustment_scope", pa.string()),
+    _f("adjustment_as_of", pa.date32(), True),
+    _f("session_semantics", pa.string()),
+    _f("currency", pa.string(), True),
+    _f("volume_basis", pa.string()),
+    _f("revision", pa.int32()),
+    _f("open", PRICE),
+    _f("high", PRICE),
+    _f("low", PRICE),
+    _f("close", PRICE),
+    _f("volume", VOLUME, True),  # null = provider sent no volume
+    _f("vwap", PRICE, True),
+    _f("trade_count", pa.int64(), True),
+    _f("fetch_id", pa.string()),
+    _f("source_artifact_ref", pa.string(), True),  # relative path under data/raw-archive
+    _f("ingest_run_id", pa.string(), True),
+    _f("ingested_at", TS),
+]
+
+CANONICAL_BARS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("market", pa.string()),
+    _f("interval", pa.string()),
+    _f("ts_start", TS),
+    _f("session_date", pa.date32()),
+    _f("session", pa.string()),
+    _f("policy_version", pa.string()),
+    _f("provider", pa.string()),
+    _f("feed", pa.string()),
+    _f("adjustment", pa.string()),
+    _f("revision", pa.int32()),
+    _f("open", PRICE),
+    _f("high", PRICE),
+    _f("low", PRICE),
+    _f("close", PRICE),
+    _f("volume", VOLUME, True),
+    _f("vwap", PRICE, True),
+    _f("trade_count", pa.int64(), True),
+    _f("flags", STR_LIST),  # QualityFlag member names, e.g. ["DIVERGENT"]
+    _f("selection_reason", pa.string()),
+    _f("quality_status", pa.string()),
+    _f("capabilities", STR_LIST),
+    _f("source_fingerprint", pa.string()),
+    _f("price_source", pa.string()),
+    _f("volume_source", pa.string(), True),
+    _f("sources_seen", STR_LIST),
+    _f("reconcile_rule", pa.string()),
+    _f("generated_at", TS),
+    # Additive (#154): earliest moment the bar may be used for research (the selected price
+    # source's raw ``ingested_at``, or the upstream source row's ``received_at``). Older files
+    # and pre-#154 Postgres tables lack it and read back as null; ``SCHEMA_VERSION`` stays 1.
+    _f("available_at", TS, True),
+    # Additive freshness tier. Missing/null rows predate tiering and are treated as final.
+    _f("freshness", pa.string(), True),
+    # Additive (#202): the selected source bar's raw ``fetch_id``; old files read back as null.
+    # This is the stable canonical -> raw fetch-batch pointer; it is not a caller foreign key.
+    _f("source_fetch_id", pa.string(), True),
+]
+
+INSTRUMENTS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("market", pa.string()),
+    _f("asset_class", pa.string()),
+    _f("currency", pa.string()),
+    _f("name", pa.string(), True),
+    _f("exchange", pa.string(), True),
+    _f("listed_on", pa.date32(), True),
+    _f("delisted_on", pa.date32(), True),
+    _f("external_ids", pa.map_(pa.string(), pa.string())),
+]
+
+SYMBOL_MAPPINGS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("provider", pa.string()),  # "*" = any provider
+    _f("symbol", pa.string()),
+    _f("valid_from", pa.date32()),
+    _f("valid_to", pa.date32(), True),  # inclusive; null = open ended
+]
+
+# Identity-layer side tables (ref/*.parquet, small): queue of bars / listing rows that could
+# not be mapped to exactly one instrument, per-(instrument, symbol, provider) last sighting,
+# and the optional link from an instrument id to an upstream integer id.
+UNRESOLVED_FIELDS = [
+    _f("kind", pa.string()),  # "bar" | "listing" | "corporate_action"
+    _f("reason_code", pa.string()),
+    _f("symbol", pa.string()),
+    _f("provider", pa.string()),
+    _f("market", pa.string()),
+    _f("session_date", pa.date32(), True),  # bar: the session; corporate_action: the ex-date
+    _f("detail", pa.string(), True),  # corporate_action: the action kind (part of the dedupe key)
+]
+
+SYMBOL_OBSERVATIONS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("symbol", pa.string()),
+    _f("provider", pa.string()),
+    _f("last_observed", pa.date32()),
+]
+
+UPSTREAM_IDS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("upstream_id", pa.int64()),
+]
+
+CORPORATE_ACTIONS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("ex_date", pa.date32()),
+    _f("kind", pa.string()),
+    _f("source", pa.string()),
+    _f("ratio", PRICE, True),
+    _f("amount", PRICE, True),
+    # Additive: older files omit the column; readers use None when missing.
+    _f("currency", pa.string(), True),
+]
+
+# A-share adjust factors (``ref/adjust_factors.parquet``; Postgres native table ``adjust_factors``
+# since #124, outside ``TABLE_SCHEMAS``; additive: a missing file / table
+# is an empty table, so ``SCHEMA_VERSION`` does not change). One row per
+# ``(instrument_id, source, effective_from)``; ``source`` / ``method`` say who computed the
+# factors and how (never mixed for one instrument, see ``normalize.cn_adjust``).
+ADJUST_FACTORS_FIELDS = [
+    _f("instrument_id", pa.string()),
+    _f("source", pa.string()),
+    _f("method", pa.string()),  # e.g. "pct_return" (BaoStock 涨跌幅复权法)
+    _f("effective_from", pa.date32()),  # ex-date: the factors apply from this session on
+    _f("fore_adjust_factor", PRICE),
+    _f("back_adjust_factor", PRICE),
+    _f("adjust_factor", PRICE),
+    _f("symbol", pa.string(), True),
+]
+
+
+def _schema(layer: str, fields: list[pa.Field]) -> pa.Schema:
+    return pa.schema(
+        fields,
+        metadata={
+            METADATA_VERSION_KEY: str(SCHEMA_VERSION).encode(),
+            METADATA_LAYER_KEY: layer.encode(),
+        },
+    )
+
+
+RAW_BARS_SCHEMA = _schema("raw_bars", RAW_BARS_FIELDS)
+
+# The Parquet raw layer's schema: ``RAW_BARS_SCHEMA`` plus one nullable string column ``extra``
+# (#94), a JSON object holding the ``RawBar.extra`` keys that have no column of their own
+# (BaoStock ``tradestatus`` / ``isST`` / ``preclose`` ...). ``RAW_BARS_SCHEMA`` and
+# ``TABLE_SCHEMAS`` stay unchanged. Postgres native stores the same leftovers in a nullable
+# JSONB column ``raw_bars.extra`` (#122), added with ``ADD COLUMN IF NOT EXISTS``; it is not
+# part of ``RAW_BARS_SCHEMA``. ``SCHEMA_VERSION`` stays 1: this is an additive optional
+# column. Parquet files written before #94 simply lack the column and read back with
+# ``extra`` null (``_conform`` / DuckDB ``union_by_name``). Pre-#122 Postgres databases
+# lack the JSONB column until opened with ``write=True``; a read-only open treats it as NULL.
+RAW_BARS_PARQUET_FIELDS = [*RAW_BARS_FIELDS, _f("extra", pa.string(), True)]
+RAW_BARS_PARQUET_SCHEMA = _schema("raw_bars", RAW_BARS_PARQUET_FIELDS)
+CANONICAL_BARS_SCHEMA = _schema("canonical_bars", CANONICAL_BARS_FIELDS)
+INSTRUMENTS_SCHEMA = _schema("instruments", INSTRUMENTS_FIELDS)
+SYMBOL_MAPPINGS_SCHEMA = _schema("symbol_mappings", SYMBOL_MAPPINGS_FIELDS)
+CORPORATE_ACTIONS_SCHEMA = _schema("corporate_actions", CORPORATE_ACTIONS_FIELDS)
+UNRESOLVED_SCHEMA = _schema("unresolved", UNRESOLVED_FIELDS)
+SYMBOL_OBSERVATIONS_SCHEMA = _schema("symbol_observations", SYMBOL_OBSERVATIONS_FIELDS)
+UPSTREAM_IDS_SCHEMA = _schema("upstream_ids", UPSTREAM_IDS_FIELDS)
+ADJUST_FACTORS_SCHEMA = _schema("adjust_factors", ADJUST_FACTORS_FIELDS)
+
+TABLE_SCHEMAS: Mapping[str, pa.Schema] = {
+    "raw_bars": RAW_BARS_SCHEMA,
+    "canonical_bars": CANONICAL_BARS_SCHEMA,
+    "instruments": INSTRUMENTS_SCHEMA,
+    "symbol_mappings": SYMBOL_MAPPINGS_SCHEMA,
+    "corporate_actions": CORPORATE_ACTIONS_SCHEMA,
+}
+
+# Identity-layer side tables: ref/*.parquet in the Parquet layout and native tables in Postgres
+# (same columns; ``TABLE_SCHEMAS`` plus these are the whole native schema).
+REF_IDENTITY_SCHEMAS: Mapping[str, pa.Schema] = {
+    "unresolved": UNRESOLVED_SCHEMA,
+    "symbol_observations": SYMBOL_OBSERVATIONS_SCHEMA,
+    "upstream_ids": UPSTREAM_IDS_SCHEMA,
+}
+
+# Ref tables outside ``TABLE_SCHEMAS`` / ``REF_IDENTITY_SCHEMAS``. ``adjust_factors`` also has a
+# Postgres native table (#124), created and checked separately (``postgres.ADJUST_FACTORS_REQUIRED``).
+REF_PARQUET_SCHEMAS: Mapping[str, pa.Schema] = {"adjust_factors": ADJUST_FACTORS_SCHEMA}
+
+# --- identity / dedup keys ---------------------------------------------------------------
+# Templates use ``{t}`` as a table-alias prefix ("" or "e.") so the same key can be used in
+# window functions and joins. For 1d bars the time component of the key is ``session_date``;
+# for intraday bars it is ``ts_start`` (one trading day holds many intraday bars).
+
+_BAR_DATE = "CASE WHEN {t}\"interval\" = '1d' THEN {t}session_date END"
+_BAR_TS = "CASE WHEN {t}\"interval\" = '1d' THEN NULL ELSE {t}ts_start END"
+
+RAW_KEY_SQL: tuple[str, ...] = (
+    '{t}"market"',
+    '{t}"interval"',
+    "{t}provider",
+    "{t}feed",
+    "{t}adjustment",
+    "{t}revision",
+    "coalesce({t}instrument_id, {t}symbol_as_returned)",
+    _BAR_DATE,
+    _BAR_TS,
+)
+
+CANONICAL_KEY_SQL: tuple[str, ...] = (
+    "{t}instrument_id",
+    '{t}"interval"',
+    "{t}policy_version",
+    _BAR_DATE,
+    _BAR_TS,
+)
+
+# Columns that describe *how* a row arrived, not *what* it says. A re-write that only
+# differs in these is a no-op (it does not create a new part file).
+RAW_LINEAGE_COLUMNS = frozenset({"fetch_id", "source_artifact_ref", "ingest_run_id", "ingested_at"})
+# ``source_fetch_id`` is lineage, not content: re-fetching the same source bar keeps the original
+# id (the raw layer keeps the original ``fetch_id`` for an unchanged row too).
+CANONICAL_LINEAGE_COLUMNS = frozenset({"generated_at", "source_fetch_id"})
+# #154: a stored canonical row is the "same source bar" as an incoming one (so the earlier
+# ``available_at`` is kept) only when all of these match. ``source_fingerprint`` alone is not
+# enough: the daily path fingerprints without a source bar id, so a changed source or a price
+# correction could share it and would otherwise inherit an earlier availability (look-ahead).
+SAME_SOURCE_BAR_COLUMNS: tuple[str, ...] = (
+    "source_fingerprint", "provider", "feed", "adjustment", "price_source", "volume_source",
+    "open", "high", "low", "close", "volume", "vwap", "trade_count",
+)
+
+
+def key_exprs(template: tuple[str, ...], alias: str = "") -> list[str]:
+    prefix = f"{alias}." if alias else ""
+    return [expr.format(t=prefix) for expr in template]
+
+
+# --- type mapping ------------------------------------------------------------------------
+
+
+def duckdb_type(typ: pa.DataType) -> str:
+    if pa.types.is_decimal(typ):
+        return f"DECIMAL({typ.precision},{typ.scale})"
+    if pa.types.is_string(typ):
+        return "VARCHAR"
+    if pa.types.is_date32(typ):
+        return "DATE"
+    if pa.types.is_timestamp(typ):
+        return "TIMESTAMPTZ" if typ.tz else "TIMESTAMP"
+    if pa.types.is_int32(typ):
+        return "INTEGER"
+    if pa.types.is_int64(typ):
+        return "BIGINT"
+    if pa.types.is_list(typ):
+        return duckdb_type(typ.value_type) + "[]"
+    if pa.types.is_map(typ):
+        return f"MAP({duckdb_type(typ.key_type)}, {duckdb_type(typ.item_type)})"
+    raise TypeError(f"unsupported arrow type {typ}")
+
+
+def postgres_type(typ: pa.DataType) -> str:
+    if pa.types.is_decimal(typ):
+        return f"NUMERIC({typ.precision},{typ.scale})"
+    if pa.types.is_string(typ):
+        return "TEXT"
+    if pa.types.is_date32(typ):
+        return "DATE"
+    if pa.types.is_timestamp(typ):
+        return "TIMESTAMPTZ"
+    if pa.types.is_int32(typ):
+        return "INTEGER"
+    if pa.types.is_int64(typ):
+        return "BIGINT"
+    if pa.types.is_list(typ):
+        return postgres_type(typ.value_type) + "[]"
+    if pa.types.is_map(typ):
+        return "JSONB"
+    raise TypeError(f"unsupported arrow type {typ}")

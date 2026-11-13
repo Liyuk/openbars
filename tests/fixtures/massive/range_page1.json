@@ -1,0 +1,31 @@
+{
+  "ticker": "TEST1",
+  "queryCount": 2,
+  "resultsCount": 2,
+  "adjusted": true,
+  "results": [
+    {
+      "v": 2000,
+      "vw": 12.0,
+      "o": 12.0,
+      "c": 12.5,
+      "h": 13.0,
+      "l": 11.5,
+      "t": 1704171600000,
+      "n": 20
+    },
+    {
+      "v": 3000,
+      "vw": 13.0,
+      "o": 13.0,
+      "c": 13.5,
+      "h": 14.0,
+      "l": 12.5,
+      "t": 1704258000000,
+      "n": 30
+    }
+  ],
+  "status": "OK",
+  "request_id": "synthetic-request-0100",
+  "next_url": "https://api.massive.com/v2/aggs/ticker/TEST1/range/1/day/1704326400000/2024-01-05?cursor=synthetic-cursor-1"
+}

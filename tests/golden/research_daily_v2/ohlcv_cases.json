@@ -1,0 +1,26 @@
+{
+  "valid": [
+    {"open": "10.00", "high": "11.00", "low": "9.50", "close": "10.50", "volume": "1000"},
+    {"open": "10.50000000", "high": "10.50000000", "low": "10.50000000", "close": "10.50000000", "volume": "0"},
+    {"open": 1, "high": 2, "low": 1, "close": 2, "volume": 0},
+    {"open": "0.00000001", "high": "0.00000002", "low": "0.00000001", "close": "0.00000002", "volume": null},
+    {"open": "999999999999.99999999", "high": "999999999999.99999999", "low": "1", "close": "5", "volume": "99999999999999999999.99999999"}
+  ],
+  "invalid": [
+    {"why": "high below low", "open": "10", "high": "9", "low": "10", "close": "10", "volume": "1"},
+    {"why": "open above high", "open": "12", "high": "11", "low": "9", "close": "10", "volume": "1"},
+    {"why": "open below low", "open": "8", "high": "11", "low": "9", "close": "10", "volume": "1"},
+    {"why": "close above high", "open": "10", "high": "11", "low": "9", "close": "11.01", "volume": "1"},
+    {"why": "close below low", "open": "10", "high": "11", "low": "9", "close": "8.99", "volume": "1"},
+    {"why": "zero price", "open": "0", "high": "11", "low": "0", "close": "10", "volume": "1"},
+    {"why": "negative price", "open": "-1", "high": "11", "low": "-2", "close": "10", "volume": "1"},
+    {"why": "negative volume", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "-1"},
+    {"why": "price at 1e12", "open": "1000000000000", "high": "1000000000000", "low": "1", "close": "5", "volume": "1"},
+    {"why": "price above 1e12", "open": "10", "high": "2000000000000", "low": "9", "close": "10", "volume": "1"},
+    {"why": "volume at 1e20", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "100000000000000000000"},
+    {"why": "volume above 1e20", "open": "10", "high": "11", "low": "9", "close": "10", "volume": "1e21"},
+    {"why": "too many fractional digits", "open": "10.123456789", "high": "11", "low": "9", "close": "10", "volume": "1"},
+    {"why": "not a number", "open": "abc", "high": "11", "low": "9", "close": "10", "volume": "1"},
+    {"why": "not finite", "open": "NaN", "high": "11", "low": "9", "close": "10", "volume": "1"}
+  ]
+}
