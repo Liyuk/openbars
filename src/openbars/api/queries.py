@@ -1,8 +1,8 @@
-"""Read-only helpers for the local ``openbars serve`` UI.
+"""Read-only query helpers behind ``/api/v1`` (``openbars serve``).
 
 These functions talk to an already-opened ``StorageBackend``. They never plan,
-fetch, or write. Routes under ``/api/v1`` are for this UI only and are not a
-stable public API.
+fetch, or write. The routes they back are the public, self-hosted read API
+documented in ``docs/api.md``.
 """
 
 from __future__ import annotations

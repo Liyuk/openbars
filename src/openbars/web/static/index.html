@@ -3,27 +3,164 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>openbars</title>
+  <title>OpenBars · Observation register</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <header>
-    <div class="brand"><a href="/">openbars</a></div>
-    <nav>
-      <a href="/" data-nav="/" data-i18n="nav.dashboard">Dashboard</a>
-      <a href="/chart" data-nav="/chart" data-i18n="nav.chart">Chart</a>
-      <a href="/flags" data-nav="/flags" data-i18n="nav.flags">Flags</a>
+<!--
+THESIS: OpenBars serve is a station's observation register, not a dashboard of cards or a trading terminal; it shows what is on disk and labels it honestly.
+OWN-WORLD: pale form-stock paper, one teal form ink for all ruling/labels/controls, entry ink for data, pencil for provisional, remark red only for flags and gaps; 1px rules, zero radius, no shadows, hollow-up/solid-down candles on chart paper.
+STORY: the user sees per market whether the latest session is in, pencil or ink, how much was observed, what is flagged, and how much quota is left, then inspects one series with gaps intact.
+FIRST VIEWPORT: masthead band; title + interval control; full-width market register table as focal object; fine-print notes; flags tally and quota side by side.
+FORM: Observation Register, grounded candidate 7/7, seed 497538f3.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+-->
+
+<header class="mast">
+  <div class="mast-in">
+    <a class="word" href="/" data-i18n="brand">OpenBars</a>
+    <nav class="tabs" aria-label="Pages">
+      <a href="/" data-p="dash" data-i18n="nav.dashboard">Dashboard</a>
+      <a href="/chart" data-p="chart" data-i18n="nav.chart">Chart</a>
+      <a href="/flags" data-p="flags" data-i18n="nav.flags">Flags</a>
     </nav>
-    <span class="readonly" data-i18n="header.readonly">Local read-only UI. Not a public API.</span>
-    <button class="lang" id="lang-toggle" type="button" aria-label="Switch language">中文</button>
-  </header>
-  <main id="app">
-    <p class="lede">Local read-only UI. 本机只读界面。</p>
-  </main>
-  <footer>
-    <p data-i18n="footer.api">Routes under /api/v1 are for this local UI only and are not a stable public API.</p>
-  </footer>
-  <script src="/assets/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/assets/app.js"></script>
+    <div class="station" title="Shows data already on disk. Never fetches or writes." data-i18n-title="header.station_title"><i class="dot" aria-hidden="true"></i><b class="host" id="host-addr">127.0.0.1:8787</b><span data-i18n="header.readonly">read-only</span></div>
+    <button class="lang" type="button" aria-label="Switch language" id="lang-toggle">中文</button>
+  </div>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <div id="p-dash">
+    <div class="head">
+      <div><h1 data-i18n="dash.title">Observation register</h1><p class="lede" data-i18n="dash.lede">What is stored on disk, per market. This page never fetches or writes.</p></div>
+      <div class="ctl"><span class="lbl" id="iv1" data-i18n="interval.label">Interval</span>
+        <div class="seg" role="radiogroup" aria-labelledby="iv1"><label><input type="radio" name="iv1" value="1d" checked><span>1d</span></label><label><input type="radio" name="iv1" value="1h"><span>1h</span></label></div></div>
+    </div>
+    <table class="reg" id="market-table">
+      <caption class="sr">Stored data per market</caption>
+      <thead><tr><th scope="col" data-i18n="dash.market">Market</th><th scope="col" data-i18n="dash.session">Latest session</th><th scope="col" data-i18n="dash.freshness">Freshness<sup>1</sup></th><th scope="col" data-i18n="dash.available_at">Available at</th><th scope="col" class="num" data-i18n="dash.observed">Observed<sup>2</sup></th><th scope="col" class="num" data-i18n="dash.bars_count">Bars</th><th scope="col" class="num" data-i18n="dash.instruments">Instr.</th><th scope="col" data-i18n="dash.range">Range</th><th scope="col" class="num" data-i18n="dash.flags_count">Flags</th></tr></thead>
+      <tbody id="market-rows"></tbody>
+    </table>
+    <ol class="fine">
+      <li><sup>1</sup> <span data-i18n="dash.note_freshness">Freshness: provisional rows may later be replaced by final rows. Freshness is not a quality flag.</span></li>
+      <li><sup>2</sup> <span data-i18n="dash.note_coverage">Observed: instruments with a row for the latest session. Not a completeness guarantee.</span></li>
+    </ol>
+
+    <div class="split">
+      <section>
+        <h2 data-i18n="dash.flags_section">Quality flags</h2>
+        <table class="tally" id="flags-tally"><tbody></tbody></table>
+        <p class="after"><a href="/flags" data-i18n="dash.open_flags">Open flags register ›</a></p>
+      </section>
+      <section style="margin-top:0">
+        <h2 data-i18n="dash.quota_section">Quota</h2>
+        <table class="reg" id="quota-table">
+          <thead><tr><th scope="col" data-i18n="dash.provider">Provider</th><th scope="col" data-i18n="dash.used">Used</th><th scope="col" data-i18n="dash.remaining">Remaining</th><th scope="col" data-i18n="dash.penalized">Penalized until</th></tr></thead>
+          <tbody id="quota-rows"></tbody>
+        </table>
+        <p class="after pencil" data-i18n="dash.quota_note">Counts from the local quota store. Keys are never shown.</p>
+      </section>
+    </div>
+  </div>
+
+  <!-- CHART -->
+  <div id="p-chart" hidden>
+    <div class="head"><div><h1 data-i18n="chart.title">Chart</h1><p class="lede" data-i18n="chart.lede">Canonical bars by default. Switch the source to inspect one provider's raw bars; missing sessions stay as gaps.</p></div></div>
+    <form class="query" id="chart-form" onsubmit="return false">
+      <label class="field"><span class="lbl" data-i18n="chart.symbol">Symbol or id</span><input id="chart-q" placeholder="TEST1" autocomplete="off"></label>
+      <label class="field"><span class="lbl" data-i18n="chart.source">Source</span><select id="chart-source"><option>canonical</option></select></label>
+      <div class="field"><span class="lbl" id="iv2" data-i18n="interval.label">Interval</span><div class="seg" role="radiogroup" aria-labelledby="iv2"><label><input type="radio" name="iv2" value="1d" checked><span>1d</span></label><label><input type="radio" name="iv2" value="1h"><span>1h</span></label></div></div>
+      <label class="field"><span class="lbl" data-i18n="chart.start">Start</span><input type="date" id="chart-start"></label>
+      <label class="field"><span class="lbl" data-i18n="chart.end">End</span><input type="date" id="chart-end"></label>
+      <button class="btn" type="submit" data-i18n="chart.load">Load</button>
+    </form>
+    <div class="record" id="chart-record"></div>
+    <div class="sheet">
+      <div id="chart" role="img"></div>
+      <aside class="slip" aria-live="polite">
+        <h3><span data-i18n="chart.reading">Reading</span><span id="s-date">—</span></h3>
+        <dl>
+          <dt>O</dt><dd id="s-o">—</dd><dt>H</dt><dd id="s-h">—</dd>
+          <dt>L</dt><dd id="s-l">—</dd><dt>C</dt><dd id="s-c">—</dd>
+          <dt>V</dt><dd id="s-v">—</dd>
+        </dl>
+        <div class="row" id="s-fr"></div>
+        <div class="row"><span class="lbl" data-i18n="chart.available_at">Available at</span><div id="s-av">—</div></div>
+        <div class="row"><span class="lbl" data-i18n="chart.flags">Flags</span><div id="s-fl">—</div></div>
+        <p class="fine" data-i18n="chart.tier_note">Provisional is not final. Freshness is separate from quality flags and coverage.</p>
+      </aside>
+    </div>
+    <section class="remarks" id="chart-remarks" hidden>
+      <h2 data-i18n="chart.remarks">Remarks</h2>
+    </section>
+    <details class="bar-table-container" id="bar-table-daily" open hidden>
+      <summary>
+        <span data-i18n="chart.bars_daily_table">Daily bars</span>
+      </summary>
+      <table class="reg" id="daily-bars-table">
+        <caption class="sr" data-i18n="chart.bars_daily_caption">Loaded daily bars data</caption>
+        <thead>
+          <tr>
+            <th scope="col" data-i18n="chart.bars_date">Date</th>
+            <th scope="col" data-i18n="chart.bars_open">O</th>
+            <th scope="col" data-i18n="chart.bars_high">H</th>
+            <th scope="col" data-i18n="chart.bars_low">L</th>
+            <th scope="col" data-i18n="chart.bars_close">C</th>
+            <th scope="col" class="num" data-i18n="chart.bars_volume">V</th>
+            <th scope="col" data-i18n="chart.bars_freshness">Freshness</th>
+            <th scope="col" data-i18n="chart.bars_flags">Flags</th>
+          </tr>
+        </thead>
+        <tbody id="daily-bars-rows"></tbody>
+      </table>
+    </details>
+    <details class="bar-table-container" id="bar-table-hourly" hidden>
+      <summary>
+        <span data-i18n="chart.bars_hourly_table">Hourly bars (New York time)</span>
+      </summary>
+      <table class="reg" id="hourly-bars-table">
+        <caption class="sr" data-i18n="chart.bars_hourly_caption">Loaded hourly bars data in New York time</caption>
+        <thead>
+          <tr>
+            <th scope="col" data-i18n="chart.bars_time_ny">Time NY</th>
+            <th scope="col" data-i18n="chart.bars_session">Session</th>
+            <th scope="col" data-i18n="chart.bars_open">O</th>
+            <th scope="col" data-i18n="chart.bars_high">H</th>
+            <th scope="col" data-i18n="chart.bars_low">L</th>
+            <th scope="col" data-i18n="chart.bars_close">C</th>
+            <th scope="col" class="num" data-i18n="chart.bars_volume">V</th>
+            <th scope="col" data-i18n="chart.bars_flags">Flags</th>
+          </tr>
+        </thead>
+        <tbody id="hourly-bars-rows"></tbody>
+      </table>
+    </details>
+  </div>
+
+  <!-- FLAGS -->
+  <div id="p-flags" hidden>
+    <div class="head">
+      <div><h1 data-i18n="flags.title">Quality flags</h1><p class="lede" data-i18n="flags.lede">Canonical bars carrying a quality flag. Read-only.</p></div>
+      <div class="ctl"><span class="lbl" id="iv3" data-i18n="interval.label">Interval</span><div class="seg" role="radiogroup" aria-labelledby="iv3"><label><input type="radio" name="iv3" value="1d" checked><span>1d</span></label><label><input type="radio" name="iv3" value="1h"><span>1h</span></label></div></div>
+    </div>
+    <div class="chips" id="flag-chips"></div>
+    <table class="reg" id="flags-table">
+      <caption class="sr">Flagged canonical bars</caption>
+      <thead><tr><th scope="col" data-i18n="flags.session">Session</th><th scope="col" data-i18n="flags.market">Market</th><th scope="col" data-i18n="flags.symbol">Symbol</th><th scope="col" data-i18n="flags.instrument">Instrument</th><th scope="col" data-i18n="flags.names">Flags</th></tr></thead>
+      <tbody id="flag-rows"></tbody>
+    </table>
+    <div class="pager" id="flag-pager"></div>
+  </div>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <p data-i18n="footer.api">/api/v1 is a self-hosted API: you deploy it and you own it; there is no hosted service. Bound to this machine by default.</p>
+  </div>
+</footer>
+
+<script src="/assets/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/assets/app.js"></script>
 </body>
 </html>

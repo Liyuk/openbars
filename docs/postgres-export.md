@@ -9,10 +9,8 @@ nothing in `plan` / `run` uses it, the extra is optional, and the command is a d
 The exporter is deliberately caller-agnostic. It knows no caller table names, writes no
 caller foreign keys (no integer upstream instrument ids, no caller artifact / run ids) and
 never runs DDL. If you need *your own* official tables with your own provenance columns,
-write an adapter on your side that reads openbars data (Parquet, `BarReader`, or a table this
+write an adapter on your side that reads OpenBars data (Parquet, `BarReader`, or a table this
 exporter filled) and maps it into your schema. Do not point this exporter at those tables.
-
-中文摘要见文末。
 
 ## Usage
 
@@ -136,22 +134,6 @@ identifier of a source row, not a caller foreign key. Trace a bar back to its fe
 
 ## What is not supported
 
-Earlier revisions of this plugin could target a caller-specific "daily bar" / "research daily
-bar" table layout and remap instrument ids through a CSV. Those layouts wrote caller
-provenance foreign keys as `NULL` and are **no longer supported**: `--table-layout` and
-`--mapping` were removed, and the only target is the generic layout above. Callers that need
-their own official tables build an adapter instead (see the first section).
-
-## 中文摘要
-
-`openbars export-postgres` 是**参考实现**，不是默认写入路径：可选 extra、默认 dry-run、
-`--apply` 才连接写入；窗口由 `--since` / `--days` 指定；幂等 upsert；不执行 DDL；不写任何身份表；
-不填调用方外键。目标表是本文档的通用结构（K 线 + 来源信息：数据源、抓取批次、临时/正式、可得时间），
-默认表名 `openbars_bars`，主键与 canonical 去重键相同，所以重跑行数与主键不变。
-`instrument_id` 用 openbars 自己的字符串 id，不做调用方整数 id 映射；`selected_source_bar_id` 是
-openbars 内部来源行标识，不导出。来源信息里数据源列总有值；抓取批次用 canonical 的 `source_fetch_id`
-（选中源 bar 的 raw `fetch_id`，通用契约里的稳定指针），旧文件缺列时留空，导出器不臆造；
-`freshness` 只写 `provisional` / `final`，缺列按 openbars 全仓口径写 `final`；`available_at` 未知时留空，
-做时点过滤的调用方要按「空即不可用」处理。
-需要自己的官方表 + 溯源列的调用方，请在自己那边做适配器读 openbars 数据，不要指望本插件直写官方表。
-旧的调用方专用表布局（`--table-layout` / `--mapping`）已删除、不再支持。
+The plugin writes only the generic `openbars_bars` layout described above. It does not target
+caller-owned official tables, remap identifiers, or fill caller foreign keys. Callers that
+need their own schema should write an adapter (see the first section).

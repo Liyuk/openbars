@@ -21,10 +21,10 @@ LIST_LIMIT = 50
 
 
 def register(sub: Any, common: Callable[[argparse.ArgumentParser], None]) -> None:
-    jobs = sub.add_parser("jobs", help="job maintenance: `jobs retry` re-queues dead / failed jobs / 重试死信作业")
+    jobs = sub.add_parser("jobs", help="job maintenance: `jobs retry` re-queues dead or failed jobs")
     common(jobs)
     actions = jobs.add_subparsers(dest="jobs_action")
-    retry = actions.add_parser("retry", help="put dead (default) or failed jobs back to pending / 死信作业重新入队")
+    retry = actions.add_parser("retry", help="put dead (default) or failed jobs back to pending")
     common(retry)
     retry.add_argument("--dead", action="store_true", help="retry dead jobs (default when neither flag is given)")
     retry.add_argument("--failed", action="store_true", help="retry failed jobs now instead of at their retry_at")

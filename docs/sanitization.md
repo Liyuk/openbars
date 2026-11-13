@@ -1,58 +1,67 @@
-# 脱敏规则与发布前检查清单
+# Sanitization rules and pre-release checklist
 
-openbars 的数据层代码来自一套**上游内部实现**（下称 upstream），按“以 upstream 为主搬运 + 脱敏”的方式进入本仓库。仓库目前私有，计划转为公开。本文件规定哪些内容不能进入仓库、怎么处理，以及转公开前必须跑完的检查。
+This repository is prepared for public release, so everything that lands in it — code, docs,
+tests, commit messages, issues and PR text — must be safe to publish. This file defines what
+must never enter the repository, how to handle it, and the checks that must pass before a
+release.
 
-## 1. 护栏一览
+## 1. Guardrails
 
-| 护栏 | 位置 | 何时运行 | 检查什么 |
+| Guardrail | Location | When it runs | What it checks |
 | --- | --- | --- | --- |
-| gitleaks | `.gitleaks.toml` | pre-commit、本地 `scripts/check.sh`（全历史 + 工作区） | 默认规则 + 行情源凭据（Alpaca、Massive/Polygon、Twelve Data、Alpha Vantage、Tushare、Binance/OKX 等）、URL 中的 `apikey=` |
-| 禁词检查 | `scripts/check_sanitized.py` | pre-commit、本地 `scripts/check.sh`（工作区 + 全历史）、手动 `--stdin` | 本机 home 路径、私有目录、内网/overlay 网络地址与域名、个人邮箱、疑似凭据赋值、私有词（哈希） |
-| 数据文件拦截 | `.pre-commit-config.yaml` | pre-commit | 拒绝提交 parquet / duckdb / sqlite 等数据文件 |
-| `.gitignore` | 仓库根 | 始终 | `.env*`、`config.yaml`、`data/` 不入库 |
+| gitleaks | `.gitleaks.toml` | pre-commit, local `scripts/check.sh` (full history + working tree) | default rules plus market-data provider credentials (Alpaca, Massive/Polygon, Twelve Data, Alpha Vantage, Tushare, Binance/OKX, etc.) and `apikey=` in URLs |
+| Sanitization check | `scripts/check_sanitized.py` | pre-commit, local `scripts/check.sh` (working tree + full history), manual `--stdin` | local home paths, private directories, internal/overlay network addresses and domains, personal email addresses, credential-looking assignments, private terms (hashed) |
+| Data-file block | `.pre-commit-config.yaml` | pre-commit | refuses to commit parquet / duckdb / sqlite and similar data files |
+| `.gitignore` | repository root | always | `.env*`, `config.yaml`, `data/` stay out of git |
 
-私有词（内部包名、产品名、主机名、用户名等）**只以加盐 SHA-256 哈希**存放在 `scripts/sanitize_hashes.txt`，禁词表本身不泄露这些词。维护者可在仓库外放一份明文清单，并用环境变量 `OPENBARS_PRIVATE_DENYLIST` 指向它作为补充；新增私有词：
+Private terms (unrelated product names, hostnames, user names, ticket prefixes, etc.) are stored
+only as **salted SHA-256 hashes** in `scripts/sanitize_hashes.txt`, so the denylist itself does
+not disclose them. Maintainers may keep an additional plaintext list outside the repository and
+point the `OPENBARS_PRIVATE_DENYLIST` environment variable at it as a supplement. To add a
+private term:
 
 ```bash
-echo "新词" | python3 scripts/check_sanitized.py --hash-term >> scripts/sanitize_hashes.txt
+echo "new term" | python3 scripts/check_sanitized.py --hash-term >> scripts/sanitize_hashes.txt
 ```
 
-检查只输出“文件:行号: 规则名”，不打印命中的值。
+The check prints only `file:line: rule`; it never prints the matched value.
 
-## 2. 处理规则
+## 2. Handling rules
 
-| 类别 | 例子（描述，不写实值） | 规则 |
+| Category | Examples (described, never literal) | Rule |
 | --- | --- | --- |
-| 密钥 / token | provider API key、secret、数据库口令 | 一律走环境变量或 `.env`（不入库）；代码中只出现变量名；`config.example.yaml` / `.env.example` 只放空值或 `${VAR}` 占位。解析优先级（高者覆盖）：进程环境，然后 dotenv（`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`），然后 `${VAR:-default}`。`openbars config` 查看生效配置时，所有密钥只显示 `set` / `missing`。日志与错误信息中的凭据按 upstream 做法在落盘前替换为 `[REDACTED]` |
-| SEC 等要求的 User-Agent | 带联系邮箱的 UA | 不设默认值；由用户在配置中填写，缺失时报错。文档示例用 `example.com` 域名 |
-| 个人邮箱 | 提交作者邮箱、注释中的邮箱 | 文件中禁止；提交作者邮箱使用 GitHub noreply 地址（转公开前用 `--strict-authors` 检查，见 §4） |
-| 本机路径 | 用户 home 目录、`~/Documents` 等 | 一律改为相对路径或配置项（如 `data_dir`）；示例用 `./data` |
-| 内部主机 / IP | overlay 网络地址与域名、内网 IP、内部机器别名 | 删除；远程节点地址只能来自用户配置 |
-| 付费套餐信息 | 维护者自己订阅了哪个档位 | 不写。provider 的**公开免费档**名称与限额可以写，但须附官方文档链接，并作为可覆盖的默认值 |
-| 计费 / 权限模块 | upstream 的用户计划、额度计费、权限生成代码 | 不搬运，也不保留引用 |
-| 内部编号与私人注释 | upstream 的 issue / PR / Discussion 编号、内部数据统计、人名、聊天内容 | 改成中性的技术描述（写“为什么”，不写“哪个内部单子”）。openbars 自己的 issue 编号可以引用 |
-| 策略 / 产品名 | upstream 的产品名、策略名、扫描/回测/提醒等业务概念 | 不搬运；残留的命名改为中性名（如 `research` → `canonical`，只在兼容层保留与 upstream 一致的口径字符串） |
-| 硬编码股票池 | 指数成分、基准 ETF 列表、内部关注列表 | 代码中不写死；默认股票池来自 provider 的全市场清单 + 用户配置。测试只用合成代码（如 `TEST1`、`ZZZA`） |
-| 真实行情数据 | 抓包得到的 provider 响应、导出的 bar | 不入库（含测试夹具）。测试夹具一律合成，字段形状参考官方文档 |
-| upstream 内部对照表 | 模块路径、私有仓库名与 openbars 的对照 | 放在仓库外的私有笔记中，不进入本仓库、issue、PR 或 Discussion |
+| Keys / tokens | provider API keys, secrets, database passwords | Always use environment variables or `.env` (not committed); code contains only variable names; `config.example.yaml` / `.env.example` contain empty values or `${VAR}` placeholders only. Resolution priority (highest wins): process environment, then dotenv (`--env-file`, else `OPENBARS_ENV_FILE`, else `config.yaml`'s `env_file`), then `${VAR:-default}`. `openbars config` shows only `set` / `missing` for secrets. Credentials in logs and error messages are replaced with `[REDACTED]` before they are written. |
+| User-Agent required by SEC etc. | UA with a contact email | No default; the user supplies it in config and a missing value is an error. Documentation examples use the `example.com` domain. |
+| Personal email | commit author email, email in comments | Forbidden in files; commit authors use a GitHub noreply address (run `--strict-authors` before going public; see §4). |
+| Local paths | user home directory, private document folders | Replace with a relative path or a config option (such as `data_dir`); examples use `./data`. |
+| Internal hosts / IPs | overlay network addresses and domains, private IPs, internal machine aliases | Remove them; remote node addresses may only come from user configuration. |
+| Paid-plan information | which tier the maintainer subscribes to | Do not write it. Public **free-tier** names and limits may be documented with official links, as overridable defaults. |
+| Unrelated private business code | billing, entitlements / permission logic, internal workflow IDs, internal ticket numbers | Do not commit or reference it. Write the "why" as a neutral technical description; OpenBars' own issue numbers are fine. |
+| Third-party product names | other platforms' product, strategy or workflow names | Do not copy them in; use neutral technical names (for example `research` → `canonical`, keeping the OpenBars policy version strings as they are). |
+| Hard-coded symbol universes | index constituents, benchmark ETF lists, watchlists | Do not hard-code them; the default universe comes from the provider's whole-market listing plus user configuration. Tests use synthetic symbols only (such as `TEST1`, `ZZZA`). |
+| Real market data | captured provider responses, exported bars | Never commit them (including test fixtures). Fixtures are synthetic and follow the shape of the official documentation. |
 
-## 3. 日常流程
+## 3. Daily workflow
 
-日常一键检查在仓库根目录执行 `./scripts/check.sh`：依次跑 `uv run pytest`、`uv run python scripts/check_sanitized.py`（工作区 + `--history` 全历史）和 gitleaks（全历史 + 工作区，用 `.gitleaks.toml`）。本机有 `gitleaks` 就直接用，否则用 Docker 镜像 `zricethezav/gitleaks:v8.30.1`。仓库仍保留 `.github/workflows/ci.yml`，但触发器只有 `workflow_dispatch`，不会在 push / PR 时自动跑，以免消耗付费 GitHub Actions 分钟数。日常不要依赖 Actions。
+The one-shot check runs at the repository root as `./scripts/check.sh`: it runs `uv run pytest`,
+`uv run python scripts/check_sanitized.py` (working tree + `--history`), and gitleaks (full
+history + working tree, using `.gitleaks.toml`). If `gitleaks` is installed locally it is used
+directly; otherwise the Docker image `zricethezav/gitleaks:v8.30.1` is used. The repository keeps
+`.github/workflows/ci.yml`, but its only trigger is `workflow_dispatch`, so it does not run on
+push / PR and does not consume paid GitHub Actions minutes. Do not rely on Actions day to day.
 
-1. 安装钩子（可选）：`pipx install pre-commit && pre-commit install && pre-commit install --hook-types pre-push`（本机需有 Go 以构建 gitleaks 钩子，或自行安装 gitleaks 后改用 `language: system`）。pre-push 钩子会调用 `scripts/check.sh`。
-2. 搬运 upstream 代码时，先在私有笔记中登记来源，再按 §2 逐条处理，PR 描述只写功能来源（“沿用上游内部实现的 X 逻辑”）。
-3. 发 issue / PR / Discussion 正文前：`pbpaste | python3 scripts/check_sanitized.py --stdin`。
-4. 合并前必须本地跑通 `./scripts/check.sh`。GitHub Actions 仅可手动触发，日常不使用。
+1. Optionally install the hooks: `pipx install pre-commit && pre-commit install && pre-commit install --hook-types pre-push` (the machine needs Go to build the gitleaks hook, or install gitleaks yourself and switch the hook to `language: system`). The pre-push hook calls `scripts/check.sh`.
+2. Before posting an issue / PR / Discussion body: `pbpaste | python3 scripts/check_sanitized.py --stdin`.
+3. `./scripts/check.sh` must pass locally before merging. GitHub Actions may only be triggered manually and is not used day to day.
 
-## 4. 转公开前检查清单
+## 4. Pre-publication checklist
 
-- [ ] `python3 scripts/check_sanitized.py` 通过（工作区）。
-- [ ] `python3 scripts/check_sanitized.py --history --release` 通过（全部历史、提交信息、作者邮箱；不使用基线）。`scripts/sanitize_history_baseline.txt` 记录了护栏建立前已推送历史中的已知问题，日常 `--history` 只把它们报为警告；转公开前必须清零：重写历史，或以一个全新的 squash 提交作为公开仓库的起点。
-- [ ] `gitleaks git --config .gitleaks.toml --redact -v .` 与 `gitleaks dir --config .gitleaks.toml --redact -v .` 均无发现。
-- [ ] 所有 issue、PR、Discussion 正文与评论用 `--stdin` 检查过；无 upstream 路径、包名、仓库名、内部编号。
-- [ ] **编辑历史**：GitHub 会保留 issue / PR / Discussion 正文与评论的历史版本，有读权限的人都能看到。脱敏前写过内部信息的条目，需在网页“edited”下拉中逐条删除旧版本（或关闭后新建干净的条目）。
-- [ ] 仓库中无数据文件、无真实 provider 响应；测试夹具均为合成数据。
-- [ ] README 中的 provider 条款说明完整：openbars 不分发数据，用户自带 key，遵守各源条款。
-- [ ] GitHub 仓库设置：开启 secret scanning 与 push protection；如手动触发 Actions，其中不配置任何 secret。
-- [ ] 维护者复核 `scripts/sanitize_hashes.txt` 覆盖了当前全部私有词。
+- [ ] `python3 scripts/check_sanitized.py` passes (working tree).
+- [ ] `python3 scripts/check_sanitized.py --history --release` passes (all history, commit messages, author emails; no baseline). `scripts/sanitize_history_baseline.txt` records known issues in history that was pushed before the guardrails existed; the daily `--history` run reports them as warnings only. They must be zero before going public; how to clear them (and whether to start the public repository from a fresh commit) is a separate maintainer decision — do not rewrite published history as part of ordinary work.
+- [ ] `gitleaks git --config .gitleaks.toml --redact -v .` and `gitleaks dir --config .gitleaks.toml --redact -v .` both report no findings.
+- [ ] Every issue, PR and Discussion body and comment has been checked with `--stdin`; no home paths, package names, repository names or internal ticket numbers.
+- [ ] **Edit history**: GitHub keeps previous versions of issue / PR / Discussion bodies and comments, visible to anyone with read access. Items written before sanitization that still contain private information must be cleaned up (their old versions removed, or the item closed and recreated cleanly) before the repository goes public.
+- [ ] The repository contains no data files and no real provider responses; all test fixtures are synthetic.
+- [ ] The README's provider-terms section is complete: OpenBars does not distribute data, users bring their own keys, and users follow each provider's terms.
+- [ ] GitHub repository settings: enable secret scanning and push protection; if Actions is triggered manually, it must not be configured with any secret.
+- [ ] The maintainer has reviewed `scripts/sanitize_hashes.txt` and confirmed it covers all current private terms.

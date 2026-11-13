@@ -14,41 +14,44 @@
 # env_file: .env
 version: 1
 
-# 选择市场（多选）: us | crypto | cn | hk
-# 默认只跑美股。改用加密货币：`markets: [crypto]`，再把下方 providers.binance / providers.coinbase
-# 设为 enabled: true，并在 universe.crypto.symbols 写交易对即可（无需 API key）。
-# 改用 A 股：`markets: [cn]`，启用 providers.baostock（或低频备源 providers.akshare_ashare，
-# 或有 token 时的 providers.tushare），并在 universe.cn.symbols 写代码
-# 改用港股：`markets: [hk]`，启用 providers.yfinance（规划器只用这一源），并在 universe.hk.symbols 写代码
-# （如 sh.600000 / 600000.SH；裸 6 位代码会被跳过）即可 plan / run（默认仍关闭）。
+# Markets (multi-select): us | crypto | cn | hk
+# US only by default. For crypto set `markets: [crypto]`, enable providers.binance /
+# providers.coinbase below and list pairs in universe.crypto.symbols (no API key needed).
+# For China A-shares set `markets: [cn]`, enable providers.baostock (or the low-frequency
+# backup providers.akshare_ashare, or providers.tushare when you have a token) and list
+# symbols in universe.cn.symbols (e.g. sh.600000 / 600000.SH; bare 6-digit codes are skipped).
+# For Hong Kong set `markets: [hk]`, enable providers.yfinance (the only source the planner
+# uses for HK) and list symbols in universe.hk.symbols. Then plan / run (still off by default).
 markets: [us]
 
-# 选择粒度（多选）: 1d (default) | 1h | 30m | 15m | 5m | 1m
-# 非日线粒度会触发对应 provider 的额外限额规则与回补预算检查。
+# Intervals (multi-select): 1d (default) | 1h | 30m | 15m | 5m | 1m
+# Non-daily intervals trigger the provider's extra quota rules and the backfill budget check.
 intervals: [1d]
 
-# 历史回补范围
+# Backfill history window
 history:
   start: 2016-01-01        # or "max"
   end: null                # null = today
 
 universe:
   us:
-    # 类似 ON 或数字的代码请加引号，如 "ON"、"0001"。
+    # Quote tickers that look like keywords or numbers, e.g. "ON", "0001".
     # Quote tickers like ON or numeric codes, e.g. "ON", "0001".
     # Explicit symbols (Alpaca / yfinance jobs need them; Massive plans the whole market):
     # symbols: [TEST1, ZZZA]
-    include: [common_stock, etf]   # adr, preferred, ... 可选
+    include: [common_stock, etf]   # adr, preferred, ... optional
     exclude_otc: true
-  # 加密货币（markets 含 crypto 时生效）。按 provider 的原生 symbol 书写：
-  #   Binance:  字母数字，如 TESTUSDT（只发给 binance）
-  #   Coinbase: BASE-QUOTE 产品 id，如 TEST-USDT（只发给 coinbase）
-  # 日线按 UTC 00:00 切日，周末也是交易日；两家交易所是两个独立 instrument，不合并。
+  # Crypto (used when markets includes crypto). Write the provider's native symbol:
+  #   Binance:  alphanumeric, e.g. TESTUSDT (sent to binance only)
+  #   Coinbase: BASE-QUOTE product id, e.g. TEST-USDT (sent to coinbase only)
+  # Daily bars are cut at UTC 00:00, weekends are sessions, and the two exchanges are
+  # separate instruments that are never merged.
   # crypto:
   #   symbols: [TESTUSDT, TEST-USDT]
-  # A 股（markets 含 cn 时生效）。symbol 写 BaoStock 原生 `sh.600000` / `sz.000001`，或 `600000.SH`
-  # 等写法（同一只股票的多种写法只规划一次）；日期按上海时间，交易日取沪深日历（XSHG），
-  # 收盘 15:00 后再等 30 分钟才认为当日可取。
+  # China A-shares (used when markets includes cn). Write BaoStock's native `sh.600000` /
+  # `sz.000001`, or `600000.SH` (several spellings of one stock are planned once); dates are
+  # Shanghai time, sessions come from the XSHG calendar, and a day is ready 30 minutes after
+  # the 15:00 close.
   # cn:
   #   symbols: [sh.600000, sz.000001]
 
@@ -58,24 +61,24 @@ storage:
   # Existing CWD configs and explicitly selected configs without path retain ./data.
   postgres:
     dsn: ${OPENBARS_PG_DSN}
-    mode: native           # native | upstream_compat；compat 仅供迁移与测试，永不迁移上游表
-    write: false           # Postgres 默认只读；明确配置后才写入
-    quota: sqlite          # 新安装默认本地 SQLite；postgres 仅用于显式共享已有配额表
-    # dsn 只在运行时解析（环境变量 / env 文件），不要把真实 DSN 写进仓库
+    mode: native           # native | upstream_compat; compat is for migration and tests only and never migrates upstream tables
+    write: false           # Postgres is read-only unless writes are configured
+    quota: sqlite          # local SQLite for new installs; postgres only to share existing quota tables
+    # the DSN is resolved at runtime only (environment / env file); never commit a real DSN
 
 conventions:
-  adjustment: split        # raw | split | split_dividend | all（查询时派生，落库只存不复权+公司行动）
+  adjustment: split        # raw | split | split_dividend | all (derived at read time)
   us_hourly_alignment: session_open   # session_open (9:30) | clock_hour
   include_extended_hours: false
 
 providers:
   alpaca:
     enabled: true
-    feed: sip              # sip | iex —— 成交量不得跨 feed 混用
+    feed: sip              # sip | iex — volumes are never mixed across feeds
     key_id: ${ALPACA_API_KEY_ID}
     secret_key: ${ALPACA_API_SECRET_KEY}
-    # quota 留空则使用 provider 声明的默认免费额度；可在此收紧。
-    # 要调高（超过默认值）必须显式写 override: true，否则报错：
+    # Omit quota to use the provider's declared free-tier defaults; you may tighten it here.
+    # Raising it above the default requires an explicit override: true, otherwise it is an error:
     #   quota: { per_minute: 999, override: true }
     quota: { per_minute: 190 }
   massive:
@@ -85,54 +88,61 @@ providers:
   yfinance:
     enabled: true
     quota: { per_minute: 30 }
-  twelve_data:             # 只用于美股小时线（1h，常规时段）；免费档 8 次/分、800 次/UTC 日
+  twelve_data:             # US hourly only (1h, regular hours); free tier: 8/min, 800 per UTC day
     enabled: false
     api_key: ${TWELVE_DATA_API_KEY}
   alpha_vantage:
     enabled: false
     api_key: ${ALPHA_VANTAGE_API_KEY}
     role: audit            # primary | fallback | audit
-  # 加密货币（公开行情，无需 key）。默认关闭，不影响仅美股的首次运行。
+  # Crypto (public market data, no key). Off by default; does not affect a US-only first run.
   binance:
     enabled: false
     base_url: https://data-api.binance.vision
-  coinbase:                # Coinbase Exchange 公开 candles
+  coinbase:                # Coinbase Exchange public candles
     enabled: false
     base_url: https://api.exchange.coinbase.com
-  # A 股日线（BaoStock，无需 token）。默认关闭；需安装可选依赖 `pip install openbars[baostock]`。
-  # 存不复权价（adjustflag=3），并取复权因子与停牌字段；限额无官方数字，默认保守。仅限个人本地使用。
-  # 启用后 `markets: [cn]` + `universe.cn.symbols` 即可：原始行含停牌占位，规范层（cn-daily-v1）
-  # 存 RAW、不写停牌占位、标记涨跌停；前/后复权（qfq / hfq）在读取时由复权因子派生。
+  # China A-share daily (BaoStock, no token). Off by default; needs `pip install openbars[baostock]`.
+  # Stores unadjusted prices (adjustflag=3) and also fetches adjustment factors and suspension
+  # fields; no official rate limits exist, so the defaults are conservative. Personal local use
+  # only. With `markets: [cn]` + `universe.cn.symbols`: raw rows keep suspension placeholders,
+  # the canonical layer (cn-daily-v1) stores RAW, writes no suspension placeholder and flags
+  # limit moves; forward/backward adjustment (qfq / hfq) is derived from factors at read time.
   baostock:
     enabled: false
-  # A 股日线备源（AKShare，无需 token）。默认关闭；需安装可选依赖 `pip install openbars[akshare]`。
-  # feed: eastmoney（默认，stock_zh_a_hist）| sina（stock_zh_a_daily）。只存不复权（adjust=""）；
-  # 东财成交量以“手”返回，适配器换算为“股”，与 BaoStock 同口径。库为 MIT，但不转授上游数据权：
-  # 东财禁止未经交易所书面同意散发行情或对站点施以高负载，新浪限制未经许可的抓取。
-  # 仅作低频备源、本机私存、不再分发。A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+  # China A-share daily backup (AKShare, no token). Off by default; needs
+  # `pip install openbars[akshare]`. feed: eastmoney (default, stock_zh_a_hist) | sina
+  # (stock_zh_a_daily). Unadjusted only (adjust=""); Eastmoney returns volume in lots and the
+  # adapter converts to shares, matching BaoStock. The library is MIT but does not relicense
+  # upstream data: Eastmoney forbids redistributing quotes without written exchange consent or
+  # loading the site disproportionately, and Sina restricts unlicensed scraping. Low-frequency
+  # backup only, local private storage, no redistribution. The A-share canonical layer is a
+  # single-source projection, so enable one A-share source at a time.
   akshare_ashare:
     enabled: false
     feed: eastmoney        # eastmoney | sina
-  # A 股日线（Tushare 免费档，需要 token）。默认关闭；需安装可选依赖 `pip install openbars[tushare]`。
-  # token 只写环境变量引用，不要写明文：在 .env / 环境中设置 TUSHARE_TOKEN。免费档约 120 积分，
-  # 每分钟 50 次、每天 8000 次，只能取非复权日线（不调用 qfq/hfq 或 adj_factor）。
-  # 条款为个人、非商业、可撤销许可；公开使用其数据须标注「数据来源：Tushare数据」。
-  # 仅本机私存、不再分发；A 股规范层是单源投影，建议同一时间只启用一个 A 股源。
+  # China A-share daily (Tushare free tier, token required). Off by default; needs
+  # `pip install openbars[tushare]`. Reference the token through the environment only, never in
+  # plain text: set TUSHARE_TOKEN in .env / the environment. The free tier is about 120 points,
+  # 50 requests/minute and 8000/day and only provides unadjusted daily bars (no qfq/hfq, no
+  # adj_factor). The licence is personal, non-commercial and revocable; public use of its data
+  # must carry Tushare's required attribution. Local private storage only, no redistribution;
+  # the A-share canonical layer is a single-source projection, so enable one A-share source.
   tushare:
     enabled: false
     token: ${TUSHARE_TOKEN}
 
-# 多源仲裁：按 市场 × 粒度 × 字段 配置优先级
+# Multi-source arbitration: priority per market × interval × field
 reconcile:
   us:
     1d:
       price: [massive, alpaca, yfinance]
-      volume: [alpaca]     # 只用同一 feed
+      volume: [alpaca]     # one feed only
   tolerances:
     price_rel: 0.005
     volume_rel: 0.05         # research-daily-v2 defaults: price 0.5%, volume 5% (read by `openbars verify`)
 
-# 采集节点：本机或远程（例如需要国内网络的 A 股/港股）
+# Collector nodes: local or remote (e.g. A-shares / Hong Kong from a China-based network)
 nodes:
   - name: local
     kind: local
@@ -144,6 +154,6 @@ nodes:
 
 schedule:
   # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
-  # 仅用于展示/记录：常见正式窗口示例（00:15 ET = 21:15 PT）；不会触发运行。
-  daily_at: "00:15"        # in timezone below / 使用下方时区
+  # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
+  daily_at: "00:15"        # in the timezone below
   timezone: America/New_York
