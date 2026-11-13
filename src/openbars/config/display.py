@@ -95,6 +95,7 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
         lines.append(f"reconcile: {_mapping_preview(settings.reconcile, secrets)}")
     if settings.schedule:
         lines.append(f"schedule: {_mapping_preview(settings.schedule, secrets)}")
+        lines.append("  note: display/record only; actual runs are triggered by an external scheduler.")
     lines.append(f"# {PRIORITY_HELP}")
     return "\n".join(lines) + "\n"
 

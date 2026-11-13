@@ -60,6 +60,7 @@ def test_env_expansion_and_mapping(tmp_path):
     assert s.providers["massive"].options["api_key"] == "fallback-value" and not s.providers["massive"].enabled
     assert set(s.secret_values()) == {key_id, secret, "fallback-value"}
     assert s.schedule["timezone"] == "America/New_York"
+    assert "display/record only" in format_settings(s)
 
 
 @pytest.mark.parametrize("scalar, parsed", [("ON", "True"), ("NO", "False"), ("NULL", "None"),

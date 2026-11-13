@@ -30,6 +30,12 @@
 
 这些时间是 freshness 分层规则，不是来源交付 SLA。未验证来源尽力而为、不承诺；来源自身的验证状态见 [source readiness](source-readiness.md)。
 
+### 日线运行时刻与调度
+
+日线只有「尽可能最近可得」这一条路径，没有当日/正式模式或模式开关。每次运行会按各来源当前能力抓取尽可能新的数据；较早取得的临时行可随后被正式行覆盖。Freshness 门槛不是来源交付 SLA。
+
+实际开跑由 LaunchAgent、cron 等外部调度器决定。`schedule.daily_at` 仅为展示/记录字段；`openbars config` 展示整个 `schedule` 段，但规划器和 CLI 不读取该字段来触发运行。修改它不会改变调度。示例值 `00:15 America/New_York` 对齐常见正式窗口 00:15 ET / 21:15 PT。各市场建议时刻、预期时效及已核实/待验证状态见 [README 的运行时刻表](../README.md#日线运行时刻与数据就绪) 与 [source readiness](source-readiness.md)。增加盘后调度需人工确认；本 issue 不修改 LaunchAgent。
+
 ## 2. 分层总览
 
 ```mermaid
