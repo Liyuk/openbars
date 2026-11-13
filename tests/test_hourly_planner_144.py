@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from fakes import FakeProvider, MemoryRawStore
 from openbars.config.schema import Selection
@@ -93,7 +93,10 @@ def test_attempt_index_matches_brute_force():
                             job.state is JobState.DONE and any(
                                 f.job_id == job.job_id and f.status in {'ok', 'empty'} and f.started_at is not None
                                 and f.window.start <= day <= f.window.end
-                                and f.started_at.astimezone(NEW_YORK).date() > day for f in fetches
+                                and f.started_at >= xnys.session_bounds(day)[-1][1]
+                                + (timedelta(minutes=16) if job.provider == 'alpaca' else timedelta(0))
+                                and (job.provider != 'massive' or f.started_at.astimezone(NEW_YORK).date() > day)
+                                for f in fetches
                             )
                         ):
                             expected.add(day)

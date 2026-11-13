@@ -8,7 +8,7 @@ from fakes import FakeProvider, MemoryRawStore
 
 from openbars.config.schema import Selection
 from openbars.core.models import DateRange, Interval, Market
-from openbars.orchestrator.jobs import WHOLE_MARKET, JobKind, JobState, make_job_id
+from openbars.orchestrator.jobs import Job, WHOLE_MARKET, JobKind, JobState, make_job_id
 from openbars.orchestrator.planner import (
     DefaultPlanner,
     EmptyCoverage,
@@ -230,6 +230,49 @@ def test_planner_does_not_treat_unverified_zero_latency_as_a_t0_promise():
     # cannot make the current (not-yet-ready) New York session eligible.
     p = plan(sel(date(2026, 3, 9), date(2026, 3, 10)), [provider])
     assert all(job.window.end <= LATEST for job in p.jobs)
+
+
+def test_us_same_day_readiness_is_provider_specific_for_daily_and_hourly():
+    after_sip_cutoff = datetime(2026, 3, 10, 20, 17, tzinfo=UTC)  # 16:17 ET
+    daily = plan(
+        sel(date(2026, 3, 9), date(2026, 3, 10)),
+        [alpaca(), massive()], now=after_sip_cutoff,
+    )
+    assert any(j.provider == "alpaca" and j.window == DateRange(date(2026, 3, 10), date(2026, 3, 10)) for j in daily.jobs)
+    assert any(j.provider == "massive" and j.window == DateRange(date(2026, 3, 9), date(2026, 3, 9)) for j in daily.jobs)
+    assert not any(j.provider == "massive" and j.window.start == date(2026, 3, 10) for j in daily.jobs)
+
+    midnight_et = datetime(2026, 3, 11, 4, 0, tzinfo=UTC)
+    massive_ready = plan(
+        sel(date(2026, 3, 10), date(2026, 3, 10)), [massive()], now=midnight_et,
+    )
+    assert [(j.window, j.kind) for j in massive_ready.jobs] == [
+        (DateRange(date(2026, 3, 10), date(2026, 3, 10)), JobKind.DAILY)
+    ]
+
+    hourly_selection = sel(
+        date(2026, 3, 9), date(2026, 3, 10), intervals=frozenset({Interval.H1})
+    )
+    hourly = plan(hourly_selection, [alpaca(interval=Interval.H1)], now=after_sip_cutoff)
+    assert any(j.window == DateRange(date(2026, 3, 10), date(2026, 3, 10)) for j in hourly.jobs)
+
+
+def test_attempts_counts_successful_same_day_after_close(tmp_path):
+    day = date(2026, 3, 9)
+    state = SqliteStateStore(tmp_path / "state.db")
+    job = Job(
+        "same-day-hourly", JobKind.DAILY, "alpaca", Market.US, Interval.H1,
+        ("TEST1",), DateRange(day, day), state=JobState.DONE,
+    )
+    state.save_job(job)
+    state.start_fetch(
+        provider="alpaca", fetch_id="same-day-fetch", job_id=job.job_id,
+        market=Market.US, interval=Interval.H1, window=job.window,
+        started_at=datetime(2026, 3, 9, 20, 20, tzinfo=UTC),
+    )
+    state.finish_fetch("alpaca", "same-day-fetch", "empty", row_count=0)
+    coverage = RawStoreCoverage(MemoryRawStore(), state=state)
+    assert coverage._attempts("alpaca", "TEST1", job.window) == {day}
 
 
 def test_non_daily_budget_requires_acceptance_when_large():
