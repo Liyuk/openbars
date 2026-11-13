@@ -37,7 +37,8 @@ def reconcile_hourly(
         obs = SourceObservation(bar.instrument_id or None, bar.symbol_as_returned, bar.session_date,
                                 bar.open, bar.high, bar.low, bar.close, bar.volume,
                                 bar.provider, feed, adjustment, revision=bar.revision, series=series,
-                                available_at=raw_ingested_at(bar), freshness=_freshness_for_raw(bar))
+                                available_at=raw_ingested_at(bar), fetch_id=bar.fetch_id,
+                                freshness=_freshness_for_raw(bar))
         groups[(obs.key, bar.ts_start)].append((obs, bar))
     result = []
     for (key, ts), group in sorted(groups.items()):
@@ -65,6 +66,7 @@ def reconcile_hourly(
             currency=sel.selected.resolved_series.currency,
             available_at=raw_ingested_at(raw),
             freshness=sel.selected.freshness,
+            source_fetch_id=raw.fetch_id,
         ))
     return tuple(result)
 

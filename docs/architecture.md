@@ -562,11 +562,13 @@ data/
 
 **`canonical_bars`**（与 `research_daily_bar` 对应，外加 openbars `Bar` 元数据）
 
-`instrument_id, market, interval, ts_start, session_date, session, policy_version（默认 research-daily-v2）, provider, feed, adjustment, revision, open/high/low/close decimal128(20,8), volume decimal128(28,8)（可空）, vwap（可空）, trade_count（可空）, flags list<string>（QualityFlag 成员名，如 DIVERGENT；不丢信息）, selection_reason, quality_status, capabilities list<string>, source_fingerprint, price_source, volume_source（可空）, sources_seen list<string>, reconcile_rule, generated_at, available_at timestamp(us, UTC)（可空，#154）, freshness（可空，`provisional` / `final`）`。
+`instrument_id, market, interval, ts_start, session_date, session, policy_version（默认 research-daily-v2）, provider, feed, adjustment, revision, open/high/low/close decimal128(20,8), volume decimal128(28,8)（可空）, vwap（可空）, trade_count（可空）, flags list<string>（QualityFlag 成员名，如 DIVERGENT；不丢信息）, selection_reason, quality_status, capabilities list<string>, source_fingerprint, price_source, volume_source（可空）, sources_seen list<string>, reconcile_rule, generated_at, available_at timestamp(us, UTC)（可空，#154）, freshness（可空，`provisional` / `final`）, source_fetch_id（可空，#202，选中 raw 行的 `fetch_id`）`。
 
 **`freshness`（#180，附加可空列，`SCHEMA_VERSION` 不变）**：独立于仲裁质量、复权 stale 和身份 provisional；合法值只有 `provisional` / `final`。源显式给出的 tier 优先；否则在正式就绪时刻前标 provisional、到时后标 final：美股按会话次日美东 00:00，CN/HK 按交易日历收市后 30 分钟，加密按 UTC 日切后 30 分钟。旧行缺列或 null 读为 final。该加性列不改变唯一键与分区。
 
 **`available_at`（#154，附加可空列，`SCHEMA_VERSION` 不变）**：这根 bar 最早可以被研究使用的时刻。取值：选中价格源对应 raw 行的 `ingested_at`（从 raw 层读回的 bar 经 `to_raw_bar` 带出）；本次刚抓到、内存里还没有落库 `ingested_at` 的 bar，用 canonical 写入时刻（节点总是先写 raw 再调 sink，所以写入时刻不早于 raw 的 `ingested_at`，只会偏保守，不会前视）；从上游导入时写上游选中源行的 `received_at`。**同一个源 bar 保留最早的可得时间**：同键重写且是**同一个源 bar** 时（`SAME_SOURCE_BAR_COLUMNS` 全部相同：`source_fingerprint`、`provider` / `feed` / `adjustment`、`price_source` / `volume_source`、OHLCV、`vwap`、`trade_count`），取已存值与新值中较早的非空值（重跑同一 Job 不会把可得时间往后推，已存的 null 可以被补上）；任一项变了（换源、新 revision、价格或成交量修正）就用新行自己的值。只看 `source_fingerprint` 不够：日线路径生成指纹时没有源 bar id，换源或修正价格后指纹可能不变，若沿用旧时间会造成前视。旧文件和 #154 之前的 Postgres 表没有这一列，读回为 null。加性可空列与 `corporate_actions.currency` 同理：列名、类型、键、分区都没有变，旧文件照常可读，所以不升 `SCHEMA_VERSION`（§10.6）。
+
+**`source_fetch_id`（#202，附加可空列，`SCHEMA_VERSION` 不变）**：canonical → raw 抓取批次的稳定指针，值等于被选中 raw 行的 `fetch_id`；配合 `provider` / `feed` / `adjustment` / 时间 / `instrument_id` 可唯一定位 raw 行，再经 `state.db.fetch_log[(provider, fetch_id)]` 得到批次窗口、状态与归档引用。旧文件 / 旧库的当前行缺列读回 null；Postgres native 的写连接（`write=True`）打开时会为 `canonical_bars` 和 `canonical_bars_history` 补列，只读旧库不做 DDL；兼容导入行可能为 `compat:<行 id>`。它属于血缘列（与 `generated_at` 一样），内容相同的重写不会只因为它变化而写新 part。不要用 canonical 的 `revision` join raw：规范层 `revision` 会因重写递增。完整适配器契约见 [`source-contract.md`](source-contract.md)。
 
 唯一键：`(instrument_id, interval, policy_version, 时间)`，`1d` 时间为 `session_date`，即 `(instrument_id, session_date, interval, policy_version)`（upstream 是 `(instrument_id, session_date, policy_version)`，这里为将来的日内粒度加入 `interval`；日内以 `ts_start` 取代 `session_date`，否则同一交易日的多根 bar 会互相覆盖）。
 
@@ -623,9 +625,9 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 
 规范层日线（research-daily-v2，对应 `CanonicalDailyRow`），唯一键 `(instrument_id, session_date, policy_version)`：
 
-`instrument_id`(string)、`session_date`(date32)、`policy_version`(string)、`selected_source_bar_id?`(string)、`provider`、`feed`、`adjustment`(string)、`revision`(int64)、`open`、`high`、`low`、`close`(decimal 20,8)、`volume`(decimal 28,8)、`selection_reason`、`quality_status`(string)、`capabilities`(list<string>)、`source_fingerprint`(string)、`generated_at`(timestamp UTC)、`currency?`(string)、`available_at?`(timestamp UTC，#154，见 §10.3)。
+`instrument_id`(string)、`session_date`(date32)、`policy_version`(string)、`selected_source_bar_id?`(string)、`provider`、`feed`、`adjustment`(string)、`revision`(int64)、`open`、`high`、`low`、`close`(decimal 20,8)、`volume`(decimal 28,8)、`selection_reason`、`quality_status`(string)、`capabilities`(list<string>)、`source_fingerprint`(string)、`generated_at`(timestamp UTC)、`currency?`(string)、`source_fetch_id?`(string，#202)、`available_at?`(timestamp UTC，#154，见 §10.3)。
 
-`instrument_id` 在 openbars 中是稳定字符串 ID（非整数外键）；`selected_source_bar_id` 在存储 ID 出现之前可为空。`selection_reason` 取 `primary_source` / `primary_source_corroborated` / `compatible_gap_fill` / `fill_<provider>` / `spike_replaced`；`quality_status` 取 `complete` / `divergent` / `volume_missing` / `spike_suspect`（均以字符串存储，`fill_<provider>` 不是固定枚举）。
+`instrument_id` 在 openbars 中是稳定字符串 ID（非整数外键）；`selected_source_bar_id` 是内存行 / 兼容适配路径上的可选内部字符串标识，不是调用方官方表外键，native canonical 不持久化该列；需要追溯抓取批次时用 `source_fetch_id`。`selection_reason` 取 `primary_source` / `primary_source_corroborated` / `compatible_gap_fill` / `fill_<provider>` / `spike_replaced`；`quality_status` 取 `complete` / `divergent` / `volume_missing` / `spike_suspect`（均以字符串存储，`fill_<provider>` 不是固定枚举）。
 
 内存模型：源身份 `SourceIdentity(provider, feed, adjustment)`、`BarSeriesIdentity`、枚举 `PriceBasis` / `AdjustmentScope` / `SessionSemantics` / `VolumeBasis` 与 `BarSeriesCatalog.resolve(source, *, interval=Interval.D1, currency="USD")` 位于 `openbars.core.series`。目录的保守映射：
 
@@ -681,7 +683,7 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 | `selection_reason` | `primary_source`、`primary_source_corroborated`、`compatible_gap_fill`、`fill_<provider>`、`spike_replaced` |
 | `quality_status` | `complete`、`divergent`、`volume_missing`（价格有变动但成交量为 0）、`spike_suspect`（R4 标记，是否排除由开关控制） |
 | `capabilities` | 有序字符串集合，如 `price_basis:split_adjusted`、`adjustment_scope:splits`、`session_semantics:provider_aligned`、`volume_basis:*`、`currency:USD`、`adjustment_as_of:YYYY-MM-DD`、`price_ohlc`、`consolidated_volume`、`split_adjusted_volume` |
-| 规范层行 | `instrument_id, session_date, policy_version, selected_source_bar_id, provider, feed, adjustment, revision, open, high, low, close, volume, selection_reason, quality_status, capabilities, source_fingerprint, generated_at`；唯一键 `(instrument_id, session_date, policy_version)` |
+| 规范层行 | `instrument_id, session_date, policy_version, selected_source_bar_id, provider, feed, adjustment, revision, open, high, low, close, volume, selection_reason, quality_status, capabilities, source_fingerprint, generated_at, source_fetch_id`；唯一键 `(instrument_id, session_date, policy_version)` |
 | 数值 | 价格 `Numeric(20,8)`、成交量 `Numeric(28,8)`，内存中用 `Decimal`，不经 float 往返 |
 | 会话 | 交易所会话日（XNYS），非交易日 bar 拒收；当日会话收盘后等待可配置分钟数才视为完成 |
 | 失效通知 | 每个 policy 一行版本水位 + 按日期的水位表，供下游缓存失效 |

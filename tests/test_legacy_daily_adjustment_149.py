@@ -50,7 +50,8 @@ def canonical(raw_store, alpaca_bars):
                            other_providers=("massive", "alpaca"))  # fmt: skip
     job = Job("j", JobKind.DAILY, "alpaca", Market.US, Interval.D1, ("TEST1",), WINDOW)
     sink.after_fetch(job, alpaca_bars)
-    return [replace(r, generated_at=datetime(2025, 1, 6, tzinfo=UTC), available_at=None) for r in output]
+    return [replace(r, generated_at=datetime(2025, 1, 6, tzinfo=UTC), available_at=None,
+                    source_fetch_id=None) for r in output]
 
 
 def scenario(raw_store, *, legacy: bool, current: bool, legacy_close="10"):

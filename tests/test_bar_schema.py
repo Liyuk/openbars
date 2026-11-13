@@ -243,7 +243,7 @@ CANONICAL_FIELD_NAMES = (
     "instrument_id", "session_date", "policy_version", "selected_source_bar_id", "provider",
     "feed", "adjustment", "revision", "open", "high", "low", "close", "volume",
     "selection_reason", "quality_status", "capabilities", "source_fingerprint", "generated_at",
-    "currency", "available_at", "freshness",
+    "currency", "source_fetch_id", "available_at", "freshness",
 )  # fmt: skip
 
 
@@ -340,6 +340,7 @@ def test_arrow_schemas():
     assert canon.field("revision").type == pa.int64()
     assert canon.field("capabilities").type == pa.list_(pa.string())
     assert canon.field("selected_source_bar_id").nullable
+    assert canon.field("source_fetch_id").nullable
     assert not canon.field("instrument_id").nullable
     assert canon.metadata[b"openbars.schema_version"] == b"1"
 

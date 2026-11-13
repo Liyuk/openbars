@@ -298,7 +298,10 @@ def check_upstream_compat(catalog: Catalog) -> None:
 
 
 # Additive nullable columns a pre-migration database may lack (``write=True`` adds them).
-_OPTIONAL_NATIVE_COLUMNS = frozenset({("canonical_bars", "available_at"), ("canonical_bars", "freshness")})
+_OPTIONAL_NATIVE_COLUMNS = frozenset({
+    ("canonical_bars", "available_at"), ("canonical_bars", "freshness"),
+    ("canonical_bars", "source_fetch_id"),
+})
 
 
 # #124: A-share adjust factors. Additive table: a database without it reads as empty and gets
@@ -405,6 +408,9 @@ def native_ddl() -> list[str]:
         # #154: additive, nullable; databases created before it get the column on write=True.
         'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ',
         'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS freshness TEXT',
+        # #202: additive, nullable; the stable canonical -> raw fetch-batch pointer.
+        'ALTER TABLE "canonical_bars" ADD COLUMN IF NOT EXISTS source_fetch_id TEXT',
+        'ALTER TABLE "canonical_bars_history" ADD COLUMN IF NOT EXISTS source_fetch_id TEXT',
         'CREATE INDEX IF NOT EXISTS "ix_canonical_bars_scan" ON "canonical_bars" ("market", "interval", "policy_version", "session_date")',
         _table_ddl("instruments", INSTRUMENTS_SCHEMA, _REF_KEYS["instruments"]),
         _table_ddl("symbol_mappings", SYMBOL_MAPPINGS_SCHEMA, _REF_KEYS["symbol_mappings"]),
@@ -1193,6 +1199,10 @@ def compat_canonical_row(r: Mapping[str, Any]) -> CanonicalBarRow:
         reconcile_rule=r["policy_version"],
         policy_version=r["policy_version"],
         generated_at=r["generated_at"],
+        # #202: upstream rows carry no fetch id; the compat raw view uses ``compat:<row id>``
+        # for the selected source row, so expose the same stable string here.
+        source_fetch_id=(None if r.get("selected_source_bar_id") is None
+                         else f"compat:{r['selected_source_bar_id']}"),
     )
 
 

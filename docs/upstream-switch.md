@@ -106,7 +106,11 @@ matching `daily_bar` is reused when present; otherwise a row is materialized
 from the canonical OHLCV under the same unique key (existing raw values are
 not overwritten). It is missing only if identity resolution fails, in which
 case the whole upsert errors. Volume is required (null volume is refused,
-not stored as zero). Corporate actions are written to, and can be read back from, the upstream
+not stored as zero). In this compatibility path the value is the caller's own
+row id; it is adapter-owned and not part of the generic bar contract. Native
+canonical rows do not persist `selected_source_bar_id`; use `source_fetch_id`
+to trace a canonical row to its raw fetch batch (see
+[`source-contract.md`](source-contract.md)). Corporate actions are written to, and can be read back from, the upstream
 observation / event / revision tables (`event_key` =
 `openbars:{action_type}:{instrument_id}:{ex_date}`).
 

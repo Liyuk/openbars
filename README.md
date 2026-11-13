@@ -30,7 +30,7 @@ GitHub 上已有大量单源客户端（yfinance、ccxt、AKShare）和统一查
 
 ### 路线
 
-美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线 → 本机只读界面（v0.5）；美股小时线顺延至 v0.6。小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md)、[docs/architecture.md](docs/architecture.md) 与 [docs/upstream-switch.md](docs/upstream-switch.md)（把既有研究序列切到 openbars）。
+美股（含 ETF）日线 → 加密日线 → A 股日线 → 港股日线 → 本机只读界面（v0.5）；美股小时线顺延至 v0.6。小时/分钟线作为可选能力逐步开放。详见 [docs/roadmap.md](docs/roadmap.md)、[docs/architecture.md](docs/architecture.md)、[docs/upstream-switch.md](docs/upstream-switch.md)（把既有研究序列切到 openbars）与 [docs/source-contract.md](docs/source-contract.md)（通用 K 线来源信息契约，调用方适配器用）。
 
 ### 快速开始
 
