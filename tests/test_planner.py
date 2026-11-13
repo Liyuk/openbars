@@ -556,6 +556,13 @@ def test_wiring_lists_yfinance_for_hk():
     assert "akshare" not in _PROVIDER_MARKETS
 
 
+def test_wiring_lists_akshare_ashare_for_cn_only():
+    from openbars.cli.wiring import _PROVIDER_MARKETS
+
+    assert _PROVIDER_MARKETS["akshare_ashare"] == frozenset({Market.CN})
+    assert Market.HK not in _PROVIDER_MARKETS["akshare_ashare"]
+
+
 def test_hk_planner_uses_only_yfinance_even_if_akshare_is_enabled():
     yf = _HkFake("yfinance")
     ak = _HkFake("akshare")

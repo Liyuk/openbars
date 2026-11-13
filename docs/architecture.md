@@ -331,6 +331,20 @@ QuotaPolicy
 - `config.example.yaml` 中 `providers.baostock` 默认 `enabled: false`。
 - **编排器接入（#62）**：`markets: [cn]`、启用 `providers.baostock`、`universe.cn.symbols`（如 `sh.600000`）即可 `plan` / `run`（无需 instrument 主数据）。规划器与加密一样：无整市场（Massive）路径、无 yfinance 回退，所有声明 `cn`/`1d` 的已启用 provider 参与（BaoStock 为 `PER_SYMBOL`）；日期取 `Asia/Shanghai`，只规划沪深日历（XSHG）上的交易日，`latest_ready_session` = 15:00 收盘 + 30 分钟。symbol 必须是 `normalize_cn_symbol` 认得的写法（`sh.600000` / `600000.SH` …，同一只股票的多种写法只规划一次）；裸 6 位代码等无法识别的写法跳过并记 `no_symbols` 备注，不规划任务。覆盖判断同时认配置写法与 BaoStock 原生写法（`sh.600000`），换一种写法不会重复拉取。
 
+#### 3.5.3b AKShare A 股日线备源（#58）
+
+设计讨论：[#54](https://github.com/Liyuk/openbars/discussions/54)。代码 `openbars.providers.cn.akshare`，入口 `akshare_ashare`；与港股入口 `akshare`（`openbars.providers.hk.akshare`）是两个独立 provider，源身份为 `akshare_ashare/eastmoney/raw`（默认）与 `akshare_ashare/sina/raw`，口径 `raw / none / regular / as_traded`，币种 `CNY`，不属于美股 `KNOWN_SOURCES`。
+
+- **只存不复权**：东财 `stock_zh_a_hist`（`feed: eastmoney`，默认）与新浪 `stock_zh_a_daily`（`feed: sina`）都固定 `adjust=""`，永不请求 qfq / hfq；沿用 BaoStock 的 raw 落库口径，前/后复权仍由落库 raw + BaoStock 复权因子派生。AKShare 本身不提供复权因子，单独使用 AKShare 时 QFQ / HFQ 会因缺因子报错。
+- **成交量单位**：东财返回“手”（100 股），适配器换算成“股”（×100）；新浪已是“股”。`RawBar.extra` 保留 `volume_lots`（东财原始手数）、`amount`、`amplitude`、`pct_change`、`change`、`turnover_rate`（东财，百分比）、`turnover_ratio`（新浪，比例）、`outstanding_share` 与 `code`。
+- **停牌标记**：AKShare 返回的历史表通常不含停牌占位行，也没有 `tradestatus` / `isST`；停牌日会表现为日历空洞，`CnCanonicalSink` 无法像 BaoStock 那样把它记为 `suspended_cells`，可能计入 `missing`。适配器不推断停牌。
+- **symbol**：输入接受 `normalize_cn_symbol` 认得的写法（`sh.600000` / `600000.SH` / `600000.SS` …），裸 6 位代码以 `invalid_request` 拒绝；落库的 `symbol_as_returned` 统一为 `sh.600000` / `sz.000001`（与规划器覆盖判断一致）。东财调用用裸 6 位，新浪用 `sh600000`。
+- **日历**：只保留 XSHG 交易日（`openbars.calendars.cn`），非交易日行计入 `skipped["non_session"]`；窗口超出 `exchange-calendars` 假期覆盖时以 `invalid_request` 拒绝，不编造会话。`ts_start` 为当日 `00:00 Asia/Shanghai`。
+- **限流与错误**：`QuotaGate` 保守默认 4 次/分钟、80 次/24h（`safety_margin=0.9`、`key_scope="per_process"`），每个 symbol 取 1 个令牌；按 symbol 顺序请求，额度耗尽返回已得部分与 `next_cursor`。瞬时错误（超时 / 连接 / 限流关键词）映射为可重试 `rate_limited` 并 `penalize`，其余为 `provider_unavailable`；单 symbol 无有效行记 `empty_result`。
+- **依赖与测试**：`pip install openbars[akshare]`；模块导入不依赖该包，默认调用时懒加载，未安装抛不可重试的 `akshare_not_installed`。测试用注入的 hist callable 与合成长表数据，默认不打网；可选冒烟 `OPENBARS_AKSHARE_CN_LIVE=1`。
+- **条款**：库为 MIT，但**不转授**上游数据权。东财法律声明禁止未经交易所书面同意复制、传播或散发行情，并禁止对站点施以不成比例的高负载（[声明](https://about.eastmoney.com/home/disclaimer)）；新浪用户条款限制未经许可的抓取与商业使用（[新浪财经](https://finance.sina.com.cn/)）。适配器定位为**低频备源**、本机私存、不再分发；`personal_only=True`、`redistribution_allowed=False`。
+- **编排器接入**：`markets: [cn]`、启用 `providers.akshare_ashare`、`universe.cn.symbols` 即可 `plan` / `run`；与 BaoStock 一样是 `PER_SYMBOL`，规划器对每个启用的 `cn`/`1d` 源分别出任务。A 股规范层仍是**单源投影**（`CnCanonicalSink`，不经过对账器），同一时间建议只启用一个 A 股源，避免同日同一 `instrument_id` 被两个源先后覆盖。
+
 #### 3.5.4 yfinance 港股日线编排器（#77）
 
 配置 `markets: [hk]`、启用 `providers.yfinance`（`openbars[yfinance]`）、`universe.hk.symbols`（如 `00700` / `0700.HK`）即可 `plan` / `run`。日历为 XHKG（§3.4.5），日期取 `Asia/Hong_Kong`，只规划交易所交易日，`latest_ready_session` = 当日实际收市 + 30 分钟。规划器没有整市场路径，也不走美股那套 yfinance 回退窗口；yfinance 是港股唯一规划源（`MULTI_SYMBOL`）。同一只股票的多种写法只规划一次；覆盖同时认配置写法、5 位代码、Yahoo ticker 与 `hk:eq:xhkg:…`。`run` 落 raw 后由 `HkCanonicalSink`（`DispatchingSink(hk=…)`，`cli.wiring.make_sink` 已接好）写成 `hk-daily-v1` canonical，**不走美股 XNYS 对账器**；没有 `hk=` 的 `DispatchingSink` 对 HK 只保留 raw。
@@ -613,6 +627,7 @@ v1 是第一个落盘版本：每个 Parquet 文件的 key-value 元数据带 `o
 | `binance/spot/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `coinbase/exchange/raw` | `raw` | `none` | `utc_day` | `as_traded` |
 | `baostock/ashare/raw` | `raw` | `none` | `regular` | `as_traded` |
+| `akshare_ashare/eastmoney/raw`、`akshare_ashare/sina/raw`（A 股日线备源，`currency=CNY`） | `raw` | `none` | `regular` | `as_traded` |
 | 其他 | `unknown` | `unknown` | `unknown` | `unknown`（`currency` 仍按入参设置） |
 
 ## 11. 上游搬运来源与 backend 兼容与切换
@@ -682,8 +697,8 @@ openbars 提供一个与 upstream 逐字段一致的**兼容口径 profile `rese
 
 > 编号 §11.2.2 同样是为了不打乱既有引用。`research-daily-v2` 是美股口径，A 股走独立的 `policy_version = "cn-daily-v1"`（常量 `POLICY_VERSION_CN_DAILY_V1`，`openbars.reconcile.crypto`，由 `openbars.reconcile` 导出）。
 
-- **落库口径**：不复权 `RAW`（`baostock/ashare/raw`，`raw / none / regular / as_traded`，币种 CNY）；`session=regular`，会话日取沪深日历。`QFQ` / `HFQ` 永不落库，读取时由复权因子派生（§3.4）。
-- **单源投影**：目前只有 BaoStock，`CnCanonicalSink` 直接把 raw 投影成 canonical 行（`selection_reason=primary_source`），不经过任何对账器；停牌日不写 bar、涨跌停打标记（§3.4.4、§3.5.3）。
+- **落库口径**：不复权 `RAW`（BaoStock 为 `baostock/ashare/raw`；AKShare 备源为 `akshare_ashare/eastmoney/raw` 或 `akshare_ashare/sina/raw`，均为 `raw / none / regular / as_traded`，币种 CNY）；`session=regular`，会话日取沪深日历。`QFQ` / `HFQ` 永不落库，读取时由复权因子派生（§3.4）。
+- **单源投影**：`CnCanonicalSink` 把每个 CN 作业的 raw 直接投影成 canonical 行（`selection_reason=primary_source`），不经过任何对账器；停牌日不写 bar、涨跌停打标记（§3.4.4、§3.5.3）。BaoStock 与 AKShare A 股备源都走这条投影，作业之间不做跨源合并，因此同一时间建议只启用一个 A 股源。
 - **读路径**：`policy_version_for_market(market, override=None, *, instrument_ids=())`：`override` 优先；`Market.CRYPTO` 或 `crypto:` id → `crypto-daily-v1`；`Market.CN` 或 `cn:` id → `cn-daily-v1`；其余 → `research-daily-v2`。
 
 ### 11.3 PG 兼容策略

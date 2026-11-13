@@ -39,6 +39,8 @@ def reload_bar(backend, bar, market):
     ('binance', 'spot', 'raw', Market.CRYPTO),
     ('coinbase', 'exchange', 'raw', Market.CRYPTO),
     ('baostock', 'ashare', 'raw', Market.CN),
+    ('akshare_ashare', 'eastmoney', 'raw', Market.CN),
+    ('akshare_ashare', 'sina', 'raw', Market.CN),
     ('akshare', 'eastmoney', 'raw', Market.HK),
 ])
 def test_provider_shapes_preserve_observation_identity(tmp_path, provider, feed, adjustment, market):
