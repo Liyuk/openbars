@@ -183,10 +183,14 @@ def main(
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "serve":
-        # Reject a non-loopback --host before loading config, so the command fails closed.
+        # Reject a non-loopback --host before loading config, so the command fails closed
+        # unless the caller opted in with --allow-non-loopback.
         from openbars.cli.serve import check_bind_host
 
-        message = check_bind_host(getattr(args, "host", "127.0.0.1"))
+        message = check_bind_host(
+            getattr(args, "host", "127.0.0.1"),
+            allow_non_loopback=bool(getattr(args, "allow_non_loopback", False)),
+        )
         if message:
             print(f"error: {message}", file=sys.stderr)
             return EXIT_USAGE

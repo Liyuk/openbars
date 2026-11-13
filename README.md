@@ -41,7 +41,7 @@ uv run openbars run                   # plan, queue and execute until idle; safe
 uv run openbars status                # job states, dead jobs, checkpoints, raw coverage (Parquet / Postgres)
 uv run openbars verify                # per-market coverage and cross-source agreement report (read-only)
 uv run openbars jobs retry --dead     # dead jobs are re-queued only on an explicit retry (--provider / --error / --dry-run)
-# Optional: install the http extra and open the local read-only UI (loopback only; a non-loopback --host is rejected)
+# Optional: install the http extra and open the local read-only UI (loopback by default; see docs/api.md for exposure)
 # uv sync --extra http
 # uv run openbars serve               # http://127.0.0.1:8787
 # Optional: shadow-compare against an external read-only research-series HTTP API.
@@ -103,9 +103,9 @@ uv run openbars serve                # http://127.0.0.1:8787
 The screenshots use synthetic demo symbols (`TEST1`, `TESTA`, …) and a fictional `example` quota provider. They do not contain personal paths, API keys or real quota-account details.
 
 - **What it is.** `/chart` draws candlesticks with [Lightweight Charts](https://tradingview.github.io/lightweight-charts/), `/` is a coverage and freshness dashboard that also shows quota usage, and `/flags` lists quality flags. It is **not** a full TradingView terminal and has no order entry, indicators or drawing tools.
-- **Access.** It binds to loopback only (default `127.0.0.1:8787`); a non-loopback `--host` is rejected in this version. On startup it prints `no fetch, no writes`: it never plans, fetches or writes, and opens storage read-only. It only displays data that is already on disk, and there is no button or route that triggers a fetch to "fill in" final data.
+- **Access.** It binds to loopback by default (`127.0.0.1:8787`); a non-loopback `--host` is refused unless you pass `--allow-non-loopback` explicitly. On startup it prints `no fetch, no writes`: it never plans, fetches or writes, and opens storage read-only. It only displays data that is already on disk, and there is no button or route that triggers a fetch to "fill in" final data.
 - **A public, self-hosted API.** The JSON routes under `/api/v1` (`health`, `markets`, `instruments`, `bars`, `flags`, `quota`) are a public API in the sense that matters here: whoever downloads OpenBars deploys it and owns it, including fully private deployments. OpenBars itself provides no hosted service and never sees your data. Endpoints, parameters, response shapes, error format and the version/stability rules are documented in [the `/api/v1` reference](docs/api.md). Within v1, documented fields are stable; breaking changes move to a new major prefix (`/api/v2`).
-- **Exposure.** The default bind is loopback only, and this version refuses a non-loopback `--host`. An explicit opt-in bind switch is tracked in [#207](https://github.com/Liyuk/openbars/issues/207). Exposing the service on a non-loopback interface publishes a read-only view of your stored bars to that network, and **there is no built-in authentication**: network isolation or an authenticating reverse proxy is the caller's responsibility.
+- **Exposure.** The default bind is loopback only. Binding a non-loopback address (for example `--host 0.0.0.0`) additionally requires the explicit, opt-in `--allow-non-loopback` flag; when it is used the service prints a startup warning. Exposing the service on a non-loopback interface publishes a read-only view of your stored bars to that network, and **there is no built-in authentication and no built-in TLS**: network isolation, a firewall or an authenticating reverse proxy is the caller's responsibility.
 
 ### Same-day data: timeliness is not completeness
 

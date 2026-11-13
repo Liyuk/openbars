@@ -6,7 +6,8 @@ API**: whoever downloads OpenBars deploys it on their own machine (or their own 
 infrastructure) and calls it there. There is no hosted service and no account.
 
 - Base URL: `http://127.0.0.1:8787/api/v1` by default (`openbars serve --port` changes the
-  port; the host is loopback only, see [Exposure](#exposure-and-security)).
+  port; the host is loopback by default and a non-loopback bind needs an explicit opt-in,
+  see [Exposure](#exposure-and-security)).
 - The service never plans, fetches, or writes. It opens storage read-only and only answers
   queries about rows that are already there.
 - Responses are JSON, UTF-8. All prices and volumes are **decimal strings** (for example
@@ -284,19 +285,23 @@ curl -s 'http://127.0.0.1:8787/api/v1/markets' | jq '.markets[].market'
 
 ## Exposure and security
 
-- The default bind is **loopback only**: `127.0.0.1:8787`. The current implementation
-  **rejects a non-loopback `--host`** and exits with a usage error.
-- Binding the service to a non-loopback address is **not available in this version**. An
-  explicit opt-in bind flag is tracked in issue
-  [#207](https://github.com/Liyuk/openbars/issues/207); until it lands, use loopback and, if
-  you need remote access, a tunnel or a reverse proxy on the same machine.
-- If you do expose the service on a non-loopback interface (a network card, a container
+- The default bind is **loopback only**: `127.0.0.1:8787`. A non-loopback `--host` is
+  refused with a usage error (exit code 2) and the server never starts.
+- Binding the service to a non-loopback address requires the explicit, opt-in
+  `--allow-non-loopback` flag, for example:
+  `openbars serve --host 203.0.113.10 --allow-non-loopback`. Passing the flag while binding
+  loopback is allowed and changes nothing. When the service really binds a non-loopback
+  address it prints a startup warning that it is reachable from the network and has no
+  built-in authentication.
+- If you expose the service on a non-loopback interface (a network card, a container
   network, a public address), you are publishing a read-only view of your market data to
   that network. **There is no built-in authentication and no built-in TLS.** You are
   responsible for network isolation, a firewall, or an authenticating reverse proxy.
+  `--allow-non-loopback` only lifts the loopback restriction; it does not add any security.
 - The service never accepts writes, so exposure cannot corrupt data; it can still leak what
   you have stored (coverage, instruments, prices, quota usage).
-- `/api/v1` takes no credentials. Treat it as trusted-local by default.
+- `/api/v1` takes no credentials. Treat it as trusted-local unless you put authentication in
+  front of it.
 
 ## What this API is not
 

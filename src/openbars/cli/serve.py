@@ -1,8 +1,10 @@
 """``openbars serve``: local read-only UI and the self-hosted ``/api/v1`` read API.
 
-This version binds loopback only: a non-loopback ``--host`` is refused. The JSON
-routes are the public read API documented in ``docs/api.md``; the bundled UI is
-one client of them. This module must not import FastAPI at import time so
+The default bind is loopback only (``127.0.0.1:8787``). A non-loopback ``--host``
+is refused unless ``--allow-non-loopback`` is passed explicitly; the service has
+no built-in authentication, so exposing it is the caller's responsibility. The
+JSON routes are the public read API documented in ``docs/api.md``; the bundled UI
+is one client of them. This module must not import FastAPI at import time so
 ``openbars serve --help`` works without the ``http`` extra.
 """
 
@@ -18,6 +20,7 @@ from openbars.config.schema import Settings
 EXIT_OK, EXIT_USAGE, EXIT_ERROR = 0, 2, 1
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
+ALLOW_NON_LOOPBACK_FLAG = "--allow-non-loopback"
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 # Install hint kept in one place so the CLI and tests stay aligned.
@@ -43,30 +46,53 @@ def is_loopback_host(host: str) -> bool:
     return mapped is not None and mapped.is_loopback
 
 
-def check_bind_host(host: str) -> str | None:
-    """Return an error message if ``host`` is not loopback, else None."""
-    if is_loopback_host(host):
+def check_bind_host(host: str, *, allow_non_loopback: bool = False) -> str | None:
+    """Return an error message if ``host`` is non-loopback and not opted in, else None."""
+    if is_loopback_host(host) or allow_non_loopback:
         return None
     return (
         f"--host {host!r} is not a loopback address; "
-        "this version only allows local access"
+        f"pass {ALLOW_NON_LOOPBACK_FLAG} to bind it (no built-in authentication)"
     )
 
 
 def register(sub: Any, common: Callable[[ArgumentParser], None]) -> None:
     """Add the ``serve`` subcommand. Safe to call without the ``http`` extra."""
-    serve = sub.add_parser("serve", help="start the local read-only UI (loopback only)")
+    serve = sub.add_parser(
+        "serve",
+        help="read-only local UI plus the self-hosted /api/v1 API (loopback by default)",
+        description=(
+            "Start the read-only local UI and the self-hosted read API under /api/v1 "
+            "(endpoints and stability rules: docs/api.md). OpenBars provides no hosted "
+            "service: whoever downloads it deploys and owns it, including private "
+            f"deployments. Binds loopback ({DEFAULT_HOST}:{DEFAULT_PORT}) by default; a "
+            f"non-loopback --host requires {ALLOW_NON_LOOPBACK_FLAG}. The server has no "
+            "built-in authentication, so exposing it beyond this machine (firewall, "
+            "authenticating reverse proxy) is the caller's responsibility."
+        ),
+    )
     common(serve)
     serve.add_argument(
         "--host",
         default=DEFAULT_HOST,
-        help=f"bind address (loopback only, default {DEFAULT_HOST})",
+        help=(
+            f"bind address (default {DEFAULT_HOST}); a non-loopback host requires "
+            f"{ALLOW_NON_LOOPBACK_FLAG}"
+        ),
     )
     serve.add_argument(
         "--port",
         type=int,
         default=DEFAULT_PORT,
         help=f"port (default {DEFAULT_PORT})",
+    )
+    serve.add_argument(
+        ALLOW_NON_LOOPBACK_FLAG,
+        action="store_true",
+        help=(
+            "allow binding a non-loopback --host; the service has no built-in "
+            "authentication, so add a firewall or an authenticating reverse proxy"
+        ),
     )
 
 
@@ -83,7 +109,8 @@ def run_serve(
     Storage is opened read-only; this command never plans, fetches, or writes.
     """
     host = getattr(args, "host", DEFAULT_HOST)
-    message = check_bind_host(host)
+    allow_non_loopback = bool(getattr(args, "allow_non_loopback", False))
+    message = check_bind_host(host, allow_non_loopback=allow_non_loopback)
     if message:
         out.err(f"error: {message}")
         return EXIT_USAGE
@@ -116,7 +143,17 @@ def run_serve(
     gate = open_readonly_quota_gate(settings, root)
     app = create_app(settings=settings, backend=backend, data_dir=root, quota_gate=gate)
     out.line("openbars serve: read-only local UI and self-hosted API (/api/v1, see docs/api.md)")
-    out.line(f"listening on http://{host}:{port}  (loopback only; no fetch, no writes)")
+    if is_loopback_host(host):
+        out.line(f"listening on http://{host}:{port}  (loopback only; no fetch, no writes)")
+    else:
+        out.line(f"listening on http://{host}:{port}  (non-loopback; no fetch, no writes)")
+        out.err(
+            "WARNING: openbars serve is bound to a non-loopback address "
+            f"({host}:{port}); it has NO built-in authentication and NO built-in TLS. "
+            "Anyone who can reach this address can read your stored bars, instruments and "
+            "quota usage. Add a firewall or an authenticating reverse proxy; "
+            f"{ALLOW_NON_LOOPBACK_FLAG} only lifts the loopback restriction."
+        )
     run = server
     if run is None:
         try:

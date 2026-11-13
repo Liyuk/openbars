@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from openbars.cli.main import main
-from openbars.cli.serve import HTTP_EXTRA_HINT, check_bind_host, is_loopback_host
+from openbars.cli.serve import ALLOW_NON_LOOPBACK_FLAG, HTTP_EXTRA_HINT, check_bind_host, is_loopback_host
 
 pytestmark = pytest.mark.usefixtures("no_network")
 
@@ -35,6 +35,7 @@ providers: {{}}
 def test_loopback_hosts_are_accepted(host):
     assert is_loopback_host(host)
     assert check_bind_host(host) is None
+    assert check_bind_host(host, allow_non_loopback=True) is None
 
 
 @pytest.mark.parametrize(
@@ -43,7 +44,16 @@ def test_loopback_hosts_are_accepted(host):
 )
 def test_non_loopback_hosts_are_rejected(host):
     assert not is_loopback_host(host)
-    assert check_bind_host(host)
+    message = check_bind_host(host)
+    assert message
+    assert ALLOW_NON_LOOPBACK_FLAG in message
+    assert "built-in authentication" in message
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "203.0.113.10", "example.com"])
+def test_non_loopback_hosts_accepted_with_opt_in(host):
+    assert not is_loopback_host(host)
+    assert check_bind_host(host, allow_non_loopback=True) is None
 
 
 def test_serve_is_listed_in_help(capsys):
@@ -54,7 +64,59 @@ def test_serve_is_listed_in_help(capsys):
         main(["serve", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
+    # argparse wraps the description, so compare on whitespace-normalized text.
+    flat = " ".join(out.split()).lower()
     assert "127.0.0.1" in out and "8787" in out and "loopback" in out.lower()
+    assert ALLOW_NON_LOOPBACK_FLAG in out
+    assert "authentication" in out.lower()
+    # The help text must state the product positioning: self-hosted, no hosted service.
+    assert "self-hosted" in flat
+    assert "no hosted service" in flat
+    assert "/api/v1" in flat
+
+
+def _install_fake_uvicorn(monkeypatch, seen: dict[str, object]) -> None:
+    import sys
+    import types
+
+    def fake_run(app, *, host, port, log_level="info"):
+        seen.update(app=app, host=host, port=port, log_level=log_level)
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = fake_run
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "203.0.113.10", "::"])
+def test_allow_non_loopback_binds_and_warns(tmp_path, capsys, monkeypatch, host):
+    seen: dict[str, object] = {}
+    _install_fake_uvicorn(monkeypatch, seen)
+
+    code = main(
+        ["--config", str(_config(tmp_path)), "serve", "--host", host, ALLOW_NON_LOOPBACK_FLAG],
+        env={},
+    )
+    assert code == 0
+    assert seen["host"] == host
+    captured = capsys.readouterr()
+    assert "non-loopback" in captured.out.lower()
+    assert "no fetch" in captured.out.lower() or "no writes" in captured.out.lower()
+    warning = captured.err.lower()
+    assert "warning" in warning
+    assert "no built-in authentication" in warning
+    assert "no built-in tls" in warning
+    assert SECRET not in captured.out + captured.err
+
+
+def test_allow_non_loopback_is_harmless_for_loopback(tmp_path, capsys, monkeypatch):
+    seen: dict[str, object] = {}
+    _install_fake_uvicorn(monkeypatch, seen)
+
+    assert main(["--config", str(_config(tmp_path)), "serve", ALLOW_NON_LOOPBACK_FLAG], env={}) == 0
+    assert seen["host"] == "127.0.0.1"
+    captured = capsys.readouterr()
+    assert "loopback only" in captured.out.lower()
+    assert "warning" not in captured.err.lower()
 
 
 def test_non_loopback_host_exits_before_binding(tmp_path, capsys):
@@ -71,6 +133,8 @@ def test_non_loopback_host_exits_before_binding(tmp_path, capsys):
     assert code == 2
     err = capsys.readouterr().err
     assert "loopback" in err.lower() and "0.0.0.0" in err
+    assert ALLOW_NON_LOOPBACK_FLAG in err
+    assert "built-in authentication" in err
     assert recorded == []
 
 

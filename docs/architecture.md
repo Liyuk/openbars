@@ -121,7 +121,7 @@ by every layer and depend on none of them.
 | 7 Reconcile | `openbars.reconcile` | multi-source alignment, priority, tolerances, fallback fill, quality flags, audit records | fetching |
 | 8 Canonical layer | `openbars.reconcile` output | one series per `(instrument_id, time, policy_version)` | — |
 | 9 Storage | `openbars.storage` | read/write raw, canonical, reference data and logs; atomic writes; partitioning | business rules |
-| 10 Read | `openbars.api` | query canonical, derive adjustments, export; optional read-only HTTP service (`openbars serve`, loopback only, see §13) | writes |
+| 10 Read | `openbars.api` | query canonical, derive adjustments, export; optional read-only HTTP service (`openbars serve`, loopback by default, see §13) | writes |
 
 ## 3. Core data model (`openbars.core.models`)
 
@@ -1848,19 +1848,20 @@ src/openbars/
 v0.5 provides a local data view for coverage, quality and charts — not a trading terminal.
 The entry point is `openbars serve` (`uv sync --extra http`).
 
-**Access boundary.** It binds `127.0.0.1:8787` by default, and this version always rejects a
-non-loopback `--host`: any non-loopback address exits with an error instead of listening on a
-LAN or public port. Storage is opened read-only and the UI offers no write or fetch entry
-point. The quota snapshot returns usage only, never key material, and a missing `quota.db` is
-never created.
+**Access boundary.** It binds `127.0.0.1:8787` by default. A non-loopback `--host` is
+refused with an error instead of listening on a LAN or public port unless the caller passes
+`--allow-non-loopback`; passing that flag while binding loopback is harmless. Storage is
+opened read-only and the UI offers no write or fetch entry point. The quota snapshot returns
+usage only, never key material, and a missing `quota.db` is never created.
 
 **`/api/v1` is a public, self-hosted API.** These JSON routes serve the bundled UI, and they
 are also the documented read API for anyone who deploys OpenBars themselves — including fully
 private deployments. There is no hosted service. The endpoints, parameters, response shapes,
-error envelope and the version/stability rules are documented in [api.md](api.md). Exposing the
-service beyond loopback is not possible in this version; the opt-in bind switch is tracked
-separately, and exposing it would publish a read-only view of your stored data with **no
-built-in authentication**.
+error envelope and the version/stability rules are documented in [api.md](api.md). Binding a
+non-loopback address is an explicit opt-in (`--allow-non-loopback`), and it prints a startup
+warning because it publishes a read-only view of your stored data with **no built-in
+authentication and no built-in TLS**; callers must add a firewall or an authenticating reverse
+proxy.
 
 **Pages (English / Chinese toggle).** The dashboard shows per-market coverage, first/last
 session, quality-flag counts and quota usage; the flags page lists the details; the chart page
