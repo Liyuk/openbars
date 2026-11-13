@@ -161,6 +161,9 @@ CANONICAL_BARS_FIELDS = [
     _f("available_at", TS, True),
     # Additive freshness tier. Missing/null rows predate tiering and are treated as final.
     _f("freshness", pa.string(), True),
+    # Additive (#202): the selected source bar's raw ``fetch_id``; old files read back as null.
+    # This is the stable canonical -> raw fetch-batch pointer; it is not a caller foreign key.
+    _f("source_fetch_id", pa.string(), True),
 ]
 
 INSTRUMENTS_FIELDS = [
@@ -319,7 +322,9 @@ CANONICAL_KEY_SQL: tuple[str, ...] = (
 # Columns that describe *how* a row arrived, not *what* it says. A re-write that only
 # differs in these is a no-op (it does not create a new part file).
 RAW_LINEAGE_COLUMNS = frozenset({"fetch_id", "source_artifact_ref", "ingest_run_id", "ingested_at"})
-CANONICAL_LINEAGE_COLUMNS = frozenset({"generated_at"})
+# ``source_fetch_id`` is lineage, not content: re-fetching the same source bar keeps the original
+# id (the raw layer keeps the original ``fetch_id`` for an unchanged row too).
+CANONICAL_LINEAGE_COLUMNS = frozenset({"generated_at", "source_fetch_id"})
 # #154: a stored canonical row is the "same source bar" as an incoming one (so the earlier
 # ``available_at`` is kept) only when all of these match. ``source_fingerprint`` alone is not
 # enough: the daily path fingerprints without a source bar id, so a changed source or a price

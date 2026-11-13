@@ -613,6 +613,8 @@ class CanonicalBarRow:
     available_at: datetime | None = None
     freshness: str = "final"
     currency: str | None = None  # ISO 4217 of the bar prices; not a schema column (see capabilities)
+    # #202: the selected source bar's raw ``fetch_id`` (canonical -> fetch batch pointer).
+    source_fetch_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.instrument_id or not self.policy_version or not self.provider:
@@ -637,6 +639,10 @@ class CanonicalBarRow:
         _set(self, "generated_at", _utc(self.generated_at, "generated_at"))
         if self.available_at is not None:
             _set(self, "available_at", _utc(self.available_at, "available_at"))
+        if self.source_fetch_id is not None and (
+            not isinstance(self.source_fetch_id, str) or not self.source_fetch_id
+        ):
+            raise InvalidBarError("source_fetch_id must be a non-empty string or None")
         freshness = self.freshness or "final"
         if freshness not in {"provisional", "final"}:
             raise InvalidBarError("freshness must be 'provisional' or 'final'")
@@ -697,6 +703,7 @@ class CanonicalBarRow:
         capabilities: Sequence[str] = (),
         source_fingerprint: str = "",
         generated_at: datetime | None = None,
+        source_fetch_id: str | None = None,
     ) -> "CanonicalBarRow":
         bar = canonical.bar
         return cls(
@@ -728,6 +735,7 @@ class CanonicalBarRow:
             reconcile_rule=canonical.reconcile_rule,
             policy_version=policy_version,
             generated_at=generated_at or datetime.now(UTC),
+            source_fetch_id=source_fetch_id,
         )
 
     def to_canonical_bar(self) -> CanonicalBar:
