@@ -1,0 +1,15 @@
+{
+  "adjustment": "split",
+  "available_sources": [],
+  "bars": [],
+  "end": "2026-11-12",
+  "instrument_id": "cn:eq:xshg:TESTA",
+  "interval": "1h",
+  "market": "cn",
+  "missing_hours": [],
+  "missing_sessions": [],
+  "note": "No canonical hourly bars are available.",
+  "source": "canonical",
+  "start": "2026-11-06",
+  "symbol": "TESTA"
+}

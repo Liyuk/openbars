@@ -1,0 +1,18 @@
+{
+  "available": true,
+  "providers": [
+    {
+      "id": "example",
+      "penalized_until": null,
+      "provider": "example",
+      "remaining": {
+        "day": 88,
+        "minute": 57
+      },
+      "used": {
+        "day": 12,
+        "minute": 3
+      }
+    }
+  ]
+}

@@ -10,6 +10,11 @@
       "header.readonly": "read-only",
       "header.station_title": "Shows data already on disk. Never fetches or writes.",
       "footer.api": "/api/v1 is a self-hosted API: you deploy it and you own it; there is no hosted service. Bound to this machine by default.",
+      "demo.banner": "Demo with synthetic data",
+      "demo.note": "Synthetic TEST* symbols only. This is not a hosted OpenBars service and it reads no live data.",
+      "demo.cta": "Run your own self-hosted OpenBars",
+      "header.static_host": "static demo",
+      "header.static_title": "Synthetic demo data only. No backend, no fetching, no writes.",
       "interval.label": "Interval",
       "dash.title": "Observation register",
       "dash.lede": "What is stored on disk, per market. This page never fetches or writes.",
@@ -33,6 +38,7 @@
       "dash.open_flags": "Open flags register ›",
       "dash.quota_note": "Counts from the local quota store. Keys are never shown.",
       "dash.no_markets": "No stored markets yet. Run `openbars run` in a terminal, then reload. This page never fetches.",
+      "dash.no_markets_static": "No 1h bars in this synthetic sample. Switch the interval to 1d. This page never fetches.",
       "dash.no_quota": "No quota store found. The read-only server never creates one.",
       "fresh.final": "final",
       "fresh.provisional": "provisional",
@@ -105,6 +111,11 @@
       "header.readonly": "只读",
       "header.station_title": "只展示已落盘数据，不抓取、不写入。",
       "footer.api": "/api/v1 是自托管的公开 API：谁下载谁部署，可完全私有，没有托管服务。默认只绑定本机。",
+      "demo.banner": "合成数据演示",
+      "demo.note": "只含合成的 TEST* 代码。这不是托管的 OpenBars 服务，也不读取任何实时数据。",
+      "demo.cta": "部署你自己的自托管 OpenBars",
+      "header.static_host": "静态演示",
+      "header.static_title": "只有合成演示数据：无后端、不抓取、不写入。",
       "interval.label": "周期",
       "dash.title": "观测记录",
       "dash.lede": "按市场查看已落盘的数据。本页不会抓取或写入。",
@@ -128,6 +139,7 @@
       "dash.open_flags": "查看质量标记 ›",
       "dash.quota_note": "来自本机额度库的计数，不显示任何密钥。",
       "dash.no_markets": "还没有已存储的市场。请在终端运行 `openbars run` 后刷新。本页不会抓取。",
+      "dash.no_markets_static": "这份合成样例没有小时线（1h）数据，请切换到 1d。本页不会抓取。",
       "dash.no_quota": "未找到额度库。只读服务不会创建它。",
       "fresh.final": "正式",
       "fresh.provisional": "临时",
@@ -197,6 +209,36 @@
   var lang = "en";
   var chartApi = null;
   var candleSeries = null;
+  // Static builds (GitHub Pages demo) replace the fetch-backed API with an
+  // in-memory sample and need base-path aware navigation.
+  var STATIC = window.OPENBARS_STATIC === true;
+  var BASE = "/";
+
+  function detectBase() {
+    try {
+      var script = document.currentScript;
+      var src = script && script.src ? String(script.src) : "";
+      var marker = "/assets/app.js";
+      var at = src.indexOf(marker);
+      if (at === -1) return;
+      var path = src.slice(0, at + 1);
+      var scheme = path.indexOf("://");
+      if (scheme !== -1) {
+        var slash = path.indexOf("/", scheme + 3);
+        path = slash === -1 ? "/" : path.slice(slash);
+      }
+      if (path.charAt(0) === "/") BASE = path;
+    } catch (err) {}
+  }
+
+  detectBase();
+
+  function pageHref(page) {
+    if (!STATIC) return page === "dash" ? "/" : "/" + page;
+    var fileMode = location.protocol === "file:";
+    if (page === "dash") return BASE + (fileMode ? "index.html" : "");
+    return BASE + page + "/" + (fileMode ? "index.html" : "");
+  }
 
   function detectLang() {
     try {
@@ -235,8 +277,11 @@
   }
 
   function pathOf() {
-    var path = location.pathname.replace(/\/+$/, "") || "/";
-    return path;
+    var path = location.pathname || "/";
+    var base = BASE.replace(/\/+$/, "");
+    if (base && path.indexOf(base) === 0) path = path.slice(base.length);
+    path = path.replace(/\/index\.html$/, "").replace(/\/+$/, "");
+    return path || "/";
   }
 
   function markNav() {
@@ -249,8 +294,22 @@
     });
   }
 
+  // Point internal links at the current base path (Pages sub-path, local file tree).
+  function rewriteLinks() {
+    document.querySelectorAll(".tabs a[data-p]").forEach(function (el) {
+      el.setAttribute("href", pageHref(el.getAttribute("data-p")));
+    });
+    document.querySelectorAll("a[data-page]").forEach(function (el) {
+      el.setAttribute("href", pageHref(el.getAttribute("data-page")));
+    });
+  }
+
   function apiGet(path) {
-    return fetch(path, { headers: { Accept: "application/json" } }).then(function (res) {
+    var request =
+      typeof window.OPENBARS_STATIC_API === "function"
+        ? window.OPENBARS_STATIC_API(path)
+        : fetch(path, { headers: { Accept: "application/json" } });
+    return request.then(function (res) {
       return res.json().then(function (body) {
         if (!res.ok) {
           var detail = body && body.detail ? body.detail : res.statusText;
@@ -259,6 +318,12 @@
         return body;
       });
     });
+  }
+
+  function asNumber(value) {
+    if (value == null || value === "") return null;
+    var n = Number(value);
+    return Number.isFinite(n) ? n : null;
   }
 
   function escapeHtml(value) {
@@ -353,12 +418,13 @@
         var quota = results[2];
 
         if (!markets.length) {
-          marketRows.innerHTML = '<tr><td colspan="9" style="padding: 20px; color: var(--pencil);">' + t("dash.no_markets") + "</td></tr>";
+          var empty = STATIC ? "dash.no_markets_static" : "dash.no_markets";
+          marketRows.innerHTML = '<tr><td colspan="9" style="padding: 20px; color: var(--pencil);">' + t(empty) + "</td></tr>";
         } else {
           marketRows.innerHTML = markets
             .map(function (m) {
               var flagsTotal = Object.values(m.flags || {}).reduce(function (a, b) { return a + b; }, 0);
-              var flagsLink = flagsTotal > 0 ? '<a class="flagcount" href="/flags?interval=' + interval + '">' + flagsTotal + ' ›</a>' : '<span class="zero">0</span>';
+              var flagsLink = flagsTotal > 0 ? '<a class="flagcount" href="' + pageHref("flags") + '?interval=' + interval + '">' + flagsTotal + ' ›</a>' : '<span class="zero">0</span>';
               var firstSession = m.first_session || "—";
               var lastSession = m.last_session || "—";
               var range = firstSession === "—" || lastSession === "—" ? "—" : firstSession + " → " + lastSession;
@@ -465,7 +531,7 @@
             var params = new URLSearchParams();
             params.set("interval", interval);
             if (this.value) params.set("flag", this.value);
-            history.replaceState(null, "", "/flags?" + params.toString());
+            history.replaceState(null, "", pageHref("flags") + "?" + params.toString());
             renderFlags();
           });
         });
@@ -514,7 +580,7 @@
             params.set("interval", interval);
             if (flag) params.set("flag", flag);
             if (newOffset) params.set("offset", newOffset);
-            history.replaceState(null, "", "/flags?" + params.toString());
+            history.replaceState(null, "", pageHref("flags") + "?" + params.toString());
             renderFlags();
           });
         });
@@ -529,7 +595,7 @@
 
   function renderChart() {
     var q = queryParams();
-    var initial = q.get("id") || q.get("symbol") || "";
+    var initial = q.get("id") || q.get("symbol") || (STATIC ? "TEST1" : "");
     var initialSource = q.get("source") || "canonical";
     var initialStart = q.get("start") || "";
     var initialEnd = q.get("end") || "";
@@ -592,7 +658,7 @@
     params.set("interval", interval);
     if (start) params.set("start", start);
     if (end) params.set("end", end);
-    history.replaceState(null, "", "/chart?" + params.toString());
+    history.replaceState(null, "", pageHref("chart") + "?" + params.toString());
 
     apiGet("/api/v1/bars?" + params.toString())
       .then(function (body) {
@@ -687,9 +753,10 @@
   }
 
   function formatNumber(value) {
-    if (value === 0 || value === "0") return "0";
-    if (value == null) return "—";
-    return value.toLocaleString(lang === "zh" ? "zh-CN" : "en-US");
+    var number = asNumber(value);
+    if (number === 0) return "0";
+    if (number == null) return "—";
+    return number.toLocaleString(lang === "zh" ? "zh-CN" : "en-US");
   }
 
   function populateBarTables(bars, interval) {
@@ -818,15 +885,20 @@
       borderVisible: true
     });
 
-    var chartData = bars.map(function (b) {
-      return {
-        time: timeOf(b),
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close
-      };
-    });
+    var chartData = bars
+      .map(function (b) {
+        return {
+          time: timeOf(b),
+          open: asNumber(b.open),
+          high: asNumber(b.high),
+          low: asNumber(b.low),
+          close: asNumber(b.close)
+        };
+      })
+      // Decimal values arrive as strings; Lightweight Charts needs numbers.
+      .filter(function (b) {
+        return b.open != null && b.high != null && b.low != null && b.close != null;
+      });
 
     if (chartData.length) candleSeries.setData(chartData);
 
@@ -901,11 +973,16 @@
       bar.session_date;
     document.getElementById("s-date").textContent = dateStr;
 
-    document.getElementById("s-o").textContent = bar.open != null ? bar.open.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
-    document.getElementById("s-h").textContent = bar.high != null ? bar.high.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
-    document.getElementById("s-l").textContent = bar.low != null ? bar.low.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
-    document.getElementById("s-c").textContent = bar.close != null ? bar.close.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
-    document.getElementById("s-v").textContent = bar.volume != null ? bar.volume.toLocaleString(lang === "zh" ? "zh-CN" : "en-US") : "—";
+    function slipNumber(value) {
+      var number = asNumber(value);
+      return number == null ? "—" : number.toLocaleString(lang === "zh" ? "zh-CN" : "en-US");
+    }
+
+    document.getElementById("s-o").textContent = slipNumber(bar.open);
+    document.getElementById("s-h").textContent = slipNumber(bar.high);
+    document.getElementById("s-l").textContent = slipNumber(bar.low);
+    document.getElementById("s-c").textContent = slipNumber(bar.close);
+    document.getElementById("s-v").textContent = slipNumber(bar.volume);
 
     if (bar.freshness) {
       var freshnessClass = bar.freshness === "provisional" ? "prov" : "final";
@@ -928,12 +1005,15 @@
   function init() {
     lang = detectLang();
     setLang(lang);
+    rewriteLinks();
 
     // Set host address to current location.host
     var hostAddr = document.getElementById("host-addr");
     if (hostAddr) {
-      hostAddr.textContent = location.host || "127.0.0.1:8787";
+      hostAddr.textContent = STATIC ? t("header.static_host") : location.host || "127.0.0.1:8787";
     }
+    var station = document.querySelector(".station");
+    if (station && STATIC) station.title = t("header.static_title");
 
     document.getElementById("lang-toggle").addEventListener("click", function () {
       lang = lang === "zh" ? "en" : "zh";
@@ -957,7 +1037,7 @@
       r.addEventListener("change", function () {
         var q = new URLSearchParams(location.search);
         q.set("interval", this.value);
-        history.replaceState(null, "", "/flags?" + q.toString());
+        history.replaceState(null, "", pageHref("flags") + "?" + q.toString());
         renderFlags();
       });
     });

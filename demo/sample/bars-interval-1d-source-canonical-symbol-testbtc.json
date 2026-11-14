@@ -1,0 +1,101 @@
+{
+  "adjustment": "split",
+  "available_sources": [
+    "canonical"
+  ],
+  "bars": [
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-06T22:00:00+00:00",
+      "close": "10000.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "10000.90000000",
+      "instrument_id": "crypto:spot:TESTBTC",
+      "low": "9998.90000000",
+      "missing_fields": [],
+      "open": "9999.50000000",
+      "provider": "example",
+      "session_date": "2026-11-06",
+      "ts_start": "2026-11-06T21:00:00+00:00",
+      "volume": "210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-09T22:00:00+00:00",
+      "close": "10020.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "10020.90000000",
+      "instrument_id": "crypto:spot:TESTBTC",
+      "low": "10018.90000000",
+      "missing_fields": [],
+      "open": "10019.50000000",
+      "provider": "example",
+      "session_date": "2026-11-09",
+      "ts_start": "2026-11-09T21:00:00+00:00",
+      "volume": "210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-10T22:00:00+00:00",
+      "close": "10040.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "10040.90000000",
+      "instrument_id": "crypto:spot:TESTBTC",
+      "low": "10038.90000000",
+      "missing_fields": [],
+      "open": "10039.50000000",
+      "provider": "example",
+      "session_date": "2026-11-10",
+      "ts_start": "2026-11-10T21:00:00+00:00",
+      "volume": "210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-11T22:00:00+00:00",
+      "close": "10060.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "10060.90000000",
+      "instrument_id": "crypto:spot:TESTBTC",
+      "low": "10058.90000000",
+      "missing_fields": [],
+      "open": "10059.50000000",
+      "provider": "example",
+      "session_date": "2026-11-11",
+      "ts_start": "2026-11-11T21:00:00+00:00",
+      "volume": "210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-12T22:00:00+00:00",
+      "close": "10080.00000000",
+      "flags": [],
+      "freshness": "provisional",
+      "high": "10080.90000000",
+      "instrument_id": "crypto:spot:TESTBTC",
+      "low": "10078.90000000",
+      "missing_fields": [],
+      "open": "10079.50000000",
+      "provider": "example",
+      "session_date": "2026-11-12",
+      "ts_start": "2026-11-12T21:00:00+00:00",
+      "volume": "210.00000000"
+    }
+  ],
+  "end": "2026-11-12",
+  "instrument_id": "crypto:spot:TESTBTC",
+  "interval": "1d",
+  "market": "crypto",
+  "missing_hours": [],
+  "missing_sessions": [
+    "2026-11-07",
+    "2026-11-08"
+  ],
+  "note": null,
+  "source": "canonical",
+  "start": "2026-11-06",
+  "symbol": "TESTBTC"
+}

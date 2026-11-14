@@ -1,0 +1,20 @@
+{
+  "counts": {
+    "adjustment_unverified": 0,
+    "divergent": 0,
+    "filled_from_fallback": 0,
+    "gap": 0,
+    "limit_down": 0,
+    "limit_up": 0,
+    "revised": 0,
+    "single_source": 0,
+    "spike_suspect": 0,
+    "stale": 0,
+    "suspended": 0,
+    "volume_missing": 0
+  },
+  "items": [],
+  "limit": 200,
+  "offset": 0,
+  "total": 0
+}

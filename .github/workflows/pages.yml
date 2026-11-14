@@ -1,0 +1,52 @@
+# Deploy the static synthetic-data demo to GitHub Pages.
+#
+# The demo is the same read-only UI as `openbars serve`, rebuilt from
+# src/openbars/web/static plus the checked-in demo/sample sample. It reads no
+# backend and no external data source, so the build needs only the standard
+# library. Pages is served from the "GitHub Actions" source: there is no
+# gh-pages branch.
+name: Pages demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/openbars/web/static/**"
+      - "demo/**"
+      - "scripts/build_pages_demo.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build static demo site
+        run: python scripts/build_pages_demo.py --out _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
