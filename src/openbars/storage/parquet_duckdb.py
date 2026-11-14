@@ -319,8 +319,9 @@ class _PartitionedTable:
         if not files:
             return spec.schema.empty_table()
         self.backend.check_versions(files)
+        has_available_at = any("available_at" in pq.read_schema(p).names for p in files)
         sql = (
-            f"SELECT * FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(files), has_available_at=any("available_at" in pq.read_schema(p).names for p in files))}) "
+            f"SELECT * FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(files), has_available_at=has_available_at)}) "
             f"WHERE {where} ORDER BY {spec.order_sql}"
         )
         con = _mem_connection()
@@ -481,8 +482,9 @@ class _PartitionedTable:
         differs = " OR ".join(
             f"i.{qident(c)} IS DISTINCT FROM {'e.' + qident(c) if c in present else 'NULL'}" for c in content
         )
+        has_available_at = "available_at" in present
         sql = (
-            f"WITH e AS (SELECT *, TRUE AS _hit FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(existing_files), has_available_at="available_at" in present)})) "
+            f"WITH e AS (SELECT *, TRUE AS _hit FROM ({_dedup_sql(spec, 'read_parquet(?, filename=true, union_by_name=true)', has_write_rank=self._has_write_rank(existing_files), has_available_at=has_available_at)})) "
             f"SELECT i._idx FROM incoming i LEFT JOIN e ON {on} WHERE e._hit IS NULL OR ({differs})"
         )
         con = _mem_connection()
