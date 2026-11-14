@@ -32,7 +32,7 @@ US (including ETFs) daily → crypto daily → China A-share daily → Hong Kong
 
 ### Quick start
 
-Needs Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/). US daily bars as the example:
+Needs Python ≥ 3.11.5 and [uv](https://docs.astral.sh/uv/). US daily bars as the example:
 
 ```bash
 uv sync                               # install core dependencies (includes Parquet / DuckDB)

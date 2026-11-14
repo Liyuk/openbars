@@ -45,7 +45,7 @@ OpenBars 是一个**本地运行的行情仓库框架**，不是又一个数据�
 
 ## 安装
 
-需要 Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)：
+需要 Python ≥ 3.11.5 与 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
 git clone https://github.com/Liyuk/openbars.git
