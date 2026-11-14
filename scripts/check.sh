@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Local one-shot checks for openbars: tests, sanitization, secret scan.
-# GitHub Actions is manual-only (workflow_dispatch); run this before every push.
+# CI (.github/workflows/ci.yml) runs these on pull requests and pushes to main;
+# run this locally before every push.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

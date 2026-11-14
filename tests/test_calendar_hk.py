@@ -125,8 +125,10 @@ def test_latest_completed_session_uses_actual_close():
 
 def test_coverage_is_documented_and_out_of_range_raises():
     first, last = coverage()
-    assert first <= date(2006, 11, 13)
-    assert last >= date(2026, 11, 11)  # current year must be covered
+    # exchange_calendars uses a rolling ~20-year window; the exact first
+    # session advances with today's date, so do not pin a calendar day.
+    assert first <= date.today() - timedelta(days=365 * 19)
+    assert last >= date.today()
     # Do not invent sessions past the bundled holiday table.
     past = last + timedelta(days=1)
     # skip weekend to still be a weekday when possible

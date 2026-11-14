@@ -46,13 +46,14 @@ The check prints only `file:line: rule`; it never prints the matched value.
 The one-shot check runs at the repository root as `./scripts/check.sh`: it runs `uv run pytest`,
 `uv run python scripts/check_sanitized.py` (working tree + `--history`), and gitleaks (full
 history + working tree, using `.gitleaks.toml`). If `gitleaks` is installed locally it is used
-directly; otherwise the Docker image `zricethezav/gitleaks:v8.30.1` is used. The repository keeps
-`.github/workflows/ci.yml`, but its only trigger is `workflow_dispatch`, so it does not run on
-push / PR and does not consume paid GitHub Actions minutes. Do not rely on Actions day to day.
+directly; otherwise the Docker image `zricethezav/gitleaks:v8.30.1` is used. CI runs the same
+checks in `.github/workflows/ci.yml` on pull requests, on pushes to `main` and on manual
+`workflow_dispatch`, on standard GitHub-hosted runners. Run `./scripts/check.sh` locally before
+pushing rather than relying on CI to catch problems.
 
 1. Optionally install the hooks: `pipx install pre-commit && pre-commit install && pre-commit install --hook-types pre-push` (the machine needs Go to build the gitleaks hook, or install gitleaks yourself and switch the hook to `language: system`). The pre-push hook calls `scripts/check.sh`.
 2. Before posting an issue / PR / Discussion body: `pbpaste | python3 scripts/check_sanitized.py --stdin`.
-3. `./scripts/check.sh` must pass locally before merging. GitHub Actions may only be triggered manually and is not used day to day.
+3. `./scripts/check.sh` must pass locally before merging. GitHub Actions repeats these checks on pull requests and pushes to `main`; it is a safety net, not a substitute for the local run.
 
 ## 4. Pre-publication checklist
 

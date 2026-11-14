@@ -8,9 +8,9 @@ ending at the library's session close (12:00 HKT in recent years) and no lunch b
 ``session_bounds`` returns those UTC segments; ``TradingSession`` spans the first open
 to the last close (the lunch break is not a gap in the session object).
 
-``exchange_calendars`` 4.13.x ships a default XHKG session range of 2006-11-13 through
-2027-11-11. Queries outside that range raise ``ValueError`` rather than inventing
-sessions or holidays. Historical unscheduled closures that the library already records
+``exchange_calendars`` 4.13.x ships a default XHKG session range of about twenty
+years (call ``coverage()`` for the current inclusive bounds). Queries outside that
+range raise ``ValueError`` rather than inventing sessions or holidays. Historical unscheduled closures that the library already records
 (for example some typhoon / black-rain days in ``adhoc_holidays``) are used as-is.
 Future weather closures cannot be predicted and are **not** handwritten here.
 Users (or a later importer they run) may register an announcement-backed day via
