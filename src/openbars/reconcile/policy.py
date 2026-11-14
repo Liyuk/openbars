@@ -23,7 +23,7 @@ PRICE_TOLERANCE_PCT = Decimal("0.5")
 VOLUME_TOLERANCE_PCT = Decimal("5")
 CORROBORATION_QUORUM = 2
 
-# Capability strings (see docs/architecture.md section 11.2).
+# Capability strings (see docs/architecture-internals.md section 11.2).
 CAP_PRICE_OHLC = "price_ohlc"
 CAP_CONSOLIDATED_VOLUME = "consolidated_volume"
 CAP_SPLIT_ADJUSTED_VOLUME = "split_adjusted_volume"

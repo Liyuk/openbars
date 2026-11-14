@@ -1,5 +1,5 @@
 -- DDL only (no data) for the tables the upstream_compat adapter reads or introspects.
--- Column names and types follow docs/architecture.md section 11.3. Used by the opt-in
+-- Column names and types follow docs/architecture-internals.md section 11.3. Used by the opt-in
 -- live Postgres tests; the checker itself is covered offline with a fake catalog.
 CREATE TABLE instrument (
   id BIGSERIAL PRIMARY KEY, issuer_id BIGINT, asset_class VARCHAR(32) NOT NULL,

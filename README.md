@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/logo/logo.svg" width="96" alt="OpenBars logo"></p>
+
 # OpenBars
 
 **English** | [中文](README.zh-CN.md)
@@ -5,6 +7,8 @@
 > **Free, multi-market, multi-source OHLCV bar collection, cleaning and reconciliation into one canonical dataset.**
 
 **Status: pre-alpha.** US daily, crypto daily, China A-share daily (BaoStock primary; AKShare Eastmoney/Sina as a low-frequency backup; optional Tushare free-tier token source; all optional extras), and Hong Kong daily (yfinance primary, AKShare corroboration) run through the local `plan` / `run` path. `verify` covers every market in `markets` (US / crypto / China A-shares / Hong Kong, each on its own calendar and `policy_version`). US 1h collection is available as raw bars; other non-daily intervals come later. Pre-alpha: the API may change.
+
+**Documentation:** [Data sources](DATA_SOURCES.md) (every supported provider, keys, same-day behaviour, terms) · [Architecture overview](docs/ARCHITECTURE.md) · [Live demo](https://liyuk.github.io/openbars/) (synthetic data only).
 
 ---
 
@@ -24,7 +28,7 @@ There are many single-provider clients (yfinance, ccxt, AKShare) and unified que
 
 ### Roadmap
 
-US (including ETFs) daily → crypto daily → China A-share daily → Hong Kong daily → local read-only UI (v0.5); US hourly follows in v0.6. Hourly and minute data open up gradually as optional capabilities. See [docs/roadmap.md](docs/roadmap.md), [docs/architecture.md](docs/architecture.md), [docs/source-contract.md](docs/source-contract.md) (the generic bar + source-information contract for caller adapters), [docs/api.md](docs/api.md) (the `/api/v1` read API reference), and [docs/upstream-switch.md](docs/upstream-switch.md) (optional compatibility backend).
+US (including ETFs) daily → crypto daily → China A-share daily → Hong Kong daily → local read-only UI (v0.5); US hourly follows in v0.6. Hourly and minute data open up gradually as optional capabilities. See [docs/roadmap.md](docs/roadmap.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (architecture overview), [docs/architecture-internals.md](docs/architecture-internals.md) (deep internals), [DATA_SOURCES.md](DATA_SOURCES.md) (data sources), [docs/source-contract.md](docs/source-contract.md) (the generic bar + source-information contract for caller adapters), [docs/api.md](docs/api.md) (the `/api/v1` read API reference), and [docs/upstream-switch.md](docs/upstream-switch.md) (optional compatibility backend).
 
 ### Quick start
 
@@ -54,7 +58,7 @@ uv run openbars jobs retry --dead     # dead jobs are re-queued only on an expli
 # uv run openbars export-postgres --source ./data/canonical --dsn "$TARGET_PG_DSN" --days 30 --apply
 ```
 
-- `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. New installs write to `parquet_duckdb` and use a local SQLite quota gate. `upstream_compat` is for migration and tests only; explicit existing backend configuration continues to be honored. See the [provider key and limits guide](docs/provider-keys.md). If either target already exists it prints an error, writes nothing and exits 2.
+- `init [directory]` starts a terminal wizard; non-terminal use or `--yes` copies the example files. New installs write to `parquet_duckdb` and use a local SQLite quota gate. `upstream_compat` is for migration and tests only; explicit existing backend configuration continues to be honored. See the [provider key and limits guide](docs/provider-keys.md) and the [data sources overview](DATA_SOURCES.md). If either target already exists it prints an error, writes nothing and exits 2.
 - **Key priority (highest first):** (1) the process environment; (2) a dotenv file: `--env-file`, else `OPENBARS_ENV_FILE`, else `env_file` in `config.yaml`, and when none of those is set, **`.env` next to `config.yaml`** is loaded automatically (no error if it is absent); (3) `${VAR:-default}` in `config.yaml`. `ALPACA_API_KEY` / `ALPACA_API_SECRET` are accepted as aliases for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` when the canonical name is unset.
 
 ### Runtime directory

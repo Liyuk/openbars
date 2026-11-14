@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img">
+  <title>OpenBars logo: a hollow candle that reads as the letter O, on a navy disc</title>
+  <circle cx="64" cy="64" r="58" fill="#0b1f2a" stroke="#2dd4bf" stroke-opacity="0.45" stroke-width="3"/>
+  <g fill="none" stroke="#2dd4bf" stroke-linecap="round">
+    <rect x="44" y="40" width="40" height="48" rx="20" stroke-width="9"/>
+    <path d="M64 20V40M64 88V108" stroke-width="8"/>
+  </g>
+</svg>

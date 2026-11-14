@@ -3,7 +3,7 @@
 One definition drives every backend: Arrow/Parquet schemas for the raw, canonical and
 ref layers, the state-table specs (SQLite default, Postgres native), the dedup keys,
 and the SQL type mapping used for DuckDB views and Postgres DDL. See
-docs/architecture.md section 10 for the prose version.
+docs/architecture-internals.md section 10 for the prose version.
 
 Numbers: prices are ``decimal128(20,8)`` and volumes ``decimal128(28,8)`` everywhere
 (Parquet, DuckDB, Postgres ``NUMERIC``). Nothing is persisted through binary floats.
@@ -11,7 +11,7 @@ Numbers: prices are ``decimal128(20,8)`` and volumes ``decimal128(28,8)`` everyw
 Schema versioning: ``SCHEMA_VERSION`` is stamped into every Parquet file's key-value
 metadata (``openbars.schema_version``) and into ``state.db`` (``schema_meta``). v1 is the
 first on-disk version; any change to column names, types, keys or partitioning bumps
-it and ships a documented migration (architecture.md section 10.6). Readers refuse files
+it and ships a documented migration (architecture-internals.md section 10.6). Readers refuse files
 stamped with a version newer than ``SCHEMA_VERSION`` (``SchemaVersionError``).
 """
 

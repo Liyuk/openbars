@@ -12,7 +12,7 @@ avoid a lossy round trip the storage layer works on these row types instead:
 
 Fields the legacy models do not carry (``market``, ``session_date``, price-basis
 metadata, ``policy_version`` ...) are taken from ``RawBar.extra`` / explicit arguments
-and documented in architecture.md section 10.
+and documented in architecture-internals.md section 10.
 """
 
 from __future__ import annotations

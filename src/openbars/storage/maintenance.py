@@ -1,7 +1,7 @@
 """Storage maintenance for the Parquet backend: usage, compaction plan, retention, backup (#127).
 
 Everything here works on the data directory layout described in ``parquet_duckdb`` and
-docs/architecture.md section 10. Reports use paths *relative* to the data directory only.
+docs/architecture-internals.md section 10. Reports use paths *relative* to the data directory only.
 
 * ``usage`` -- file count and bytes per layer / market / interval / year (raw also by provider).
 * ``compact_plan`` -- read-only: which partitions ``compact`` would merge, and an estimate of

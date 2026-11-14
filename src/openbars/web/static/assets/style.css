@@ -95,30 +95,6 @@ a:hover {
   white-space: nowrap;
 }
 
-/* synthetic-data demo banner (static GitHub Pages build only) */
-.demo-banner {
-  background: var(--remark-tint);
-  border-bottom: 1px solid var(--remark);
-  color: var(--entry);
-  font-size: var(--t-label);
-  padding: 7px 24px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 16px;
-  align-items: baseline;
-  justify-content: center;
-  text-align: center;
-}
-
-.demo-banner p {
-  margin: 0;
-}
-
-.demo-banner b,
-.demo-banner a {
-  color: var(--remark);
-}
-
 /* masthead band */
 .mast {
   position: sticky;

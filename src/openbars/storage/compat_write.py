@@ -27,7 +27,7 @@ from openbars.core.models import AssetClass, CorporateAction, CorporateActionKin
 from openbars.storage.errors import StorageError
 from openbars.storage.rows import quality_status_for
 
-# Compatibility contract with upstream projectors (architecture.md section 11.3). Do not change.
+# Compatibility contract with upstream projectors (architecture-internals.md section 11.3). Do not change.
 ADVISORY_LOCK_PREFIX = "research-daily"
 _INT_ID = re.compile(r"-?\d+$")
 _ARTIFACT_REF = re.compile(r"^(?:source_artifact:)?(\d+)$")

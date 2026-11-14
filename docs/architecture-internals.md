@@ -1,8 +1,13 @@
-# OpenBars architecture
+# OpenBars architecture internals
 
-Status: draft v0.1. This document describes the current internal design. Field-level details
-of the storage contract live in [source-contract.md](source-contract.md); the public read API
-is documented in [api.md](api.md).
+Status: draft v0.1. This is the deep reference for the internal design. For a reader-facing
+overview start with [ARCHITECTURE.md](ARCHITECTURE.md) ([中文](ARCHITECTURE.zh-CN.md)); this
+file keeps the section numbers (§3, §10, §11, ...) that code comments refer to. Field-level
+details of the storage contract live in [source-contract.md](source-contract.md); the public
+read API is documented in [api.md](api.md).
+
+> This file was previously `docs/architecture.md`. It was renamed so that `docs/ARCHITECTURE.md`
+> can be the overview without colliding on case-insensitive file systems (macOS, Windows).
 
 ## 1. Goals and non-goals
 

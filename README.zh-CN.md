@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/logo/logo.svg" width="96" alt="OpenBars 标志"></p>
+
 # OpenBars
 
 [English](README.md) | **中文**
@@ -5,6 +7,8 @@
 > **免费、多市场、多数据源的 K 线采集、清洗与合并框架，产出一份可审计的唯一数据源。**
 
 **状态：pre-alpha。** 美股日线、加密日线、A 股日线（BaoStock 主源，AKShare 东财/新浪低频备源，Tushare 免费档可选 token 源，均为可选依赖）与港股日线（yfinance 主源，AKShare 佐证）已可在本地 `plan` / `run` 链路运行；美股 1h 可选采集到 raw 层；其他非日线粒度仍在路线图中。API 随时可能变化。
+
+**文档：** [数据源](DATA_SOURCES.zh-CN.md)（全部受支持的数据源、密钥、当日行为与条款）· [架构总览](docs/ARCHITECTURE.zh-CN.md) · [在线演示](https://liyuk.github.io/openbars/)（仅合成数据）。
 
 ## 它是什么
 
@@ -81,7 +85,7 @@ uv run openbars jobs retry --dead     # 死信作业只在显式重试后重新�
 - `verify` 是**报告而非闸门**：即使一致率不到 100% 也返回 0。
 - 可选：安装 `http` 额外依赖后运行 `uv run openbars serve`，打开 `http://127.0.0.1:8787` 的本机只读界面。
 
-更完整的市场、粒度、存储维护与升级说明见英文 [README](README.md) 和 [docs/](docs/)。
+更完整的市场、粒度、存储维护与升级说明见英文 [README](README.md) 和 [docs/](docs/)；架构与设计总览见 [docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md)（英文：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)），更深的内部细节见 [docs/architecture-internals.md](docs/architecture-internals.md)（英文）。
 
 ## 本地服务
 
@@ -193,7 +197,7 @@ OpenBars 采用 **BYOK（Bring Your Own Key）**：仓库不包含、不托管�
 - 密钥来源优先级（高 → 低）：① 进程环境变量；② dotenv 文件：`--env-file`，否则 `OPENBARS_ENV_FILE`，否则 `config.yaml` 的 `env_file`，都没有时自动读取 `config.yaml` 同目录的 `.env`；③ `config.yaml` 里 `${VAR:-default}` 的默认值。
 - `openbars init` 会引导你选择市场、数据源并写入 `.env`；`.env` 权限为 `0600`，且已被 git 忽略。
 - `openbars config` 只显示密钥是 `set` 还是 `missing`，不打印值。
-- 各数据源的申请方式、免费额度、历史范围与条款见 [docs/provider-keys.md](docs/provider-keys.md)。
+- 各数据源的申请方式、免费额度、历史范围与条款见 [docs/provider-keys.md](docs/provider-keys.md)；按市场与周期汇总的受支持数据源清单见 [DATA_SOURCES.zh-CN.md](DATA_SOURCES.zh-CN.md)。
 - 示例配置默认启用 Alpaca 与 Massive；缺 key 时 `run` 会报错并列出变量名。把不用的源改成 `enabled: false` 即可。
 - `quota:` 只能收紧默认免费额度；要调高必须显式写 `override: true`，否则报错。
 

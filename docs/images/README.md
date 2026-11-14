@@ -9,6 +9,9 @@ These images are linked from the English and Chinese README files. They were cap
 | `serve-desktop.png` | Dashboard (`/`) at a desktop width: per-market coverage, freshness tier, quality-flag counts, and the quota panel |
 | `serve-mobile.png` | Chart page (`/chart`) at a phone width, with quality-flag markers on the candlesticks |
 
+Brand assets (the logo, its previews and the social preview) are described in
+[`logo/README.md`](logo/README.md); they are generated, not captured from the UI.
+
 Rules:
 
 - Demo data only. Never capture personal file paths, API keys, quota-account details, email
