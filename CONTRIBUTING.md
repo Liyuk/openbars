@@ -24,7 +24,7 @@ Before merging, the following must pass at the repository root:
 
 It runs pytest, the sanitization check (working tree + full history) and gitleaks in sequence. If `gitleaks` is installed locally it is used directly; otherwise the script uses the Docker image `zricethezav/gitleaks:v8.30.1`.
 
-GitHub Actions is not used day to day. The repository keeps `.github/workflows/ci.yml`, but its only trigger is manual `workflow_dispatch`, so it does not consume paid minutes. Do not wait for or trigger paid checks in order to merge.
+CI runs `.github/workflows/ci.yml` automatically on pull requests and on pushes to `main`, and it can also be started by hand with `workflow_dispatch`. It runs on standard GitHub-hosted runners and repeats the same checks as `./scripts/check.sh`; run that script locally first so CI failures are rare.
 
 Optionally install the git hooks (this does not change global git configuration):
 

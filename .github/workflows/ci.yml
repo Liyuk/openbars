@@ -1,9 +1,12 @@
-# Manual only. Do not add push, pull_request, or schedule triggers:
-# automatic runs would consume paid GitHub Actions minutes.
-# Daily checks: scripts/check.sh
+# Runs automatically on every pull request and on every push to main, and can
+# also be started by hand (workflow_dispatch). Run scripts/check.sh locally
+# before pushing so failures are caught before CI.
 name: CI
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
