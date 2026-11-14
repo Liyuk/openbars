@@ -371,8 +371,8 @@ DOC_URLS = {
     "provider_keys": f"{REPO_URL}/blob/main/docs/provider-keys.md",
 }
 
-# The default logo is docs/images/logo/logo.svg (a copy of one candidate); the demo uses it for the
-# header, the footer and the favicon. Changing the default means replacing that file and rerunning
+# The logo is docs/images/logo/logo.svg; the demo uses it for the
+# header, the footer and the favicon. Changing it means replacing that file and rerunning
 # scripts/render_brand_assets.py.
 LOGO_FILE = ROOT / "docs" / "images" / "logo" / "logo.svg"
 SOCIAL_FILE = ROOT / "docs" / "images" / "social-preview.png"

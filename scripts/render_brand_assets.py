@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Render the PNG brand assets from the checked-in SVG logos.
 
-Inputs (checked in): ``docs/images/logo/candidate-*.svg`` and ``docs/images/logo/logo.svg``
-(the default logo, a copy of one candidate).
+Inputs (checked in): ``docs/images/logo/logo.svg``.
 
-Outputs (checked in; rerun after changing a logo):
+Outputs (checked in; rerun after changing the logo):
 
-* ``docs/images/logo/previews/candidate-<x>-{light,dark}.png``: 512x512 previews per candidate
-* ``docs/images/logo/candidates-preview.png``: one contact sheet to pick from
+* ``docs/images/logo/previews/logo-{light,dark}.png``: 512x512 previews
 * ``docs/images/social-preview.png``: 1280x640 GitHub social preview
 * ``demo/static/apple-touch-icon.png``: 180x180 touch icon for the static demo
 
@@ -88,37 +86,11 @@ def page(body: str, background: str) -> str:
     )
 
 
-def candidate_files() -> list[Path]:
-    return sorted(LOGO_DIR.glob("candidate-*.svg"))
-
-
-def render_candidate_previews(browser: str) -> None:
-    for svg in candidate_files():
-        for name, background in (("light", LIGHT_BG), ("dark", DARK_BG)):
-            body = f'<div style="width:512px;height:512px;display:grid;place-items:center">{svg_inline(svg, 384)}</div>'
-            screenshot(browser, page(body, background), PREVIEW_DIR / f"{svg.stem}-{name}.png", 512, 512)
-
-
-def render_contact_sheet(browser: str) -> None:
-    columns = []
-    for svg in candidate_files():
-        label = "Candidate " + svg.stem.removeprefix("candidate-").upper()
-        cells = ""
-        for background in (LIGHT_BG, DARK_BG):
-            cells += (
-                f'<div style="background:{background};padding:28px 0 20px;'
-                'display:flex;flex-direction:column;align-items:center;gap:18px">'
-                f"{svg_inline(svg, 208)}"
-                '<div style="display:flex;gap:16px;align-items:center">'
-                f"{svg_inline(svg, 48)}{svg_inline(svg, 24)}{svg_inline(svg, 16)}</div></div>"
-            )
-        columns.append(
-            f'<div style="flex:1;display:flex;flex-direction:column">{cells}'
-            '<div style="background:#f1f5f9;color:#0f1b2d;text-align:center;padding:12px;'
-            f'font-size:20px;font-weight:600">{label}</div></div>'
-        )
-    body = f'<div style="display:flex;gap:2px;width:1200px;background:#cbd5e1">{"".join(columns)}</div>'
-    screenshot(browser, page(body, "#cbd5e1"), LOGO_DIR / "candidates-preview.png", 1200, 700)
+def render_logo_previews(browser: str) -> None:
+    svg = LOGO_DIR / "logo.svg"
+    for name, background in (("light", LIGHT_BG), ("dark", DARK_BG)):
+        body = f'<div style="width:512px;height:512px;display:grid;place-items:center">{svg_inline(svg, 384)}</div>'
+        screenshot(browser, page(body, background), PREVIEW_DIR / f"logo-{name}.png", 512, 512)
 
 
 def decorative_candles() -> str:
@@ -182,21 +154,21 @@ def render_social_preview(browser: str) -> None:
 
 
 def render_touch_icon(browser: str) -> None:
-    # Opaque square in the tile colour so the platform's own corner mask shows no seam.
+    # Opaque square in the disc colour so the platform's own corner mask shows no seam.
+    tile = "#0b1f2a"
     body = (
-        '<div style="width:180px;height:180px;background:#0f766e;display:grid;place-items:center">'
+        f'<div style="width:180px;height:180px;background:{tile};display:grid;place-items:center">'
         f'{svg_inline(LOGO_DIR / "logo.svg", 190)}</div>'
     )
-    screenshot(browser, page(body, "#0f766e"), TOUCH_ICON, 180, 180)
+    screenshot(browser, page(body, tile), TOUCH_ICON, 180, 180)
 
 
 def main() -> int:
     browser = find_browser()
-    render_candidate_previews(browser)
-    render_contact_sheet(browser)
+    render_logo_previews(browser)
     render_social_preview(browser)
     render_touch_icon(browser)
-    outputs = (*sorted(PREVIEW_DIR.glob("*.png")), LOGO_DIR / "candidates-preview.png", SOCIAL, TOUCH_ICON)
+    outputs = (*sorted(PREVIEW_DIR.glob("*.png")), SOCIAL, TOUCH_ICON)
     for path in outputs:
         print("wrote", path.relative_to(ROOT))
     return 0

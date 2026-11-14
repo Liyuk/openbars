@@ -35,6 +35,8 @@ def test_network_addresses():
 def test_email_rule_allows_placeholders():
     assert rules("contact " + "jane" + "@" + "corp-mail.io") == {"email"}
     assert rules("ops@example.com and 1+bot@users.noreply.github.com") == set()
+    # Dependabot's standard Signed-off-by trailer (domain is github.com, not a noreply host).
+    assert rules("Signed-off-by: dependabot[bot] <" + "support@github.com>") == set()
     # URL userinfo is not an e-mail (a pagination next_url test uses this shape).
     assert rules("https://user:pw@api.example.com/v2/path") == set()
     assert rules("contact: jane@" + "corp-mail.io") == {"email"}

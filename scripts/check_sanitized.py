@@ -53,6 +53,12 @@ ALLOWED_EMAIL_DOMAINS = (
     "noreply.github.com", "localhost",
 )
 ALLOWED_EMAIL_SUFFIXES = (".example", ".invalid", ".test")
+# Official, non-personal addresses. Dependabot signs every commit with
+# ``Signed-off-by: dependabot[bot] <support@github.com>``; without this entry,
+# ``--history`` fails on those branches after ``actions/checkout`` fetches them.
+ALLOWED_EMAILS = {
+    "support@github.com",
+}
 # Placeholder home directories that are fine in docs and CI.
 ALLOWED_HOME_NAMES = {"runner", "user", "you", "me", "example", "username", "name", "<you>", "<user>"}
 
@@ -139,7 +145,9 @@ def scan_text(text: str, where: str, hashes: set[str]) -> list[Finding]:
             for match in pattern.finditer(line):
                 if rule == "home_path" and match.group(1).lower() in ALLOWED_HOME_NAMES:
                     continue
-                if rule == "email" and _email_allowed(match.group(1)):
+                if rule == "email" and (
+                    match.group(0).lower() in ALLOWED_EMAILS or _email_allowed(match.group(1))
+                ):
                     continue
                 # URL userinfo (https://user:pw@host) is not an e-mail address.
                 if (

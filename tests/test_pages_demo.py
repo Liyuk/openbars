@@ -240,21 +240,17 @@ def test_data_source_summary_matches_code_and_docs():
     assert "Alpha Vantage and Tiingo" in english
 
 
-def test_logo_candidates_default_and_social_preview():
+def test_logo_and_social_preview():
     logo_dir = ROOT / "docs" / "images" / "logo"
-    candidates = sorted(logo_dir.glob("candidate-*.svg"))
-    assert len(candidates) >= 2
-    for svg in candidates:
-        root = ElementTree.fromstring(svg.read_text(encoding="utf-8"))
-        assert root.tag.endswith("svg") and root.get("viewBox") == "0 0 128 128", svg.name
-        for light_or_dark in ("light", "dark"):
-            png = logo_dir / "previews" / f"{svg.stem}-{light_or_dark}.png"
-            assert _png_size(png) == (512, 512), png.name
-    assert _png_size(logo_dir / "candidates-preview.png")[0] == 1200
+    logo = logo_dir / "logo.svg"
+    root = ElementTree.fromstring(logo.read_text(encoding="utf-8"))
+    assert root.tag.endswith("svg") and root.get("viewBox") == "0 0 128 128"
+    assert not list(logo_dir.glob("candidate-*.svg"))
+    assert not (logo_dir / "candidates-preview.png").exists()
+    for light_or_dark in ("light", "dark"):
+        png = logo_dir / "previews" / f"logo-{light_or_dark}.png"
+        assert _png_size(png) == (512, 512), png.name
     assert (logo_dir / "README.md").is_file()
-
-    default = (logo_dir / "logo.svg").read_text(encoding="utf-8")
-    assert default in {svg.read_text(encoding="utf-8") for svg in candidates}, "logo.svg must copy a candidate"
 
     assert _png_size(ROOT / "docs" / "images" / "social-preview.png") == (1280, 640)
     assert _png_size(ROOT / "demo" / "static" / "apple-touch-icon.png") == (180, 180)
