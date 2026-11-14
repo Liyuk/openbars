@@ -1,0 +1,41 @@
+{
+  "errors": {
+    "unknown_source": "source '{source}' is not part of this synthetic sample; only canonical bars are published",
+    "unknown_symbol": "unknown symbol '{symbol}' is not part of this synthetic sample"
+  },
+  "generated_by": "scripts/build_pages_demo.py --write-sample",
+  "note": "Synthetic TEST* sample for the static GitHub Pages demo. No real market data, no real provider, no account identifiers.",
+  "responses": {
+    "/api/v1/bars?id=cn%3Aeq%3Axshg%3ATESTA&interval=1d&source=canonical": "bars-id-cn-eq-xshg-testa-interval-1d-source-canonical.json",
+    "/api/v1/bars?id=cn%3Aeq%3Axshg%3ATESTA&interval=1h&source=canonical": "bars-id-cn-eq-xshg-testa-interval-1h-source-canonical.json",
+    "/api/v1/bars?id=crypto%3Aspot%3ATESTBTC&interval=1d&source=canonical": "bars-id-crypto-spot-testbtc-interval-1d-source-canonical.json",
+    "/api/v1/bars?id=crypto%3Aspot%3ATESTBTC&interval=1h&source=canonical": "bars-id-crypto-spot-testbtc-interval-1h-source-canonical.json",
+    "/api/v1/bars?id=hk%3Aeq%3Axhk%3ATESTH&interval=1d&source=canonical": "bars-id-hk-eq-xhk-testh-interval-1d-source-canonical.json",
+    "/api/v1/bars?id=hk%3Aeq%3Axhk%3ATESTH&interval=1h&source=canonical": "bars-id-hk-eq-xhk-testh-interval-1h-source-canonical.json",
+    "/api/v1/bars?id=us%3Aeq%3Axnys%3ATEST1&interval=1d&source=canonical": "bars-id-us-eq-xnys-test1-interval-1d-source-canonical.json",
+    "/api/v1/bars?id=us%3Aeq%3Axnys%3ATEST1&interval=1h&source=canonical": "bars-id-us-eq-xnys-test1-interval-1h-source-canonical.json",
+    "/api/v1/bars?id=us%3Aeq%3Axnys%3ATEST2&interval=1d&source=canonical": "bars-id-us-eq-xnys-test2-interval-1d-source-canonical.json",
+    "/api/v1/bars?id=us%3Aeq%3Axnys%3ATEST2&interval=1h&source=canonical": "bars-id-us-eq-xnys-test2-interval-1h-source-canonical.json",
+    "/api/v1/bars?interval=1d&source=canonical&symbol=TEST1": "bars-interval-1d-source-canonical-symbol-test1.json",
+    "/api/v1/bars?interval=1d&source=canonical&symbol=TEST2": "bars-interval-1d-source-canonical-symbol-test2.json",
+    "/api/v1/bars?interval=1d&source=canonical&symbol=TESTA": "bars-interval-1d-source-canonical-symbol-testa.json",
+    "/api/v1/bars?interval=1d&source=canonical&symbol=TESTBTC": "bars-interval-1d-source-canonical-symbol-testbtc.json",
+    "/api/v1/bars?interval=1d&source=canonical&symbol=TESTH": "bars-interval-1d-source-canonical-symbol-testh.json",
+    "/api/v1/bars?interval=1h&source=canonical&symbol=TEST1": "bars-interval-1h-source-canonical-symbol-test1.json",
+    "/api/v1/bars?interval=1h&source=canonical&symbol=TEST2": "bars-interval-1h-source-canonical-symbol-test2.json",
+    "/api/v1/bars?interval=1h&source=canonical&symbol=TESTA": "bars-interval-1h-source-canonical-symbol-testa.json",
+    "/api/v1/bars?interval=1h&source=canonical&symbol=TESTBTC": "bars-interval-1h-source-canonical-symbol-testbtc.json",
+    "/api/v1/bars?interval=1h&source=canonical&symbol=TESTH": "bars-interval-1h-source-canonical-symbol-testh.json",
+    "/api/v1/flags?flag=divergent&interval=1d&limit=200&offset=0": "flags-flag-divergent-interval-1d-limit-200-offset-0.json",
+    "/api/v1/flags?flag=spike_suspect&interval=1d&limit=200&offset=0": "flags-flag-spike-suspect-interval-1d-limit-200-offset-0.json",
+    "/api/v1/flags?flag=volume_missing&interval=1d&limit=200&offset=0": "flags-flag-volume-missing-interval-1d-limit-200-offset-0.json",
+    "/api/v1/flags?interval=1d&limit=1": "flags-interval-1d-limit-1.json",
+    "/api/v1/flags?interval=1d&limit=200&offset=0": "flags-interval-1d-limit-200-offset-0.json",
+    "/api/v1/flags?interval=1h&limit=1": "flags-interval-1h-limit-1.json",
+    "/api/v1/flags?interval=1h&limit=200&offset=0": "flags-interval-1h-limit-200-offset-0.json",
+    "/api/v1/markets?interval=1d": "markets-interval-1d.json",
+    "/api/v1/markets?interval=1h": "markets-interval-1h.json",
+    "/api/v1/quota": "quota.json"
+  },
+  "self_hosted_docs": "https://github.com/Liyuk/openbars#local-service"
+}

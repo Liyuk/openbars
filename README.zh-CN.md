@@ -98,6 +98,8 @@ uv run openbars serve                # http://127.0.0.1:8787
 
 截图使用合成演示品种（`TEST1`、`TESTA` 等）和虚构的 `example` 额度渠道，不含个人路径、API key 或真实额度账户信息。
 
+- **在线演示（合成数据）。** <https://liyuk.github.io/openbars/> 是同一套界面的静态 GitHub Pages 版本，数据来自仓库内的合成 `TEST*` 样例。它不连接任何后端、不读取实时数据，也**不是**托管的 OpenBars 服务或 API；要用自己的数据，请按上面的 `openbars serve` 自托管。
+
 - **它是什么。** `/chart` 用 [Lightweight Charts](https://tradingview.github.io/lightweight-charts/) 画 K 线；`/` 是覆盖与时效性看板，并显示额度用量；`/flags` 列出质量标记明细。它**不是**完整的 TradingView 终端，没有下单、指标或画图工具。
 - **访问边界。** 默认只绑定回环地址（默认 `127.0.0.1:8787`），非 loopback 的 `--host` 必须显式加 `--allow-non-loopback`，否则以用法错误退出。启动时打印 `no fetch, no writes`：不规划、不抓取、不写库，存储以只读方式打开；只显示已经落盘的数据，也没有任何按钮或路由会为了「补正式数据」而触发抓取。
 - **自托管的公开 API。** `/api/v1` 下的 JSON 路由（`health`、`markets`、`instruments`、`bars`、`flags`、`quota`）是公开 API：谁下载谁部署、谁使用，可以完全私有；项目本身不提供托管服务，也看不到你的数据。端点、参数、响应字段、错误格式与版本/稳定性约定见[英文 API 参考](docs/api.md)。在 v1 内，文档化字段视为稳定；破坏性变更走新的主版本前缀（`/api/v2`）。

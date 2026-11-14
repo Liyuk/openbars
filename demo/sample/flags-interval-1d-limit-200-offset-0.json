@@ -1,0 +1,54 @@
+{
+  "counts": {
+    "adjustment_unverified": 0,
+    "divergent": 1,
+    "filled_from_fallback": 0,
+    "gap": 0,
+    "limit_down": 0,
+    "limit_up": 0,
+    "revised": 0,
+    "single_source": 0,
+    "spike_suspect": 1,
+    "stale": 0,
+    "suspended": 0,
+    "volume_missing": 1
+  },
+  "items": [
+    {
+      "flags": [
+        "divergent"
+      ],
+      "instrument_id": "us:eq:xnys:TEST1",
+      "market": "us",
+      "session": "regular",
+      "session_date": "2026-11-09",
+      "symbol": "TEST1",
+      "ts_start": "2026-11-09T21:00:00+00:00"
+    },
+    {
+      "flags": [
+        "spike_suspect"
+      ],
+      "instrument_id": "us:eq:xnys:TEST1",
+      "market": "us",
+      "session": "regular",
+      "session_date": "2026-11-11",
+      "symbol": "TEST1",
+      "ts_start": "2026-11-11T21:00:00+00:00"
+    },
+    {
+      "flags": [
+        "volume_missing"
+      ],
+      "instrument_id": "us:eq:xnys:TEST1",
+      "market": "us",
+      "session": "regular",
+      "session_date": "2026-11-12",
+      "symbol": "TEST1",
+      "ts_start": "2026-11-12T21:00:00+00:00"
+    }
+  ],
+  "limit": 200,
+  "offset": 0,
+  "total": 3
+}

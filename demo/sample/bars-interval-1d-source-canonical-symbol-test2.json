@@ -1,0 +1,84 @@
+{
+  "adjustment": "split",
+  "available_sources": [
+    "canonical"
+  ],
+  "bars": [
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-06T22:00:00+00:00",
+      "close": "50.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "50.90000000",
+      "instrument_id": "us:eq:xnys:TEST2",
+      "low": "48.90000000",
+      "missing_fields": [],
+      "open": "49.50000000",
+      "provider": "example",
+      "session_date": "2026-11-06",
+      "ts_start": "2026-11-06T21:00:00+00:00",
+      "volume": "640210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-09T22:00:00+00:00",
+      "close": "51.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "51.90000000",
+      "instrument_id": "us:eq:xnys:TEST2",
+      "low": "49.90000000",
+      "missing_fields": [],
+      "open": "50.50000000",
+      "provider": "example",
+      "session_date": "2026-11-09",
+      "ts_start": "2026-11-09T21:00:00+00:00",
+      "volume": "640210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-11T22:00:00+00:00",
+      "close": "53.00000000",
+      "flags": [],
+      "freshness": "final",
+      "high": "53.90000000",
+      "instrument_id": "us:eq:xnys:TEST2",
+      "low": "51.90000000",
+      "missing_fields": [],
+      "open": "52.50000000",
+      "provider": "example",
+      "session_date": "2026-11-11",
+      "ts_start": "2026-11-11T21:00:00+00:00",
+      "volume": "640210.00000000"
+    },
+    {
+      "adjustment": "split",
+      "available_at": "2026-11-12T22:00:00+00:00",
+      "close": "54.00000000",
+      "flags": [],
+      "freshness": "provisional",
+      "high": "54.90000000",
+      "instrument_id": "us:eq:xnys:TEST2",
+      "low": "52.90000000",
+      "missing_fields": [],
+      "open": "53.50000000",
+      "provider": "example",
+      "session_date": "2026-11-12",
+      "ts_start": "2026-11-12T21:00:00+00:00",
+      "volume": "640210.00000000"
+    }
+  ],
+  "end": "2026-11-12",
+  "instrument_id": "us:eq:xnys:TEST2",
+  "interval": "1d",
+  "market": "us",
+  "missing_hours": [],
+  "missing_sessions": [
+    "2026-11-10"
+  ],
+  "note": null,
+  "source": "canonical",
+  "start": "2026-11-06",
+  "symbol": "TEST2"
+}

@@ -1,0 +1,124 @@
+{
+  "markets": [
+    {
+      "bars": 9,
+      "first_session": "2026-11-06",
+      "flags": {
+        "adjustment_unverified": 0,
+        "divergent": 1,
+        "filled_from_fallback": 0,
+        "gap": 0,
+        "limit_down": 0,
+        "limit_up": 0,
+        "revised": 0,
+        "single_source": 0,
+        "spike_suspect": 1,
+        "stale": 0,
+        "suspended": 0,
+        "volume_missing": 1
+      },
+      "instruments": 2,
+      "last_session": "2026-11-12",
+      "latest_available_at": "2026-11-12T22:00:00+00:00",
+      "latest_freshness": {
+        "provisional": 2
+      },
+      "latest_session": "2026-11-12",
+      "market": "us",
+      "observed_session_coverage": {
+        "instruments": 2,
+        "present": 2
+      }
+    },
+    {
+      "bars": 5,
+      "first_session": "2026-11-06",
+      "flags": {
+        "adjustment_unverified": 0,
+        "divergent": 0,
+        "filled_from_fallback": 0,
+        "gap": 0,
+        "limit_down": 0,
+        "limit_up": 0,
+        "revised": 0,
+        "single_source": 0,
+        "spike_suspect": 0,
+        "stale": 0,
+        "suspended": 0,
+        "volume_missing": 0
+      },
+      "instruments": 1,
+      "last_session": "2026-11-12",
+      "latest_available_at": "2026-11-12T22:00:00+00:00",
+      "latest_freshness": {
+        "provisional": 1
+      },
+      "latest_session": "2026-11-12",
+      "market": "crypto",
+      "observed_session_coverage": {
+        "instruments": 1,
+        "present": 1
+      }
+    },
+    {
+      "bars": 5,
+      "first_session": "2026-11-06",
+      "flags": {
+        "adjustment_unverified": 0,
+        "divergent": 0,
+        "filled_from_fallback": 0,
+        "gap": 0,
+        "limit_down": 0,
+        "limit_up": 0,
+        "revised": 0,
+        "single_source": 0,
+        "spike_suspect": 0,
+        "stale": 0,
+        "suspended": 0,
+        "volume_missing": 0
+      },
+      "instruments": 1,
+      "last_session": "2026-11-12",
+      "latest_available_at": "2026-11-12T22:00:00+00:00",
+      "latest_freshness": {
+        "provisional": 1
+      },
+      "latest_session": "2026-11-12",
+      "market": "cn",
+      "observed_session_coverage": {
+        "instruments": 1,
+        "present": 1
+      }
+    },
+    {
+      "bars": 5,
+      "first_session": "2026-11-06",
+      "flags": {
+        "adjustment_unverified": 0,
+        "divergent": 0,
+        "filled_from_fallback": 0,
+        "gap": 0,
+        "limit_down": 0,
+        "limit_up": 0,
+        "revised": 0,
+        "single_source": 0,
+        "spike_suspect": 0,
+        "stale": 0,
+        "suspended": 0,
+        "volume_missing": 0
+      },
+      "instruments": 1,
+      "last_session": "2026-11-12",
+      "latest_available_at": "2026-11-12T22:00:00+00:00",
+      "latest_freshness": {
+        "provisional": 1
+      },
+      "latest_session": "2026-11-12",
+      "market": "hk",
+      "observed_session_coverage": {
+        "instruments": 1,
+        "present": 1
+      }
+    }
+  ]
+}
