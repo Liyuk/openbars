@@ -15,5 +15,5 @@ Discussion:
 ## Checklist
 
 - [ ] No secret, `.env` or data file is committed (`data/`, `*.parquet`, `*.duckdb`)
-- [ ] API or convention changes are reflected in `docs/architecture.md` / `docs/api.md`
+- [ ] API or convention changes are reflected in `docs/architecture-internals.md` / `docs/api.md`
 - [ ] A new provider declares `SourceCapability`, `QuotaPolicy` and its terms

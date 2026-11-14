@@ -206,6 +206,16 @@
     }
   };
 
+  // The static demo ships extra strings (data-sources page, header, footer) in its own
+  // script; `openbars serve` never defines this hook.
+  (function (extra) {
+    if (!extra) return;
+    ["en", "zh"].forEach(function (code) {
+      var table = extra[code];
+      if (table) Object.keys(table).forEach(function (key) { I18N[code][key] = table[key]; });
+    });
+  })(window.OPENBARS_EXTRA_I18N);
+
   var lang = "en";
   var chartApi = null;
   var candleSeries = null;
@@ -290,7 +300,8 @@
     tabs.forEach(function (el) {
       var target = el.getAttribute("data-p");
       var match = target === "dash" ? path === "/" : path === "/" + target;
-      el.toggleAttribute("aria-current", match ? "page" : "");
+      if (match) el.setAttribute("aria-current", "page");
+      else el.toggleAttribute("aria-current", false);
     });
   }
 

@@ -1,4 +1,4 @@
-"""Core data models shared by every layer (see docs/architecture.md §3)."""
+"""Core data models shared by every layer (see docs/architecture-internals.md §3)."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Optional Postgres backend implementing the ``StorageBackend`` contract.
 
-Two schema modes (docs/architecture.md section 11.3):
+Two schema modes (docs/architecture-internals.md section 11.3):
 
 ``native``
     openbars owns the DDL, which is generated from the same schema definitions as the

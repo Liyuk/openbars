@@ -13,6 +13,8 @@ on:
     paths:
       - "src/openbars/web/static/**"
       - "demo/**"
+      - "docs/images/logo/**"
+      - "docs/images/social-preview.png"
       - "scripts/build_pages_demo.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:

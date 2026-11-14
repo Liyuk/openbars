@@ -1,6 +1,6 @@
 """Source identity, series semantics and the research-daily-v2 canonical row.
 
-See docs/architecture.md §11.2. The string values of the source identity triples are
+See docs/architecture-internals.md §11.2. The string values of the source identity triples are
 part of the compatibility contract and must not change.
 """
 

@@ -1,6 +1,6 @@
 """Default backend: partitioned Parquet files + a rebuildable DuckDB catalog.
 
-Layout (``root`` is normally ``./data``; see docs/architecture.md section 10)::
+Layout (``root`` is normally ``./data``; see docs/architecture-internals.md section 10)::
 
     state.db                                               SQLite: jobs, checkpoints, fetch_log
     raw/provider=P/market=M/interval=I/year=Y[/month=MM]/part-*.parquet
@@ -640,7 +640,7 @@ class ParquetCanonicalStore:
     ) -> int:
         """Upsert ``CanonicalBar`` models.
 
-        Fields the model lacks come from the keyword arguments (see architecture.md section
+        Fields the model lacks come from the keyword arguments (see architecture-internals.md section
         10). ``market`` defaults to the instrument's market (id prefix or instrument master).
         """
         now = datetime.now(UTC)
@@ -1527,7 +1527,7 @@ class ParquetDuckDbBackend:
             con.close()
         return self.canonical._table._conform(table)
 
-    # -- schema version guard (docs/architecture.md section 10.6) --
+    # -- schema version guard (docs/architecture-internals.md section 10.6) --
 
     def check_versions(self, paths: Iterable[Path]) -> None:
         """Raise ``SchemaVersionError`` for any file stamped with a newer schema version.
