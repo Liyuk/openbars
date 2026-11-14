@@ -5,7 +5,7 @@ description = "Free, multi-market, multi-source OHLCV bar collection, cleaning a
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 authors = [{ name = "Liyuk" }]
 keywords = ["market-data", "ohlcv", "stocks", "crypto", "etl", "duckdb", "parquet"]
 classifiers = [
