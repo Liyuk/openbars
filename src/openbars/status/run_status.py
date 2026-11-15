@@ -235,7 +235,8 @@ def overall_outcome(jobs: Mapping[str, int]) -> str:
 def render_document(document: Mapping[str, Any]) -> bytes:
     """Canonical bytes for a document: UTF-8, indented, trailing newline.
 
-    The same bytes are written to disk and (minus ``notifications``) posted to webhooks.
+    The single serialiser for the status files and for the webhook payload (see
+    :func:`signature_payload`, which drops ``notifications`` before rendering).
     """
     return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 

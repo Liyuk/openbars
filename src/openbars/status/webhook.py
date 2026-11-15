@@ -2,8 +2,11 @@
 
 Each configured ``notify.webhooks`` target receives one ``POST`` per completed ``run``:
 
-* ``Content-Type: application/json``, body = the ``runs/<run_id>.json`` bytes as written,
-  **without** the ``notifications`` key (the payload is built before results are recorded);
+* ``Content-Type: application/json``, body = the status document with the ``notifications`` key
+  removed, serialised to UTF-8 by ``render_document`` (the same serialiser that writes the
+  status files); signing and delivery share that one byte sequence, so receivers verify the
+  raw body instead of re-serialising it. The files on disk carry ``notifications`` written
+  back after delivery, which is why ``runs/<run_id>.json`` itself is not the signed body;
 * ``X-OpenBars-Event: run.completed``;
 * ``X-OpenBars-Delivery: <uuid4>`` -- unique per target per payload, reused by every retry;
 * ``X-OpenBars-Timestamp: <unix seconds>``;
