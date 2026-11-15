@@ -76,12 +76,15 @@ def build_providers(settings: Settings, gate: QuotaGate | None = None) -> dict[s
     return out
 
 
-def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN201
+def make_sink(backend: object, providers: Mapping[str, Provider], tally: object | None = None):  # noqa: ANN201
     """The post-fetch sink for ``run``: US (XNYS, ``research-daily-v2``), crypto (``crypto-daily-v1``),
     A-share (``cn-daily-v1``) and Hong Kong (``hk-daily-v1``: RAW, yfinance primary, AKShare corroboration).
 
     ``backend`` is a ``ParquetDuckDbBackend`` (``raw``, ``canonical``, ``instruments``). Drop-in
     for the sink ``run`` builds inline: ``LocalNode(..., sink=make_sink(backend, providers))``.
+
+    ``tally`` (optional, a :class:`openbars.status.run_status.RunStatusRecorder`) counts the
+    canonical rows each write produced, for the run completion status file (#219).
     """
     from openbars.orchestrator.finalize import (
         CnCanonicalSink,
@@ -94,6 +97,10 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
     from openbars.reconcile.reconciler import MemoryReconciler
 
     writer = parquet_canonical_writer(backend.canonical)  # type: ignore[attr-defined]
+    upsert_rows = backend.canonical.upsert_rows  # type: ignore[attr-defined]
+    if tally is not None:
+        writer = tally.wrap_canonical_writer(writer)  # type: ignore[attr-defined]
+        upsert_rows = tally.wrap_rows_writer(upsert_rows)  # type: ignore[attr-defined]
     raw = backend.raw  # type: ignore[attr-defined]
     others = tuple(providers)
     return DispatchingSink(
@@ -105,7 +112,7 @@ def make_sink(backend: object, providers: Mapping[str, Provider]):  # noqa: ANN2
         ),
         cn=CnCanonicalSink(
             backend.instruments,  # type: ignore[attr-defined]
-            backend.canonical.upsert_rows,  # type: ignore[attr-defined]
+            upsert_rows,
             providers=providers,
             factor_store=backend.instruments,  # type: ignore[attr-defined]
             canonical=backend.canonical, audit_store=backend.state,  # type: ignore[attr-defined]

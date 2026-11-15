@@ -205,6 +205,12 @@ OpenBars 采用 **BYOK（Bring Your Own Key）**：仓库不包含、不托管�
 
 真正何时运行由**外部调度器**（cron 或等价机制）决定。`schedule.daily_at` 只是展示/记录字段，规划器与 CLI 不会读取它来触发运行；修改它不会改变开跑时间。各市场建议时刻、预期时效及已核实/待验证状态见英文 README 与 [docs/source-readiness.md](docs/source-readiness.md)。
 
+### 运行完成状态文件
+
+每次 `openbars run`（成功、部分失败、失败、计划任务全部被跳过、无任务）结束时都会在 `<storage.path>/_status/` 下原子写入机器可读的完成文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。文档记录总体 `outcome`（`success` / `partial` / `failed` / `skipped` / `noop`）、任务计数，以及每个会话的 `tier`、`outcome`、本次实际写入的 raw / canonical 行数与数据源；不含密钥、DSN、绝对用户路径或 webhook URL。写失败只记 warning，不改变退出码；`openbars status --json` 直接输出 `latest.json`。
+
+可选的 `notify.webhooks` 会把同一份文档 POST 给一个或多个地址（`X-OpenBars-Event: run.completed`、每次投递唯一的 delivery id、时间戳，以及 `X-OpenBars-Signature: sha256=<hex>`，其中 `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`）。签名与投递使用的 body 是「去掉 `notifications` 字段后的文档」经 `render_document` 做 UTF-8 序列化得到的同一组字节；接收方校验原始 body，不要重新序列化。重试次数有限、指数退避，且所有投递共享一个总时限；投递结果写回 `notifications[]`（只含 URL 的 `sha256` 前 12 位），失败不影响退出码与已写数据。字段说明、验签方法与配置示例见 [docs/run-status.md](docs/run-status.md) 与 [JSON Schema](docs/schemas/run-status.v1.json)。
+
 ## 免责声明
 
 - **OpenBars 不分发、不托管任何行情数据。** 仓库里只有代码、规则与文档。

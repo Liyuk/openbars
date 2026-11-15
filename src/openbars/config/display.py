@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from openbars.config.schema import Settings, is_secret_key
+from openbars.config.schema import Settings, is_secret_key, webhook_url_hash
 
 PRIORITY_HELP = (
     "priority (highest wins): process environment; then env file "
@@ -96,7 +96,25 @@ def format_settings(settings: Settings, *, config_path: str | Path | None = None
     if settings.schedule:
         lines.append(f"schedule: {_mapping_preview(settings.schedule, secrets)}")
         lines.append("  note: display/record only; actual runs are triggered by an external scheduler.")
+    lines.append("notify:")
+    if not settings.notify.webhooks:
+        lines.append("  (no webhooks)")
+    for hook in settings.notify.webhooks:
+        if not hook.secret_env:
+            secret = "no secret_env: unsigned targets are skipped"
+        else:
+            secret = f"secret {_flag(hook.secret)} ({hook.secret_env})"
+        lines.append(
+            f"  webhook[{webhook_url_hash(hook.url)}]: {secret}, max_attempts {hook.max_attempts}, "
+            f"timeout {hook.timeout_seconds:g}s"
+        )
+    if settings.notify.webhooks:
+        lines.append(f"  total_timeout_seconds: {settings.notify.total_timeout_seconds:g}")
     lines.append(f"# {PRIORITY_HELP}")
+    lines.append(
+        "# run status: <storage.path>/_status/latest.json (+ runs/, sessions/); "
+        "webhook URLs are never printed or stored, only their sha256 prefix."
+    )
     return "\n".join(lines) + "\n"
 
 

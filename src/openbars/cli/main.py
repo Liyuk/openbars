@@ -132,6 +132,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="job counts, dead jobs and raw coverage per interval")
     common(status)
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="print the run completion status document (_status/latest.json) and exit",
+    )
 
     show = sub.add_parser("config", help="print the effective settings; secret values are redacted")
     common(show)
@@ -416,77 +421,169 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
          clock: Callable[[], datetime]) -> int:  # fmt: skip
     from openbars.orchestrator.nodes import DEFAULT_FEEDS, LocalNode
     from openbars.quota.postgres import open_configured_quota_gate
+    from openbars.status.run_status import RunStatusRecorder
 
+    started_at = clock()
+    recorder = RunStatusRecorder(
+        started_at=started_at, storage_backend=settings.storage_backend, command=args.command
+    )
     root = data_dir(settings, args.data)
-    # The gate needs the providers' policies; build once without it to read them.
-    probe = factory(settings, None)
-    check_ready(settings, probe, strict=True)  # before anything is written
-    root.mkdir(parents=True, exist_ok=True)
-    backend = _open_backend(settings, root)
-    state = _job_state(backend, root / "state.db")
-    policies = effective_policies(settings, probe)
-    gate = open_configured_quota_gate(settings, data_dir=root, policies=policies)
-    providers = factory(settings, gate)
-    notes = skipped_providers(settings, providers)
+    plan: Plan | None = None
+    report: Any = None
+    attempts_before: dict[str, int] = {}
+    state: Any = None
+    aborted: str | None = None
+    # Start the guarded region here: provider construction, check_ready, backend / state /
+    # quota initialisation and planning can all fail before a job ever runs. Every one of
+    # those paths still writes the completion document (and sends its webhooks); the
+    # exception is re-raised afterwards, so ``run`` keeps exactly its previous exit code.
+    try:
+        # The gate needs the providers' policies; build once without it to read them.
+        probe = factory(settings, None)
+        check_ready(settings, probe, strict=True)  # before anything is written
+        root.mkdir(parents=True, exist_ok=True)
+        backend = _open_backend(settings, root)
+        state = _job_state(backend, root / "state.db")
+        policies = effective_policies(settings, probe)
+        gate = open_configured_quota_gate(settings, data_dir=root, policies=policies)
+        providers = factory(settings, gate)
+        notes = skipped_providers(settings, providers)
 
-    from openbars.core.models import Interval, Market
+        from openbars.core.models import Interval, Market
 
-    if Market.US in settings.selection.markets and Interval.H1 in settings.selection.intervals:
-        out.line("note: US 1h bars are stored raw; hourly canonical reconciliation is not available yet")
+        if Market.US in settings.selection.markets and Interval.H1 in settings.selection.intervals:
+            out.line("note: US 1h bars are stored raw; hourly canonical reconciliation is not available yet")
 
-    node = LocalNode(
-        providers,
-        store=state,
-        raw=backend.raw,
-        sink=make_sink(backend, providers),
-        gate=gate,
-        feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
-        hourly_alignment=settings.us_hourly_alignment.value,
-        include_extended_hours=settings.include_extended_hours,
-        clock=clock,
-        redact=out._scrub,
-    )
-    orch = LocalOrchestrator(
-        state,
-        node,
-        policies=policies,
-        workers=max(1, args.workers),
-        lease_ttl=timedelta(seconds=args.lease_ttl),
-        lock_path=scheduler_lock_path(root / "state.db"),
-        clock=clock,
-        redact=out._scrub,
-    )
-    with orch:
-        now = clock()
-        _ingest_pairs(settings, providers, backend, now, notes, out)
-        plan = _make_plan(settings, providers, backend, now, _crypto_master(settings, backend))
-        _print_plan(out, plan, state, notes)
-        if _budget_blocked(plan.budget, args.accept_budget, out):
-            return EXIT_BUDGET
-        added = orch.submit(plan.jobs)
-        out.line(f"submitted {added} new jobs")
-        report = orch.run(until_idle=True, max_jobs=args.max_jobs)
-    out.line(
-        f"run: claimed {report.claimed}, done {report.done}, failed {report.failed}, "
-        f"dead {report.dead}, requests {report.requests}; waiting {report.waiting}"
-    )
-    if report.open_circuits:
-        out.line(f"circuit open: {', '.join(report.open_circuits)}")
-    if report.dead:
-        seen: set[str] = set()
-        for job in state.list_jobs():
-            err = job.last_error or ""
-            if job.state is not JobState.DEAD or "pass a numeric instrument_id" not in err or err in seen:
-                continue
-            seen.add(err)
-            out.err(f"error: {err}")
-    return EXIT_OK
+        node = LocalNode(
+            providers,
+            store=state,
+            raw=backend.raw,
+            sink=make_sink(backend, providers, tally=recorder),
+            gate=gate,
+            feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
+            hourly_alignment=settings.us_hourly_alignment.value,
+            include_extended_hours=settings.include_extended_hours,
+            clock=clock,
+            redact=out._scrub,
+            tally=recorder,
+        )
+        orch = LocalOrchestrator(
+            state,
+            node,
+            policies=policies,
+            workers=max(1, args.workers),
+            lease_ttl=timedelta(seconds=args.lease_ttl),
+            lock_path=scheduler_lock_path(root / "state.db"),
+            clock=clock,
+            redact=out._scrub,
+        )
+        with orch:
+            now = clock()
+            _ingest_pairs(settings, providers, backend, now, notes, out)
+            plan = _make_plan(settings, providers, backend, now, _crypto_master(settings, backend))
+            _print_plan(out, plan, state, notes)
+            attempts_before = _job_attempts(state, plan)
+            if _budget_blocked(plan.budget, args.accept_budget, out):
+                return EXIT_BUDGET
+            added = orch.submit(plan.jobs)
+            out.line(f"submitted {added} new jobs")
+            report = orch.run(until_idle=True, max_jobs=args.max_jobs)
+        out.line(
+            f"run: claimed {report.claimed}, done {report.done}, failed {report.failed}, "
+            f"dead {report.dead}, requests {report.requests}; waiting {report.waiting}"
+        )
+        if report.open_circuits:
+            out.line(f"circuit open: {', '.join(report.open_circuits)}")
+        if report.dead:
+            seen: set[str] = set()
+            for job in state.list_jobs():
+                err = job.last_error or ""
+                if job.state is not JobState.DEAD or "pass a numeric instrument_id" not in err or err in seen:
+                    continue
+                seen.add(err)
+                out.err(f"error: {err}")
+        return EXIT_OK
+    except BaseException as exc:  # noqa: BLE001 - re-raised; only the status write is added
+        aborted = type(exc).__name__
+        raise
+    finally:
+        _write_run_status(
+            settings=settings, root=root, out=out, recorder=recorder, plan=plan,
+            report=report, state=state, attempts_before=attempts_before, clock=clock,
+            aborted=aborted,
+        )  # fmt: skip
+
+
+def _job_attempts(state: Any, plan: Plan) -> dict[str, int]:
+    """Attempt counter of every planned job before this run executes (to spot new failures)."""
+    out: dict[str, int] = {}
+    for job in plan.jobs:
+        row = state.load_job(job.job_id)
+        out[job.job_id] = 0 if row is None else int(getattr(row, "attempts", 0) or 0)
+    return out
+
+
+def _write_run_status(*, settings: Settings, root: Path, out: _Out, recorder: Any, plan: Plan | None,
+                      report: Any, state: Any, attempts_before: Mapping[str, int],
+                      clock: Callable[[], datetime], aborted: str | None = None) -> None:  # fmt: skip
+    """Write the completion status file and deliver webhooks; never changes ``run``'s exit code."""
+    from openbars.status.run_status import signature_payload, write_run_status
+    from openbars.status.webhook import deliver_all, describe_results
+
+    try:
+        planned = 0 if plan is None else len(plan.jobs)
+        jobs = {"planned": planned, "succeeded": 0, "failed": 0, "skipped": planned}
+        if report is not None:
+            jobs["succeeded"] = int(report.done)
+            jobs["failed"] = int(report.failed) + int(report.dead)
+            jobs["skipped"] = max(0, planned - int(report.claimed))
+        if plan is not None and state is not None:
+            for job in plan.jobs:
+                row = state.load_job(job.job_id)
+                if row is None or row.state not in (JobState.DEAD, JobState.FAILED):
+                    continue
+                if int(getattr(row, "attempts", 0) or 0) <= attempts_before.get(job.job_id, 0):
+                    continue  # already failed in an earlier run; not this run's outcome
+                recorder.mark_job_failed(job.market, job.interval, job.window.end, job.provider)
+        error = None if jobs["failed"] == 0 else f"{jobs['failed']} job(s) did not complete"
+        document = recorder.document(finished_at=clock(), jobs=jobs, error=error)
+        if aborted is not None:  # the run raised before it could finish
+            document["outcome"] = "failed"
+            document["error"] = f"run aborted ({aborted})"
+        _body, paths = write_run_status(root, document)
+        out.line(
+            f"status: {document['outcome']} (run {document['run_id']}); "
+            f"wrote {paths[0].relative_to(root).as_posix()} and {paths[1].relative_to(root).as_posix()}"
+        )
+    except Exception as exc:  # noqa: BLE001 - a status file must never fail a run
+        out.err(f"warning: could not write run status ({type(exc).__name__}); data is unaffected")
+        return
+
+    if not settings.notify.webhooks:
+        return
+    try:
+        results = deliver_all(
+            signature_payload(document),
+            settings.notify.webhooks,
+            total_timeout_seconds=settings.notify.total_timeout_seconds,
+            redact=out._scrub,
+        )
+        document["notifications"] = [result.as_dict() for result in results]
+        from openbars.status.run_status import write_status_copies
+
+        write_status_copies(root, document)
+        for line in describe_results(results):
+            out.line(line)
+    except Exception as exc:  # noqa: BLE001 - notification problems never fail a run
+        out.err(f"warning: run status notification failed ({type(exc).__name__}); data is unaffected")
 
 
 # --- status -------------------------------------------------------------------------------
 
 
 def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
+    if getattr(args, "json", False):
+        return _status_json(args, settings, out)
     root = data_dir(settings, args.data)
     db = root / "state.db"
     if settings.storage_backend == "postgres":
@@ -560,6 +657,19 @@ def _status(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
     for cp in in_progress[:LIST_LIMIT]:
         out.line(f"  {cp.job_id} cursor={cp.cursor}")
     out.line("circuits: tracked in the running process only (none persisted)")
+    return EXIT_OK
+
+
+def _status_json(args: argparse.Namespace, settings: Settings, out: _Out) -> int:
+    """``status --json``: the last run completion document, exactly as written (#219)."""
+    from openbars.status.run_status import latest_status_path
+
+    root = data_dir(settings, args.data)
+    path = latest_status_path(root)
+    if not path.is_file():
+        out.err(f"error: no run status at {path}; run `openbars run` first")
+        return EXIT_ERROR
+    out.line(path.read_text(encoding="utf-8").rstrip("\n"))
     return EXIT_OK
 
 

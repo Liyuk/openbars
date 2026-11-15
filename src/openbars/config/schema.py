@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Mapping
@@ -68,6 +69,31 @@ class RetentionRule:
 
 
 @dataclass(frozen=True)
+class WebhookConfig:
+    """One ``notify.webhooks`` entry. ``secret`` is resolved from ``secret_env`` and never printed."""
+
+    url: str
+    secret_env: str | None = None
+    secret: str | None = None  # resolved value; never logged, never written to disk
+    timeout_seconds: float = 10.0
+    max_attempts: int = 3
+    backoff_seconds: float = 2.0
+    max_backoff_seconds: float = 30.0
+
+@dataclass(frozen=True)
+class NotifyConfig:
+    """``notify:`` section: completion webhooks and the overall delivery budget."""
+
+    webhooks: tuple[WebhookConfig, ...] = ()
+    total_timeout_seconds: float = 60.0
+
+
+def webhook_url_hash(url: str) -> str:
+    """Stable, non-reversible identifier for a webhook URL (first 12 hex of SHA-256)."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+
+
+@dataclass(frozen=True)
 class Settings:
     selection: Selection
     providers: Mapping[str, ProviderConfig]
@@ -91,6 +117,7 @@ class Settings:
     # Path of the dotenv file that was actually loaded, if any, and how it was chosen.
     env_file: str | None = None
     env_file_source: str | None = None  # --env-file | OPENBARS_ENV_FILE | config.env_file | ./.env
+    notify: NotifyConfig = field(default_factory=NotifyConfig)  # ``notify:`` section
 
     def secret_values(self, min_length: int = 8) -> tuple[str, ...]:
         """Resolved credential values (for output scrubbing only; never log them)."""
@@ -102,6 +129,9 @@ class Settings:
         }
         if isinstance(self.postgres_dsn, str) and len(self.postgres_dsn) >= min_length:
             values.add(self.postgres_dsn)
+        for hook in self.notify.webhooks:
+            if isinstance(hook.secret, str) and len(hook.secret) >= min_length:
+                values.add(hook.secret)
         return tuple(sorted(values))
 
 

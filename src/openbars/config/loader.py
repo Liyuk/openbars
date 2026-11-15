@@ -30,10 +30,20 @@ from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
-from openbars.config.schema import RETAINABLE_LAYERS, NodeConfig, ProviderConfig, RetentionRule, Selection, Settings
+from openbars.config.schema import (
+    RETAINABLE_LAYERS,
+    NodeConfig,
+    NotifyConfig,
+    ProviderConfig,
+    RetentionRule,
+    Selection,
+    Settings,
+    WebhookConfig,
+)
 from openbars.core.errors import ConfigError
 from openbars.core.models import Adjustment, HourlyAlignment, Interval, Market
 
@@ -201,7 +211,7 @@ def _section(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
-def parse_settings(data: Any) -> Settings:
+def parse_settings(data: Any, env: Mapping[str, str] | None = None) -> Settings:
     if not isinstance(data, Mapping):
         raise ConfigError("config root must be a mapping")
 
@@ -311,11 +321,91 @@ def parse_settings(data: Any) -> Settings:
         retention=_retention_rules(storage.get("retention")),
         reconcile=dict(_section(data, "reconcile")),
         schedule=dict(_section(data, "schedule")),
+        notify=_notify_config(_section(data, "notify"), env or {}),
         **kwargs,
     )
 
 
 _RETENTION_KEYS = frozenset({"layer", "keep_years", "provider", "market", "interval"})
+
+def _notify_config(section: Mapping[str, Any], env: Mapping[str, str]) -> NotifyConfig:
+    """``notify:`` section: webhook targets and the overall delivery budget (#219).
+
+    ``secret_env`` names an environment variable; only its name is stored in the config, and
+    the resolved value is kept on :class:`WebhookConfig` for signing but never logged or written.
+    """
+    if not section:
+        return NotifyConfig()
+    unknown = sorted(set(map(str, section)) - {"webhooks", "total_timeout_seconds"})
+    if unknown:
+        raise ConfigError(f"notify: unknown keys {unknown}")
+    hooks = []
+    for index, entry in enumerate(_as_list(section.get("webhooks"), "notify.webhooks")):
+        where = f"notify.webhooks[{index}]"
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"{where} must be a mapping with a url")
+        extra = sorted(set(map(str, entry)) - {
+            "url", "secret_env", "timeout_seconds", "max_attempts", "backoff_seconds",
+            "max_backoff_seconds",
+        })
+        if extra:
+            raise ConfigError(f"{where}: unknown keys {extra}")
+        url = entry.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ConfigError(f"{where}.url must be a non-empty string")
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ConfigError(f"{where}.url must be an http:// or https:// URL")
+        secret_env = entry.get("secret_env")
+        if secret_env is not None and not isinstance(secret_env, str):
+            raise ConfigError(f"{where}.secret_env must be an environment variable name")
+        hooks.append(
+            WebhookConfig(
+                url=url.strip(),
+                secret_env=(secret_env or None),
+                secret=(env.get(secret_env) or None) if secret_env else None,
+                timeout_seconds=_positive_float(entry.get("timeout_seconds", 10.0), f"{where}.timeout_seconds"),
+                max_attempts=_positive_int(entry.get("max_attempts", 3), f"{where}.max_attempts"),
+                backoff_seconds=_non_negative_float(
+                    entry.get("backoff_seconds", 2.0), f"{where}.backoff_seconds"
+                ),
+                max_backoff_seconds=_non_negative_float(
+                    entry.get("max_backoff_seconds", 30.0), f"{where}.max_backoff_seconds"
+                ),
+            )
+        )
+    return NotifyConfig(
+        webhooks=tuple(hooks),
+        total_timeout_seconds=_positive_float(
+            section.get("total_timeout_seconds", 60.0), "notify.total_timeout_seconds"
+        ),
+    )
+
+
+def _positive_float(raw: Any, what: str) -> float:
+    value = _number(raw, what)
+    if value <= 0:
+        raise ConfigError(f"{what} must be greater than 0")
+    return value
+
+
+def _non_negative_float(raw: Any, what: str) -> float:
+    value = _number(raw, what)
+    if value < 0:
+        raise ConfigError(f"{what} must be 0 or greater")
+    return value
+
+
+def _number(raw: Any, what: str) -> float:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ConfigError(f"{what} must be a number")
+    return float(raw)
+
+
+def _positive_int(raw: Any, what: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ConfigError(f"{what} must be a whole number >= 1")
+    return raw
 
 
 def _retention_rules(value: Any) -> tuple[RetentionRule, ...]:
@@ -426,7 +516,7 @@ def load_settings(
         expanded = expand_env(data, merged)
         if "path" not in _section(expanded, "storage"):
             expanded.setdefault("storage", {})["path"] = default_storage_path
-        settings = parse_settings(expanded)
+        settings = parse_settings(expanded, merged)
     except ConfigError as exc:
         raise ConfigError(_scrub(str(exc), _referenced_values(data, merged))) from None
     refs = _provider_env_refs(data)

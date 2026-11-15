@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openbars.dev/schemas/run-status.v1.json",
+  "title": "OpenBars run completion status (schema v1)",
+  "description": "One document per `openbars run`, written to <storage.path>/_status/runs/<run_id>.json, mirrored to latest.json and to sessions/<market>/<interval>/<session_date>.json. Contains no credentials, no DSNs, no absolute user paths and no webhook URLs. See docs/run-status.md.",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "run_id",
+    "command",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "jobs",
+    "sessions",
+    "storage",
+    "error",
+    "notifications"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "openbars.run-status"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "description": "Unique per invocation: UTC compact timestamp plus 6 random hex digits. Never reused.",
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$"
+    },
+    "command": {
+      "description": "The CLI command that produced this document.",
+      "type": "string",
+      "enum": ["run", "backfill"]
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "outcome": {
+      "description": "noop: nothing was planned; skipped: work was planned but none of it ran (for example the request budget was not accepted); success: every executed job finished; partial: some finished and some did not; failed: nothing finished and at least one job did not.",
+      "type": "string",
+      "enum": ["success", "partial", "failed", "skipped", "noop"]
+    },
+    "jobs": {
+      "description": "Job counters for this invocation only.",
+      "type": "object",
+      "required": ["planned", "succeeded", "failed", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "planned": {"type": "integer", "minimum": 0},
+        "succeeded": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0}
+      }
+    },
+    "sessions": {
+      "description": "One entry per (market, interval, session_date) this run wrote rows for or failed to finish.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/session"}
+    },
+    "storage": {
+      "type": "object",
+      "required": ["backend"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"type": "string", "enum": ["parquet_duckdb", "postgres"]}
+      }
+    },
+    "error": {
+      "description": "Short top-level summary when outcome is failed or partial; null otherwise. Never contains a path, URL or credential.",
+      "type": ["string", "null"]
+    },
+    "notifications": {
+      "description": "Webhook delivery results. Not part of the signed payload: webhooks receive the document without this key.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/notification"}
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "UTC ISO 8601, second resolution, trailing Z.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "session": {
+      "type": "object",
+      "required": ["market", "interval", "session_date", "tier", "outcome", "rows", "providers"],
+      "additionalProperties": false,
+      "properties": {
+        "market": {"type": "string", "enum": ["us", "crypto", "cn", "hk"]},
+        "interval": {"type": "string", "pattern": "^[0-9]+[dhm]$"},
+        "session_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "tier": {
+          "description": "Freshness tier. Only `final` exists today; `provisional` is reserved (Discussion #178).",
+          "type": "string",
+          "enum": ["provisional", "final"]
+        },
+        "outcome": {
+          "description": "Summary of the jobs that targeted this session in this run.",
+          "type": "string",
+          "enum": ["success", "failed"]
+        },
+        "rows": {
+          "description": "Rows this run wrote for this session: raw bars stored and canonical rows reconciled.",
+          "type": "object",
+          "required": ["raw", "canonical"],
+          "additionalProperties": false,
+          "properties": {
+            "raw": {"type": "integer", "minimum": 0},
+            "canonical": {"type": "integer", "minimum": 0}
+          }
+        },
+        "providers": {
+          "description": "Sources that contributed rows to this session in this run.",
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "required": ["url_hash", "outcome", "attempts", "status_code", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "url_hash": {
+          "description": "First 12 hex digits of SHA-256 of the configured URL. The URL itself is never written (it may carry a token).",
+          "type": "string",
+          "pattern": "^[0-9a-f]{12}$"
+        },
+        "outcome": {"type": "string", "enum": ["delivered", "failed", "skipped"]},
+        "attempts": {"type": "integer", "minimum": 0},
+        "status_code": {"type": ["integer", "null"]},
+        "error": {
+          "description": "Short reason (for example `no_secret`, `HTTP 500`, `delivery budget exhausted`). Never contains the URL or the secret.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

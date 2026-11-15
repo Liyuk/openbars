@@ -90,6 +90,12 @@ These are timing proposals and do not configure a scheduler. See [source readine
 - The default planner assigns each session to the cheapest source, so cross-source overlap needs an explicit fetch of a sample (for example audit jobs for a second provider) before `verify` has anything to compare.
 - The repository's end-to-end test exercises the whole path with ~100 synthetic symbols (including ETFs) and offline fake providers. It does **not** sample real tickers or compare against any external production database: tests never touch the network and the repo ships no market data.
 
+### Run completion status files
+
+Every `openbars run` — success, partial, failure, a run with no planned work, or a run whose planned work was entirely skipped — ends by writing a machine-readable status document under `<storage.path>/_status/`: `runs/<run_id>.json` (one per invocation, never overwritten), `latest.json` (the most recent document) and `sessions/<market>/<interval>/<session_date>.json` (that session's latest result). Each document records the overall `outcome` (`success` / `partial` / `failed` / `skipped` / `noop`), job counters, and per session the freshness `tier`, the session `outcome`, the raw and canonical rows this run wrote, and the providers that contributed. Writes are atomic; a write failure is only a warning and changes neither the exit code nor the stored data. `openbars status --json` prints `latest.json`.
+
+The document contains no credentials, no DSNs, no absolute user paths and no configured webhook URLs. `notify.webhooks` can POST it to HTTP endpoints with `X-OpenBars-Event: run.completed`, a per-delivery id, a timestamp, and `X-OpenBars-Signature: sha256=<hex>` where `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`. The signed and delivered body is the document with the `notifications` key removed, serialised to UTF-8 by `render_document`; signing and delivery use that same byte sequence, so receivers verify the raw body without re-serialising it. Retries are bounded and share one overall time budget so a slow endpoint never delays the run. Delivery results are written back into the `notifications` array (hashed URL, outcome, attempts, status code, short error) and a delivery failure never changes the exit code — the files stay the fallback. Field reference, retry rules and verification code: [docs/run-status.md](docs/run-status.md) and the [JSON Schema](docs/schemas/run-status.v1.json).
+
 ## Local service
 
 `openbars serve` is an **optional, local, read-only preview UI** plus a self-hosted read API.

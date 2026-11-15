@@ -133,6 +133,9 @@ data/
   ref/adjust_factors.parquet                # A-share factors (optional file)
   raw-archive/provider=…/market=…/interval=…/…   # redacted response sidecars
   openbars.duckdb                           # views only; safe to delete, rebuilt on demand
+  _status/latest.json                       # last run completion document (#219)
+  _status/runs/<run_id>.json                # one per run, never overwritten
+  _status/sessions/<market>/<interval>/<session_date>.json
 ```
 
 - Writes are **immutable and atomic**: every upsert writes a new `part-*.parquet` per touched
@@ -147,6 +150,28 @@ data/
 - Full schema, keys and migration rules:
   [architecture-internals.md §10](architecture-internals.md#10-storage-layout-parquet--duckdb-by-default)
   and [source-contract.md](source-contract.md).
+
+## Run completion status (and webhooks)
+
+Every `openbars run` ends by writing a schema-versioned document to `_status/`: `runs/<run_id>.json`
+(one per invocation, never overwritten), `latest.json` (the most recent) and
+`sessions/<market>/<interval>/<session_date>.json` (that session's latest result). It records the
+overall `outcome` (`success` / `partial` / `failed` / `skipped` / `noop`), job counters, and per session the
+`tier`, the `outcome`, the raw and canonical rows this run wrote, and the contributing providers.
+The writes are atomic and a write failure is only a warning: it changes neither the exit code nor
+the stored data.
+
+The same document is the webhook payload (`notify.webhooks`), POSTed with
+`X-OpenBars-Event: run.completed`, a per-delivery id and a timestamp. `X-OpenBars-Signature` is
+`sha256=<hex>`, where `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`; the signed and
+delivered body is the document without its `notifications` key, serialised to UTF-8 by
+`render_document` — signing and delivery use the same bytes, so receivers verify the raw body
+instead of re-serialising it.
+Retries are bounded and exponential inside one overall time budget. Delivery results are appended
+to `notifications[]` in `runs/` and `latest.json` as `{url_hash, outcome, attempts, status_code,
+error}` — never the URL or the secret — and a delivery failure never changes the exit code. The
+files stay the fallback when an endpoint is down. Contract, field reference, retry rules and
+verification code: [run-status.md](run-status.md) and the [JSON Schema](schemas/run-status.v1.json).
 
 ## Reading the data
 
