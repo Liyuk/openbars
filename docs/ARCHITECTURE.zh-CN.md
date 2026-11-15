@@ -120,9 +120,9 @@ data/
 
 ## 运行完成状态文件（与 webhook）
 
-每次 `openbars run` 结束（成功、部分失败、失败、无任务）都会往 `_status/` 写一份带 schema 版本的文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。内容包括总体 `outcome`（`success` / `partial` / `failed` / `noop`）、任务计数，以及每个会话的 freshness `tier`、会话 `outcome`、本次运行实际写入的 raw / canonical 行数与贡献的 sources。写入原子；写失败只记 warning，不改变退出码，也不影响已写数据。
+每次 `openbars run` 结束（成功、部分失败、失败、计划任务全部被跳过、无任务）都会往 `_status/` 写一份带 schema 版本的文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。内容包括总体 `outcome`（`success` / `partial` / `failed` / `skipped` / `noop`）、任务计数，以及每个会话的 freshness `tier`、会话 `outcome`、本次运行实际写入的 raw / canonical 行数与贡献的 sources。写入原子；写失败只记 warning，不改变退出码，也不影响已写数据。
 
-同一份文档也是 webhook 的 payload（`notify.webhooks`）：请求头带 `X-OpenBars-Event: run.completed`、`X-OpenBars-Signature: sha256=HMAC-SHA256(secret, "<timestamp>.<body>")`、每次投递唯一的 delivery id 与时间戳；重试次数有限、指数退避，且所有投递共享一个总时限，慢端点不会拖住日更。投递结果写回 `runs/` 与 `latest.json` 的 `notifications[]`（URL 的 `sha256` 前 12 位、outcome、attempts、状态码、短错误），从不写完整 URL 或 secret，投递失败也不改变退出码——文件始终是兜底。字段说明、重试规则与验签示例见 [run-status.md](run-status.md) 与 [JSON Schema](schemas/run-status.v1.json)（英文）。
+同一份文档也是 webhook 的 payload（`notify.webhooks`）：请求头带 `X-OpenBars-Event: run.completed`、每次投递唯一的 delivery id、时间戳，以及 `X-OpenBars-Signature: sha256=<hex>`，其中 `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`；签名对象是文档去掉 `notifications` 后的原始 UTF-8 body 字节（不是重新序列化）。重试次数有限、指数退避，且所有投递共享一个总时限，慢端点不会拖住日更。投递结果写回 `runs/` 与 `latest.json` 的 `notifications[]`（URL 的 `sha256` 前 12 位、outcome、attempts、状态码、短错误），从不写完整 URL 或 secret，投递失败也不改变退出码——文件始终是兜底。字段说明、重试规则与验签示例见 [run-status.md](run-status.md) 与 [JSON Schema](schemas/run-status.v1.json)（英文）。
 
 ## 读取数据
 

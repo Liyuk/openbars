@@ -1,7 +1,8 @@
 # Run completion status files and webhooks
 
 `openbars run` (and its `backfill` alias) writes a machine-readable completion document every
-time it ends: success, partial success, failure, or a run with nothing to do. Consumers can poll
+time it ends: success, partial success, failure, planned work that was entirely skipped, or a run
+with nothing to do. Consumers can poll
 these files instead of parsing logs or the human-readable `openbars status` output. Optionally the
 same document is POSTed to the webhook targets configured under `notify.webhooks`; the files are
 the fallback when a delivery fails.
@@ -57,7 +58,7 @@ A status write failure is a warning on stderr; it changes neither the exit code 
 | `run_id` | `<UTC compact timestamp>-<6 hex>`; unique per invocation, a new value on every run. |
 | `command` | `run` or `backfill`. |
 | `started_at`, `finished_at` | UTC ISO 8601, second resolution, trailing `Z`. |
-| `outcome` | `noop` (nothing planned and nothing executed), `success` (every job that ran finished), `partial` (some finished, some did not), `failed` (nothing finished and at least one job did not). |
+| `outcome` | `noop` (nothing was planned), `skipped` (work was planned but none of it ran, for example because the request budget was not accepted or `--max-jobs` stopped the run first), `success` (every job that ran finished), `partial` (some finished, some did not), `failed` (nothing finished and at least one job did not). |
 | `jobs.planned` | Jobs in this invocation's plan. |
 | `jobs.succeeded` | Jobs that finished successfully in this run. |
 | `jobs.failed` | Jobs that ended `dead` or are waiting for a retry after a failure in this run. |
@@ -101,8 +102,9 @@ precedence as provider keys). The value is never written to disk or printed. A t
 `error: no_secret`) — OpenBars never sends an unsigned request.
 
 After the status file is written, each target receives one `POST` with
-`Content-Type: application/json` and the body of `runs/<run_id>.json` **as written**, except that
-the `notifications` key is not part of the payload (the signature covers exactly what is sent).
+`Content-Type: application/json`. The body is the exact UTF-8 bytes that would be written to
+`runs/<run_id>.json`, except that the `notifications` key is removed before serialisation (the
+signature covers exactly those bytes; do not re-serialise the JSON on the receiving side).
 
 | Header | Value |
 | --- | --- |

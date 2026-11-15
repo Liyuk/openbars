@@ -35,7 +35,7 @@ STATUS_DIR = "_status"
 # Only ``final`` exists today (provisional same-day data is Discussion #178, not implemented).
 TIER_FINAL = "final"
 SESSION_OUTCOMES = ("success", "failed")
-RUN_OUTCOMES = ("success", "partial", "failed", "noop")
+RUN_OUTCOMES = ("success", "partial", "failed", "skipped", "noop")
 
 
 def new_run_id(started_at: datetime, token: str | None = None) -> str:
@@ -209,12 +209,22 @@ class RunStatusRecorder:
 
 
 def overall_outcome(jobs: Mapping[str, int]) -> str:
-    """``noop`` (nothing ran) / ``success`` / ``partial`` / ``failed``."""
+    """``noop`` / ``skipped`` / ``success`` / ``partial`` / ``failed``.
+
+    ``noop`` is a run with nothing planned. ``skipped`` is a run that planned work but
+    executed none of it (for example the non-daily request budget was not accepted); it is
+    deliberately not folded into ``noop``, because a consumer waiting for fresh data must be
+    able to tell "nothing was due" from "work was blocked".
+    """
+    planned = int(jobs.get("planned", 0))
     succeeded = int(jobs.get("succeeded", 0))
     failed = int(jobs.get("failed", 0))
-    if succeeded == 0 and failed == 0:
+    skipped = int(jobs.get("skipped", 0))
+    if planned == 0 and succeeded == 0 and failed == 0 and skipped == 0:
         return "noop"
     if failed == 0:
+        if planned > 0 and succeeded == 0 and skipped >= planned:
+            return "skipped"
         return "success"
     return "partial" if succeeded else "failed"
 

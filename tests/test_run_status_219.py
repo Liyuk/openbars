@@ -29,6 +29,7 @@ from openbars.core.errors import ConfigError, ProviderError
 from openbars.core.models import Interval, Market
 from openbars.providers.base import BatchShape
 from openbars.status.run_status import (
+    RUN_OUTCOMES,
     RunStatusRecorder,
     latest_status_path,
     session_document,
@@ -55,17 +56,18 @@ PAYLOAD = b'{"schema": "openbars.run-status"}\n'
 # --------------------------------------------------------------------------------------
 
 
-def _config(tmp_path: Path, *, notify: str = "", start: str = "2026-03-02") -> Path:
+def _config(tmp_path: Path, *, notify: str = "", start: str = "2026-03-02",
+            intervals: str = "[1d]", symbols: str = "[TEST1, ZZZA]") -> Path:  # fmt: skip
     path = tmp_path / "config.yaml"
     path.write_text(
         f"""
 version: 1
 markets: [us]
-intervals: [1d]
+intervals: {intervals}
 history: {{start: {start}, end: null}}
 universe:
   us:
-    symbols: [TEST1, ZZZA]
+    symbols: {symbols}
 storage: {{backend: parquet_duckdb, path: {tmp_path / "data"}}}
 providers:
   massive:
@@ -182,7 +184,8 @@ def _validate(instance: Any, schema: dict[str, Any], root: dict[str, Any] | None
         ({"planned": 3, "succeeded": 3, "failed": 0, "skipped": 0}, "success"),
         ({"planned": 3, "succeeded": 2, "failed": 1, "skipped": 0}, "partial"),
         ({"planned": 3, "succeeded": 0, "failed": 3, "skipped": 0}, "failed"),
-        ({"planned": 3, "succeeded": 0, "failed": 0, "skipped": 3}, "noop"),
+        ({"planned": 3, "succeeded": 0, "failed": 0, "skipped": 3}, "skipped"),
+        ({"planned": 3, "succeeded": 1, "failed": 0, "skipped": 2}, "success"),
     ],
 )
 def test_overall_outcome(jobs, expected):
@@ -240,6 +243,7 @@ def test_write_is_atomic_and_session_files_track_the_latest_run(tmp_path):
 
 def test_documents_match_the_published_schema(tmp_path):
     schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
+    assert set(schema["properties"]["outcome"]["enum"]) == set(RUN_OUTCOMES)
     root = _data(tmp_path)
     recorder = RunStatusRecorder(started_at=NOW)
     recorder.record_raw_bars(Market.US, Interval.D1, [_raw("TEST1", datetime(2026, 3, 9, tzinfo=UTC), Interval.D1)])
@@ -383,6 +387,64 @@ class TestRunStatusFiles:
         assert document["error"] == "run aborted (StorageError)"
         assert document["jobs"]["succeeded"] == 0 and document["jobs"]["failed"] == 0
         capsys.readouterr()
+
+    def test_provider_init_failure_still_writes_failed_status(self, tmp_path, capsys):
+        def factory(settings, gate):
+            raise ConfigError("provider could not be built")
+
+        assert _run(_config(tmp_path), factory=factory) == 2  # unchanged ConfigError exit code
+        document = _latest(tmp_path)
+        assert document["outcome"] == "failed"
+        assert document["error"] == "run aborted (ConfigError)"
+        assert document["jobs"] == {"planned": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+        assert document["sessions"] == []
+        assert "status: failed" in capsys.readouterr().out
+
+    def test_check_ready_failure_still_writes_failed_status(self, tmp_path, capsys, monkeypatch):
+        def boom(*args, **kwargs):
+            raise ConfigError("no usable provider")
+
+        monkeypatch.setattr("openbars.cli.main.check_ready", boom)
+        assert _run(_config(tmp_path)) == 2  # unchanged ConfigError exit code
+        document = _latest(tmp_path)
+        assert document["outcome"] == "failed"
+        assert document["error"] == "run aborted (ConfigError)"
+        assert "status: failed" in capsys.readouterr().out
+
+    def test_backend_init_failure_still_writes_failed_status(self, tmp_path, capsys, monkeypatch):
+        from openbars.storage.errors import StorageError
+
+        def boom(*args, **kwargs):
+            raise StorageError("backend unavailable")
+
+        monkeypatch.setattr("openbars.cli.main._open_backend", boom)
+        assert _run(_config(tmp_path)) == 1  # unchanged StorageError exit code
+        document = _latest(tmp_path)
+        assert document["outcome"] == "failed"
+        assert document["error"] == "run aborted (StorageError)"
+        assert "status: failed" in capsys.readouterr().out
+
+    def test_budget_blocked_run_records_skipped_outcome(self, tmp_path, capsys):
+        from dataclasses import replace
+
+        class Hourly(FakeProvider):
+            def capabilities(self):
+                (cap,) = super().capabilities()
+                return (replace(cap, max_bars_per_request=100),)
+
+        def build(settings, gate):
+            return {"hourly": Hourly("hourly", interval=Interval.H1, limit_per_minute=1)}
+
+        symbols = "[" + ",".join(f"S{i:03d}" for i in range(100)) + "]"
+        config = _config(tmp_path, intervals="[1h]", symbols=symbols, start="2026-01-05")
+        assert _run(config, factory=build) == 3  # the budget refusal keeps EXIT_BUDGET
+        document = _latest(tmp_path)
+        assert document["outcome"] == "skipped"
+        assert document["jobs"]["planned"] > 0
+        assert document["jobs"]["succeeded"] == 0 and document["jobs"]["failed"] == 0
+        assert document["jobs"]["skipped"] == document["jobs"]["planned"]
+        assert document["error"] is None
+        assert "status: skipped" in capsys.readouterr().out
 
     def test_config_command_never_prints_the_webhook_url_or_secret(self, tmp_path, capsys):
         config = _config(tmp_path, notify=_notify_block("https://example.invalid/hook?token=abc"))
@@ -711,6 +773,27 @@ def test_unset_secret_skips_the_target_and_never_calls_it(tmp_path, capsys):
     notification = _latest(tmp_path)["notifications"][0]
     assert (notification["outcome"], notification["attempts"], notification["error"]) == ("skipped", 0, "no_secret")
     assert "skipped" in captured.out
+
+
+def test_early_init_failure_still_delivers_the_failed_status_webhook(tmp_path, capsys):
+    def factory(settings, gate):
+        raise ConfigError("provider could not be built")
+
+    with _Stub([200], WEBHOOK_SECRET) as stub:
+        config = _config(tmp_path, notify=_notify_block(stub.url))
+        code = _run(config, factory=factory, env={"OPENBARS_WEBHOOK_SECRET": WEBHOOK_SECRET})
+        captured = capsys.readouterr()
+        requests = stub.requests
+
+    assert code == 2  # the ConfigError still decides the exit code
+    assert len(requests) == 1 and requests[0]["signature_ok"] is True
+    body = json.loads(requests[0]["body"])
+    document = _latest(tmp_path)
+    assert body["run_id"] == document["run_id"] and body["outcome"] == "failed"
+    assert "notifications" not in body
+    assert document["notifications"][0]["outcome"] == "delivered"
+    assert "status: failed" in captured.out and "delivered" in captured.out
+    assert WEBHOOK_SECRET not in captured.out + captured.err
 
 
 # --------------------------------------------------------------------------------------

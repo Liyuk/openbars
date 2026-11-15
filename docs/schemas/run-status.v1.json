@@ -43,9 +43,9 @@
       "$ref": "#/$defs/timestamp"
     },
     "outcome": {
-      "description": "noop: nothing planned or executed; success: every executed job finished; partial: some finished and some did not; failed: nothing finished and at least one job did not.",
+      "description": "noop: nothing was planned; skipped: work was planned but none of it ran (for example the request budget was not accepted); success: every executed job finished; partial: some finished and some did not; failed: nothing finished and at least one job did not.",
       "type": "string",
-      "enum": ["success", "partial", "failed", "noop"]
+      "enum": ["success", "partial", "failed", "skipped", "noop"]
     },
     "jobs": {
       "description": "Job counters for this invocation only.",

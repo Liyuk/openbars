@@ -207,9 +207,9 @@ OpenBars 采用 **BYOK（Bring Your Own Key）**：仓库不包含、不托管�
 
 ### 运行完成状态文件
 
-每次 `openbars run`（成功、部分失败、失败、无任务）结束时都会在 `<storage.path>/_status/` 下原子写入机器可读的完成文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。文档记录总体 `outcome`（`success` / `partial` / `failed` / `noop`）、任务计数，以及每个会话的 `tier`、`outcome`、本次实际写入的 raw / canonical 行数与数据源；不含密钥、DSN、绝对用户路径或 webhook URL。写失败只记 warning，不改变退出码；`openbars status --json` 直接输出 `latest.json`。
+每次 `openbars run`（成功、部分失败、失败、计划任务全部被跳过、无任务）结束时都会在 `<storage.path>/_status/` 下原子写入机器可读的完成文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。文档记录总体 `outcome`（`success` / `partial` / `failed` / `skipped` / `noop`）、任务计数，以及每个会话的 `tier`、`outcome`、本次实际写入的 raw / canonical 行数与数据源；不含密钥、DSN、绝对用户路径或 webhook URL。写失败只记 warning，不改变退出码；`openbars status --json` 直接输出 `latest.json`。
 
-可选的 `notify.webhooks` 会把同一份文档 POST 给一个或多个地址（`X-OpenBars-Event: run.completed`、`X-OpenBars-Signature` 为 HMAC-SHA256 签名、每次投递唯一的 delivery id），重试次数有限、指数退避，且所有投递共享一个总时限；投递结果写回 `notifications[]`（只含 URL 的 `sha256` 前 12 位），失败不影响退出码与已写数据。字段说明、验签方法与配置示例见 [docs/run-status.md](docs/run-status.md) 与 [JSON Schema](docs/schemas/run-status.v1.json)。
+可选的 `notify.webhooks` 会把同一份文档 POST 给一个或多个地址（`X-OpenBars-Event: run.completed`、每次投递唯一的 delivery id、时间戳，以及 `X-OpenBars-Signature: sha256=<hex>`，其中 `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`）。签名对象是 `runs/<run_id>.json` 去掉 `notifications` 后的原始 body 字节（不是重新序列化的 JSON）。重试次数有限、指数退避，且所有投递共享一个总时限；投递结果写回 `notifications[]`（只含 URL 的 `sha256` 前 12 位），失败不影响退出码与已写数据。字段说明、验签方法与配置示例见 [docs/run-status.md](docs/run-status.md) 与 [JSON Schema](docs/schemas/run-status.v1.json)。
 
 ## 免责声明
 

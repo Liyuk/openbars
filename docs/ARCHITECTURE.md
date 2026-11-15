@@ -156,19 +156,20 @@ data/
 Every `openbars run` ends by writing a schema-versioned document to `_status/`: `runs/<run_id>.json`
 (one per invocation, never overwritten), `latest.json` (the most recent) and
 `sessions/<market>/<interval>/<session_date>.json` (that session's latest result). It records the
-overall `outcome` (`success` / `partial` / `failed` / `noop`), job counters, and per session the
+overall `outcome` (`success` / `partial` / `failed` / `skipped` / `noop`), job counters, and per session the
 `tier`, the `outcome`, the raw and canonical rows this run wrote, and the contributing providers.
 The writes are atomic and a write failure is only a warning: it changes neither the exit code nor
 the stored data.
 
-The same document is the webhook payload (`notify.webhooks`), POSTed as
-`X-OpenBars-Event: run.completed` with an HMAC-SHA256 `X-OpenBars-Signature` over
-`"<timestamp>.<body>"`, a per-delivery id and a timestamp, with bounded exponential retries inside
-one overall time budget. Delivery results are appended to `notifications[]` in `runs/` and
-`latest.json` as `{url_hash, outcome, attempts, status_code, error}` — never the URL or the secret —
-and a delivery failure never changes the exit code. The files stay the fallback when an endpoint is
-down. Contract, field reference, retry rules and verification code:
-[run-status.md](run-status.md) and the [JSON Schema](schemas/run-status.v1.json).
+The same document is the webhook payload (`notify.webhooks`), POSTed with
+`X-OpenBars-Event: run.completed`, a per-delivery id and a timestamp. `X-OpenBars-Signature` is
+`sha256=<hex>`, where `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`; the signed body is the
+exact UTF-8 bytes of the document without its `notifications` key (not a re-serialisation).
+Retries are bounded and exponential inside one overall time budget. Delivery results are appended
+to `notifications[]` in `runs/` and `latest.json` as `{url_hash, outcome, attempts, status_code,
+error}` — never the URL or the secret — and a delivery failure never changes the exit code. The
+files stay the fallback when an endpoint is down. Contract, field reference, retry rules and
+verification code: [run-status.md](run-status.md) and the [JSON Schema](schemas/run-status.v1.json).
 
 ## Reading the data
 

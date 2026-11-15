@@ -428,50 +428,55 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
         started_at=started_at, storage_backend=settings.storage_backend, command=args.command
     )
     root = data_dir(settings, args.data)
-    # The gate needs the providers' policies; build once without it to read them.
-    probe = factory(settings, None)
-    check_ready(settings, probe, strict=True)  # before anything is written
-    root.mkdir(parents=True, exist_ok=True)
-    backend = _open_backend(settings, root)
-    state = _job_state(backend, root / "state.db")
-    policies = effective_policies(settings, probe)
-    gate = open_configured_quota_gate(settings, data_dir=root, policies=policies)
-    providers = factory(settings, gate)
-    notes = skipped_providers(settings, providers)
-
-    from openbars.core.models import Interval, Market
-
-    if Market.US in settings.selection.markets and Interval.H1 in settings.selection.intervals:
-        out.line("note: US 1h bars are stored raw; hourly canonical reconciliation is not available yet")
-
-    node = LocalNode(
-        providers,
-        store=state,
-        raw=backend.raw,
-        sink=make_sink(backend, providers, tally=recorder),
-        gate=gate,
-        feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
-        hourly_alignment=settings.us_hourly_alignment.value,
-        include_extended_hours=settings.include_extended_hours,
-        clock=clock,
-        redact=out._scrub,
-        tally=recorder,
-    )
-    orch = LocalOrchestrator(
-        state,
-        node,
-        policies=policies,
-        workers=max(1, args.workers),
-        lease_ttl=timedelta(seconds=args.lease_ttl),
-        lock_path=scheduler_lock_path(root / "state.db"),
-        clock=clock,
-        redact=out._scrub,
-    )
     plan: Plan | None = None
     report: Any = None
     attempts_before: dict[str, int] = {}
-    code = EXIT_OK
+    state: Any = None
+    aborted: str | None = None
+    # Start the guarded region here: provider construction, check_ready, backend / state /
+    # quota initialisation and planning can all fail before a job ever runs. Every one of
+    # those paths still writes the completion document (and sends its webhooks); the
+    # exception is re-raised afterwards, so ``run`` keeps exactly its previous exit code.
     try:
+        # The gate needs the providers' policies; build once without it to read them.
+        probe = factory(settings, None)
+        check_ready(settings, probe, strict=True)  # before anything is written
+        root.mkdir(parents=True, exist_ok=True)
+        backend = _open_backend(settings, root)
+        state = _job_state(backend, root / "state.db")
+        policies = effective_policies(settings, probe)
+        gate = open_configured_quota_gate(settings, data_dir=root, policies=policies)
+        providers = factory(settings, gate)
+        notes = skipped_providers(settings, providers)
+
+        from openbars.core.models import Interval, Market
+
+        if Market.US in settings.selection.markets and Interval.H1 in settings.selection.intervals:
+            out.line("note: US 1h bars are stored raw; hourly canonical reconciliation is not available yet")
+
+        node = LocalNode(
+            providers,
+            store=state,
+            raw=backend.raw,
+            sink=make_sink(backend, providers, tally=recorder),
+            gate=gate,
+            feeds={**DEFAULT_FEEDS, **{n: str(c.options["feed"]) for n, c in settings.providers.items() if c.options.get("feed")}},
+            hourly_alignment=settings.us_hourly_alignment.value,
+            include_extended_hours=settings.include_extended_hours,
+            clock=clock,
+            redact=out._scrub,
+            tally=recorder,
+        )
+        orch = LocalOrchestrator(
+            state,
+            node,
+            policies=policies,
+            workers=max(1, args.workers),
+            lease_ttl=timedelta(seconds=args.lease_ttl),
+            lock_path=scheduler_lock_path(root / "state.db"),
+            clock=clock,
+            redact=out._scrub,
+        )
         with orch:
             now = clock()
             _ingest_pairs(settings, providers, backend, now, notes, out)
@@ -479,8 +484,7 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
             _print_plan(out, plan, state, notes)
             attempts_before = _job_attempts(state, plan)
             if _budget_blocked(plan.budget, args.accept_budget, out):
-                code = EXIT_BUDGET
-                return code
+                return EXIT_BUDGET
             added = orch.submit(plan.jobs)
             out.line(f"submitted {added} new jobs")
             report = orch.run(until_idle=True, max_jobs=args.max_jobs)
@@ -499,11 +503,14 @@ def _run(args: argparse.Namespace, settings: Settings, out: _Out, factory: Provi
                 seen.add(err)
                 out.err(f"error: {err}")
         return EXIT_OK
+    except BaseException as exc:  # noqa: BLE001 - re-raised; only the status write is added
+        aborted = type(exc).__name__
+        raise
     finally:
         _write_run_status(
             settings=settings, root=root, out=out, recorder=recorder, plan=plan,
             report=report, state=state, attempts_before=attempts_before, clock=clock,
-            aborted=None if sys.exc_info()[0] is None else sys.exc_info()[0].__name__,
+            aborted=aborted,
         )  # fmt: skip
 
 
@@ -530,7 +537,7 @@ def _write_run_status(*, settings: Settings, root: Path, out: _Out, recorder: An
             jobs["succeeded"] = int(report.done)
             jobs["failed"] = int(report.failed) + int(report.dead)
             jobs["skipped"] = max(0, planned - int(report.claimed))
-        if plan is not None:
+        if plan is not None and state is not None:
             for job in plan.jobs:
                 row = state.load_job(job.job_id)
                 if row is None or row.state not in (JobState.DEAD, JobState.FAILED):
