@@ -97,6 +97,7 @@ class LocalNode:
         max_pages: int = MAX_PAGES,
         hourly_alignment: str = "session_open",
         include_extended_hours: bool = False,
+        tally: object | None = None,
     ) -> None:
         self.providers = dict(providers)
         self.store = store
@@ -109,6 +110,8 @@ class LocalNode:
         self.max_pages = max_pages
         self.hourly_alignment = hourly_alignment
         self.include_extended_hours = include_extended_hours
+        # Optional run-status tally: counts the raw bars stored by each fetch (#219).
+        self.tally = tally
 
     def markets(self) -> set[Market]:
         return {cap.market for p in self.providers.values() for cap in p.capabilities()}
@@ -204,6 +207,8 @@ class LocalNode:
             if batch.bars:
                 self.raw.append(batch)  # raw first; the store dedups replays
                 stats.written += len(batch.bars)
+                if self.tally is not None:
+                    self.tally.record_raw_bars(job.market, job.interval, batch.bars)  # type: ignore[attr-defined]
             partial = batch.error is not None or batch.next_cursor is not None
             self.store.finish_fetch(
                 job.provider, fetch_id, "partial" if partial else ("ok" if batch.bars else "empty"),

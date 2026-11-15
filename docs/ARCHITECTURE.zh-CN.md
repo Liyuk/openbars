@@ -107,6 +107,9 @@ data/
   ref/adjust_factors.parquet                # A 股复权因子（可选文件）
   raw-archive/provider=…/market=…/interval=…/…   # 已脱敏的响应旁路文件
   openbars.duckdb                           # 只含视图；可随时删除，按需重建
+  _status/latest.json                       # 最近一次运行的完成状态（#219）
+  _status/runs/<run_id>.json                # 每次运行一份，永不覆盖
+  _status/sessions/<market>/<interval>/<session_date>.json
 ```
 
 - 写入**不可变且原子**：每次 upsert 为每个涉及的分区写一个新的 `part-*.parquet`（临时文件、`fsync`、`os.replace`），已有分片从不修改。同键**后写者胜**，所以被取代的旧行可能留在旧分片里，直到 `openbars compact` 合并。重试任务不会重写未变化的内容。
@@ -114,6 +117,12 @@ data/
 - 写入方在 `data/.lock` 上串行，读取方不加锁。价格是 `decimal128(20,8)`，成交量是 `decimal128(28,8)`，从不经过二进制浮点。
 - `openbars usage`、`compact`、`retention` 与 `backup` 是维护命令；只有 `--apply` 才会改动文件。备份从不包含配置、dotenv、密钥或 DSN。
 - 完整的 schema、键与迁移规则见 [architecture-internals.md §10](architecture-internals.md#10-storage-layout-parquet--duckdb-by-default) 与 [source-contract.md](source-contract.md)（均为英文）。
+
+## 运行完成状态文件（与 webhook）
+
+每次 `openbars run` 结束（成功、部分失败、失败、无任务）都会往 `_status/` 写一份带 schema 版本的文档：`runs/<run_id>.json`（每次运行一份，永不覆盖）、`latest.json`（最近一次）与 `sessions/<market>/<interval>/<session_date>.json`（该会话最近一次结果）。内容包括总体 `outcome`（`success` / `partial` / `failed` / `noop`）、任务计数，以及每个会话的 freshness `tier`、会话 `outcome`、本次运行实际写入的 raw / canonical 行数与贡献的 sources。写入原子；写失败只记 warning，不改变退出码，也不影响已写数据。
+
+同一份文档也是 webhook 的 payload（`notify.webhooks`）：请求头带 `X-OpenBars-Event: run.completed`、`X-OpenBars-Signature: sha256=HMAC-SHA256(secret, "<timestamp>.<body>")`、每次投递唯一的 delivery id 与时间戳；重试次数有限、指数退避，且所有投递共享一个总时限，慢端点不会拖住日更。投递结果写回 `runs/` 与 `latest.json` 的 `notifications[]`（URL 的 `sha256` 前 12 位、outcome、attempts、状态码、短错误），从不写完整 URL 或 secret，投递失败也不改变退出码——文件始终是兜底。字段说明、重试规则与验签示例见 [run-status.md](run-status.md) 与 [JSON Schema](schemas/run-status.v1.json)（英文）。
 
 ## 读取数据
 

@@ -157,3 +157,19 @@ schedule:
   # Display/record only: common final-window example (00:15 ET = 21:15 PT); does not trigger runs.
   daily_at: "00:15"        # in the timezone below
   timezone: America/New_York
+
+# Run completion status files and optional webhooks (#219).
+# Every `openbars run` atomically writes <storage.path>/_status/runs/<run_id>.json,
+# latest.json and sessions/<market>/<interval>/<session_date>.json; see docs/run-status.md
+# and docs/schemas/run-status.v1.json. `openbars status --json` prints latest.json.
+# Webhooks are off until a target is listed; a target without a resolved secret_env is
+# skipped (no unsigned request is ever sent).
+notify:
+  total_timeout_seconds: 60        # overall budget for all deliveries of one run
+  webhooks: []
+  # - url: https://example.invalid/hook
+  #   secret_env: OPENBARS_WEBHOOK_SECRET   # variable NAME only; the value stays in .env / the environment
+  #   timeout_seconds: 10
+  #   max_attempts: 3
+  #   backoff_seconds: 2
+  #   max_backoff_seconds: 30
