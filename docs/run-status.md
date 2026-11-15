@@ -102,9 +102,10 @@ precedence as provider keys). The value is never written to disk or printed. A t
 `error: no_secret`) — OpenBars never sends an unsigned request.
 
 After the status file is written, each target receives one `POST` with
-`Content-Type: application/json`. The body is the exact UTF-8 bytes that would be written to
-`runs/<run_id>.json`, except that the `notifications` key is removed before serialisation (the
-signature covers exactly those bytes; do not re-serialise the JSON on the receiving side).
+`Content-Type: application/json`. The body is the document with the `notifications` key removed,
+serialised to UTF-8 by `render_document` (the same serialiser that writes the status files).
+Signing and delivery use that same byte sequence; verify the raw request body and do not
+re-serialise the JSON on the receiving side.
 
 | Header | Value |
 | --- | --- |

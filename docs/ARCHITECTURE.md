@@ -163,8 +163,10 @@ the stored data.
 
 The same document is the webhook payload (`notify.webhooks`), POSTed with
 `X-OpenBars-Event: run.completed`, a per-delivery id and a timestamp. `X-OpenBars-Signature` is
-`sha256=<hex>`, where `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`; the signed body is the
-exact UTF-8 bytes of the document without its `notifications` key (not a re-serialisation).
+`sha256=<hex>`, where `<hex> = HMAC-SHA256(secret, "<timestamp>.<body>")`; the signed and
+delivered body is the document without its `notifications` key, serialised to UTF-8 by
+`render_document` — signing and delivery use the same bytes, so receivers verify the raw body
+instead of re-serialising it.
 Retries are bounded and exponential inside one overall time budget. Delivery results are appended
 to `notifications[]` in `runs/` and `latest.json` as `{url_hash, outcome, attempts, status_code,
 error}` — never the URL or the secret — and a delivery failure never changes the exit code. The
